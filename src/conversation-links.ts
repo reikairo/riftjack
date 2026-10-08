@@ -3,14 +3,15 @@ import { Marked, type Token, type Tokens } from 'marked';
 import type { Account } from './accounts.js';
 import { PublicError } from './errors.js';
 import { randomUUID } from 'node:crypto';
-import { AGENT_TRIGGER, GRANT, NOTICE, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
+import { AGENT_TRIGGER, GRANT, NOTICE, REPLY, SERVICE, messageBody, type MatrixEvent, type Mentions } from './bridge.js';
 import type { State } from './state.js';
 import { isPrivateRoomState } from './private-room.js';
 import { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
 export { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
 
 type Agent = { bot: string; owner: string; home: string; session: string; thread?: string };
-type Room = { room: string; owner: string; bots: [string, string] };
+type ResponseMode = 'all' | 'mentions-or-replies';
+type Room = { room: string; owner: string; bots: [string, string]; responseModes?: Record<string, ResponseMode> };
 type Configuration = { version: 1; agents: Agent[]; rooms: Room[] };
 type Entry = { seq: number; id: string; sender: string; role: 'human' | 'agent'; body: string; type: string; reply?: string };
 type Cursor = { seq: number; offset: number };
@@ -90,6 +91,11 @@ export class ConversationLinks {
       for (const bot of room.bots) {
         if (accounts.some(a => a.userId === bot) && !c.agents.some(a => a.bot === bot)) throw new PublicError('Every local participant in a shared room must have an explicit session link.');
       }
+      if (room.responseModes !== undefined && (!room.responseModes || typeof room.responseModes !== 'object' ||
+          Array.isArray(room.responseModes) || Object.entries(room.responseModes).some(([bot, mode]) =>
+            !room.bots.includes(bot) || !['all', 'mentions-or-replies'].includes(mode)))) {
+        throw new PublicError('Shared-room responseModes must map participating bots to all or mentions-or-replies.');
+      }
     }
     const saved = existsSync(historyFile) ? JSON.parse(readFileSync(historyFile, 'utf8')) : {};
     this.credits = saved[CREDITS_KEY] ?? { agents: {}, grants: {} };
@@ -154,7 +160,7 @@ export class ConversationLinks {
     // agents read. A reply quote is removed exactly as the bridge does: only
     // when the event is a Matrix reply.
     if (event.sender === shared.owner && content.msgtype === 'm.text') {
-      const text = content['m.relates_to']?.['m.in_reply_to'] ? content.body.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '') : content.body;
+      const text = messageBody(event)!;
       if (text.trim().startsWith('!')) return false;
     }
     const members = JSON.stringify([shared.owner, ...shared.bots.slice().sort()]);
@@ -273,6 +279,27 @@ export class ConversationLinks {
     if (!this.room(bot, room) || event.type !== 'm.room.message') return true;
     const mentions = event.content?.['m.mentions']?.user_ids;
     return !Array.isArray(mentions) || mentions.length === 0 || mentions.includes(bot);
+  }
+  // Admission policy for the owner's messages, after the normal access check.
+  // Peer triggers and approval reactions keep their separate routing paths.
+  async shouldRespond(bot: string, room: string, event: MatrixEvent,
+    readEvent: (room: string, id: string) => Promise<MatrixEvent | undefined>,
+    allowed: () => Promise<boolean>): Promise<boolean> {
+    if (this.room(bot, room)?.responseModes?.[bot] !== 'mentions-or-replies' || event.type !== 'm.room.message') {
+      return this.addressed(bot, room, event);
+    }
+    const content = event.content;
+    const mentions = content?.['m.mentions']?.user_ids;
+    if (Array.isArray(mentions) && mentions.includes(bot)) return true;
+    const relation = content?.['m.relates_to'];
+    const text = messageBody(event);
+    // Commands are handled locally, not sent to the model. A command explicitly
+    // addressed only to another agent must still leave this agent alone.
+    if (content?.msgtype === 'm.text' && text?.trim().startsWith('!')) return this.addressed(bot, room, event);
+    const reply = relation?.['m.in_reply_to']?.event_id;
+    if (relation?.is_falling_back === true || typeof reply !== 'string' || !reply.startsWith('$') || !await allowed()) return false;
+    const target = await readEvent(room, reply);
+    return !!target && target.event_id === reply && target.type === 'm.room.message' && target.sender === bot && await allowed();
   }
   prompt(bot: string, room: string, event: MatrixEvent, prompt: string, steering = false): string {
     const a = this.agent(bot)!, trigger = event.content?.[AGENT_TRIGGER], notice = event.content?.[NOTICE];

@@ -431,7 +431,7 @@ async function main() {
           if (mention && bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
           return;
         }
-        if (!links.addressed(account.userId, room, event)) return;
+        if (!await links.shouldRespond(account.userId, room, event, reactionTarget, () => privateRoom(room, shared.owner))) return;
       }
       // Serialize admission/observations, not model work: confirmations and
       // same-room steering must still get through while the agent is running.

@@ -26,7 +26,7 @@ export const AGENT_TRIGGER = 'riftjack.trigger', SERVICE = 'riftjack.service', R
 export type Notice = 'background' | 'timer' | 'reaction';
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
-  content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } };
+  content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; is_falling_back?: boolean; 'm.in_reply_to'?: { event_id: string } };
     [AGENT_TRIGGER]?: { agent: string; event: string; events?: string[] }; [SERVICE]?: unknown; [REPLY]?: unknown; [GRANT]?: unknown; [NOTICE]?: Notice };
 };
 export type Mentions = { text: string; mentions: string[]; error?: string };
@@ -87,6 +87,12 @@ type Active = {
 export function sessionKey(room: string, event: MatrixEvent) {
   const relation = event.content?.['m.relates_to'];
   return JSON.stringify([room, event.sender, relation?.rel_type === 'm.thread' ? relation.event_id : null]);
+}
+
+export function messageBody(event: MatrixEvent): string | undefined {
+  const content = event.content;
+  return content?.msgtype === 'm.text' && content['m.relates_to']?.['m.in_reply_to']
+    ? content.body?.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '') : content?.body;
 }
 
 export class Bridge {
@@ -162,8 +168,7 @@ export class Bridge {
     if (event.type !== 'm.room.message' || (event.content?.msgtype !== 'm.text' && !media) || !event.event_id) return;
     if (!Number.isFinite(event.origin_server_ts) || (!fromQueue && event.origin_server_ts! < o.since)) return;
     if (event.content?.['m.relates_to']?.rel_type === 'm.replace') return;
-    const body = !media && event.content?.['m.relates_to']?.['m.in_reply_to']
-      ? event.content.body?.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '') : event.content?.body;
+    const body = messageBody(event);
     const prompt = body?.trim() || (media ? 'An attachment was sent. Describe what you can inspect, or ask what to do with it.' : '');
     if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender)) return;
     if (background) {

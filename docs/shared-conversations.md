@@ -95,7 +95,8 @@ Matrix thread. Never guess a session ID or replace it with another agent's ID.
     {"bot":"@reviewer:example.com", "owner":"@alice:example.com", "home":"!reviewer-dm:example.com", "session":"existing-reviewer-session"}
   ],
   "rooms": [
-    {"room":"!project:example.com", "owner":"@alice:example.com", "bots":["@builder:example.com", "@reviewer:example.com"]}
+    {"room":"!project:example.com", "owner":"@alice:example.com", "bots":["@builder:example.com", "@reviewer:example.com"],
+      "responseModes":{"@reviewer:example.com":"mentions-or-replies"}}
   ]
 }
 ```
@@ -118,8 +119,22 @@ the same agent session in two connectors.
 
 ## Messages and turns
 
-- A Matrix **@mention** addresses one agent. An unaddressed human message in the
-  shared room addresses both. Plain text spelling a display name is not a mention.
+- Each configured shared room can set `responseModes` per participating bot.
+  `all` (the default) retains existing routing: an unaddressed owner message
+  addresses both agents; explicit Matrix **@mentions** address their targets.
+  `mentions-or-replies` starts or steers the agent only on a Matrix @mention or
+  an explicit reply to that bot's message. The connector fetches the replied-to
+  event in the same room and checks its actual sender; missing events or failed
+  reads never fall back to broadcasting. Plain display names, text quotes and
+  automatic thread fallback replies are not invocations. An explicit reply can
+  address its author even when another agent is also mentioned.
+- Response modes apply only to the owner's messages in configured shared rooms;
+  ordinary private chats and peer-credit triggers are unchanged. Unaddressed
+  messages remain observations for the next accepted turn. Local `!` commands
+  and confirmation reactions still work without a mention; commands explicitly
+  addressed only to another agent are ignored. All existing access, approval
+  and thread-scope checks still apply. Edit the configuration while stopped,
+  then restart the connector to apply a mode.
 - In the shared room an agent may answer a human message with exactly
   `NO_REPLY`, for example when it addresses the other agent; nothing is sent
   then. Command results are always sent. Ordinary turns in both shared and
