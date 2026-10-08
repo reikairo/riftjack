@@ -2,6 +2,8 @@ import type { BackgroundAction } from './background-tasks.js';
 import type { CompactionPhase } from './compaction-notices.js';
 import { taskTyping } from './task-typing.js';
 import { roomMessageDelivery, type MessageRequest, type RoomMessageTool } from './room-messages.js';
+import type { ToolAction } from './tool-mcp.js';
+import type { NoteContext } from './room-notes.js';
 import type { SendAttachments } from './attachment-delivery.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
@@ -31,7 +33,7 @@ export type MatrixEvent = {
 };
 export type Mentions = { text: string; mentions: string[]; error?: string };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
-export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool };
+export type BackendHooks = { background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool; roomNotes?: ToolAction };
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
@@ -56,6 +58,10 @@ type Options = {
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   roomMessages?: (request: MessageRequest, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
+  roomNotes?: (input: unknown, room: string) => string;
+  notesCommand?: (room: string, sender: string, prompt: string) => string;
+  notesContext?: (key: string, room: string) => NoteContext;
+  notesReset?: (key: string) => void;
   // Account usage and limits of the engine.
   usage?: (signal: AbortSignal) => Promise<string>;
   report: (error: unknown) => void;
@@ -189,6 +195,16 @@ export class Bridge {
     admitted();
     const reply = (text: string) => this.reply(room, event, text);
     if (this.stopped || o.isStopping?.()) { await reply('The connector is restarting or stopping. Please retry in a few seconds.'); return; }
+    if (!media && /^!notes(?:\s|$)/.test(prompt)) {
+      if (!o.notesCommand) { await reply('Room notes are not available for this bot.'); return; }
+      if (event.content?.[AGENT_TRIGGER] || event.content?.[NOTICE]) { await reply('Notes commands require a human message.'); return; }
+      if (!o.state.claim(JSON.stringify(['room-notes', room, event.event_id]))) return;
+      try {
+        if (!(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender)) return;
+        await reply(o.notesCommand(room, event.sender, prompt));
+      } catch (error) { o.report(error); await reply(errorMessage(error, 'Could not update room notes')); }
+      return;
+    }
     if (!media && /^!(approve|deny|answer)(?:\s|$)/.test(prompt)) {
       const current = this.active;
       if (!current || current.key !== key || current.sender !== event.sender) { await reply('No pending confirmation in this conversation.'); return; }
@@ -285,7 +301,7 @@ export class Bridge {
         : 'A task is running in this bot. Only messages in its active conversation can steer it; wait before resetting or starting another conversation.');
       return;
     }
-    if (verb === 'reset') { o.state.reset(key); await reply('Your conversation state has been reset.'); return; }
+    if (verb === 'reset') { o.state.reset(key); o.notesReset?.(backendKey); await reply('Your conversation state has been reset.'); return; }
     const controller = new AbortController();
     let markReady!: () => void;
     const ready = new Promise<void>(resolve => { markReady = resolve; });
@@ -341,12 +357,24 @@ export class Bridge {
         const messages = o.roomMessages && roomMessageDelivery((request, signal) =>
           o.roomMessages!(request, { room, event: requestEvent, key: backendKey }, signal));
         const hooks: BackendHooks = {
-          compaction: o.compaction ? async phase => {
+          roomNotes: o.roomNotes ? async (input, callSignal) => {
+            const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
+            signal.throwIfAborted();
+            await this.authorize(room, current);
+            signal.throwIfAborted();
+            if ((requestEvent.content?.[AGENT_TRIGGER] || requestEvent.content?.[NOTICE]) &&
+                !['read', 'history'].includes((input as { action?: string } | null)?.action ?? '')) {
+              throw new PublicError('Editing notes requires a human-started turn.');
+            }
+            return o.roomNotes!(input, room);
+          } : undefined,
+          compaction: o.compaction || o.notesReset ? async phase => {
+            if (phase === 'completed' || phase === 'unconfirmed') o.notesReset?.(backendKey);
             try {
               // Unlike progress, an interrupted-compaction notice is useful after
               // cancellation too. The destination rechecks access independently.
               if (!o.isAuthorized(current.sender)) return;
-              await o.compaction!(phase, { room, sender: current.sender });
+              await o.compaction?.(phase, { room, sender: current.sender });
             } catch (error) { o.report(error); }
           } : undefined,
           roomMessages: messages ? async (input, callSignal, outbox) => {
@@ -377,12 +405,13 @@ export class Bridge {
             await this.reply(room, requestEvent, text, true, 'm.text');
           },
         };
+        const noteContext = !next.prompt.startsWith('!') ? o.notesContext?.(backendKey, room) : undefined;
         const task = verb === 'publish' ? o.publish!(publication, controller.signal, interact, () => this.authorize(room, current))
-          : o.run(verb as Mode, next.prompt.startsWith('!') ? next.prompt : o.decoratePrompt?.(room, next.event, next.prompt) ?? next.prompt,
+          : o.run(verb as Mode, (noteContext?.text ?? '') + (next.prompt.startsWith('!') ? next.prompt : o.decoratePrompt?.(room, next.event, next.prompt) ?? next.prompt),
             backendKey, controller.signal, event.sender, next.attachments, interact, publish, hooks);
         current.markReady();
         let result: string | BackendReply;
-        try { result = await task; if (verb !== 'publish' && !next.prompt.startsWith('!')) o.promptDelivered?.(); }
+        try { result = await task; noteContext?.delivered(); if (verb !== 'publish' && !next.prompt.startsWith('!')) o.promptDelivered?.(); }
         finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
@@ -487,8 +516,10 @@ export class Bridge {
       active.controller.signal.throwIfAborted();
       if (active.failed) throw new PublicError('The task failed before your update could be applied. Please resend your message.');
       await this.authorize(room, active);
-      const accepted = active.running && await o.steer!(o.decoratePrompt?.(room, event, prompt, true) ?? prompt,
+      const noteContext = o.notesContext?.(active.backendKey, room);
+      const accepted = active.running && await o.steer!((noteContext?.text ?? '') + (o.decoratePrompt?.(room, event, prompt, true) ?? prompt),
         active.backendKey, active.controller.signal, active.sender, attachments);
+      if (accepted) noteContext?.delivered();
       if (!accepted) active.followups.push({ prompt, event, attachments });
       try {
         if (!feedback) await this.reply(room, event, accepted ? 'Added your message to the current task.' : o.queuedUpdateMessage || 'The current task is finishing. Your message will be processed next.');

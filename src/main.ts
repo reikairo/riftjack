@@ -1,4 +1,5 @@
 import { linkedRoomMessages } from './room-messages.js';
+import { RoomNotes, notesAction, notesCommand } from './room-notes.js';
 import { sendCompactionNotice } from './compaction-notices.js';
 import { sendOwnerDiagnostic } from './owner-diagnostics.js';
 import { withEngineSettings } from './engine-settings.js';
@@ -135,6 +136,7 @@ async function main() {
     },
   });
   const state = new State(join(config.dataDir, 'sessions.json'));
+  const notes = new RoomNotes(join(config.dataDir, 'room-notes.json'));
   const links = new ConversationLinks(join(config.dataDir, 'conversation-links.json'),
     join(config.dataDir, 'shared-room-history.json'), accounts.list(), state, access.owner);
   const clients = new Map<string, { client: MatrixClient; bridge: Bridge | WorkerBridge; privateRoom: (room: string, sender: string) => Promise<boolean> }>();
@@ -287,6 +289,10 @@ async function main() {
       typing: (room, typing, timeout) => client.setTyping(room, typing, timeout),
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
       decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering) : undefined,
+      notesContext: account.kind === 'manager' ? undefined : (key, room) => notes.context(JSON.stringify([account.userId, key]), room),
+      notesReset: key => notes.forget(JSON.stringify([account.userId, key])),
+      notesCommand: account.kind === 'manager' ? undefined : (room, sender, prompt) => notesCommand(notes, room, sender, prompt),
+      roomNotes: account.kind === 'manager' ? undefined : (input, room) => notesAction(notes, room, account.userId, input, botConfig.sandbox !== 'read-only'),
       promptDelivered: linkedAgent ? () => links.acknowledge(account.userId) : undefined,
       roomMessages: linkedAgent ? (request, context, signal) => linkedRoomMessages(links, account.userId, context, {
         allowed: privateRoom, stopping: () => stopping || restart.pending,

@@ -33,6 +33,9 @@ export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
     '### Restart · owner only',
     '- `!restart` — restart all bots.\n- `!restart supervisor` — also restart the supervisor process.',
     'All active tasks must finish first. The startup notice returns to the same chat or thread.',
+    '### Room notes',
+    '- `!notes` — read this room’s notes and version.\n- `!notes set VERSION TEXT` — replace them.\n- `!notes clear VERSION` — clear them.\n- `!notes history` — read previous versions.\n- `!notes restore OLD_VERSION CURRENT_VERSION` — restore an older version.',
+    'Notes are shared by bots and threads in this room, persist after reset, and are supplied when the room or version changes. Limit: 4096 UTF-8 bytes and 20 previous versions.',
     '---',
     'Messages starting with `!` are commands. Unknown commands are not sent to the agent. Create bots and manage access in **Bot Manager**. “Owner” means the initial connector owner.',
   ].join('\n\n');
