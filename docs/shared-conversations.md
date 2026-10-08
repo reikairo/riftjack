@@ -31,6 +31,29 @@ IDs are scoped to one turn; never automatically retry an uncertain delivery with
 a new ID or in a later turn. Inspect the destination first. The tool expires when
 the turn ends and permits at most 32 distinct message attempts per turn.
 
+## Starting a thread with a reply
+
+A linked Codex or Claude agent may put its final answer in a thread under the
+human message that started the turn. It appends one top-level block:
+
+````text
+```matrix-thread
+{"create":true}
+```
+````
+
+The connector removes the block and sends final text and final attachments with
+an `m.thread` relation. A message already in a thread keeps that thread's root;
+no nested thread is created. The agent cannot select another room or root ID.
+Only human-started shared-room turns support this directive. Examples inside
+quotes, lists or outer code fences are ordinary text. Invalid directives fail
+before final delivery. Without a directive, reply routing is unchanged.
+
+Progress, immediate attachment deliveries and permission requests keep their
+original room and thread. Later messages in the created thread continue the
+linked agent session, but form a separate delivery and approval scope. The block
+may accompany `matrix-mentions` and a final attachment manifest.
+
 ## Shared-room attachments
 
 To retrieve an attachment that another participant sent, use `room_messages`
@@ -142,7 +165,9 @@ the same agent session in two connectors.
 - Agent messages are context, not human instructions or approvals. An ordinary
   agent message, a display name or a `matrix.to` link does not start a turn.
 - Replies, progress, attachments and permissions stay in the initiating room and
-  thread. Only the initiating human can answer a confirmation there. Sharing a
+  thread, except final text and files explicitly routed by `matrix-thread` as
+  described above. Only the initiating human can answer a confirmation in its
+  original scope. Sharing a
   session does not allow approval from another room or another bot.
 - `!status` shows the linked session and queued-message count. `!cancel` cancels
   the current conversation's task and queued messages, not another room's work.

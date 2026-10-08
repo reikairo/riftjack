@@ -1,4 +1,5 @@
 import { linkedRoomMessages } from './room-messages.js';
+import { threadRelation } from './thread-reply.js';
 import { sendCompactionNotice } from './compaction-notices.js';
 import { sendOwnerDiagnostic } from './owner-diagnostics.js';
 import { withEngineSettings } from './engine-settings.js';
@@ -214,12 +215,6 @@ async function main() {
         if ((error as { statusCode?: number })?.statusCode === 404) return;
         throw error;
       }
-    };
-    const threadRelation = (event: MatrixEvent) => {
-      const relation = event.content?.['m.relates_to'];
-      return relation?.rel_type === 'm.thread'
-        ? { rel_type: 'm.thread', event_id: relation.event_id }
-        : undefined;
     };
     let bridge: Bridge | WorkerBridge;
     if (account.kind === 'grok') {
