@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Bridge, messageParts, sessionKey, type Backend, type MatrixEvent, type Mode } from '../src/bridge.js';
 import { isPrivateRoom } from '../src/private-room.js';
 import { State } from '../src/state.js';
+import { RunJournal } from '../src/run-journal.js';
 import { RestartController, RESTART_EXIT_CODE } from '../src/restart.js';
 import { Accounts, provision } from '../src/accounts.js';
 import { parseProfileRequest, resolveProfileTarget } from '../src/bot-profile.js';
@@ -155,6 +156,96 @@ function fixture(t: { after(fn: () => void): void }, kind: Mode = 'codex', runne
   });
   return { bridge, calls, replies, errors, state, file };
 }
+
+test('run journal records model and delivery stages without retaining message contents', async t => {
+  const base = fixture(t), journal = new RunJournal(base.file + '.runs');
+  const key = sessionKey('!dm:test', event());
+  const f = fixture(t, 'codex', async () => {
+    assert.match(journal.summary(key), /active; last stage: running/);
+    return 'private answer';
+  }, true, { journal, status: () => 'status', reply: async (_room, _event, text) => {
+    if (text === 'private answer') assert.match(journal.summary(key), /active; last stage: delivering/);
+  } });
+  await f.bridge.handle('!dm:test', event('private prompt'));
+  assert.match(journal.summary(key), /completed; last stage: delivering/);
+  assert.doesNotMatch(journal.summary(key), /private prompt|private answer/);
+  assert.doesNotMatch(readFileSync(base.file + '.runs', 'utf8'), /private prompt|private answer/);
+  await f.bridge.handle('!dm:test', event('!status', '$status'));
+  await f.bridge.handle('!dm:test', event('!help', '$help'));
+  assert.equal((journal.summary(key).match(/last stage:/g) ?? []).length, 1);
+  assert.deepEqual(f.errors, []);
+});
+
+test('failed final delivery is journaled as uncertain and never reruns the backend', async t => {
+  const base = fixture(t), journal = new RunJournal(base.file + '.runs');
+  let runs = 0;
+  const f = fixture(t, 'codex', async () => { runs++; return 'result'; }, true, {
+    journal, reply: async (_room, _event, text) => { if (text === 'result') throw new Error('Unknown delivery'); },
+  });
+  await f.bridge.handle('!dm:test', event());
+  await f.bridge.handle('!dm:test', event());
+  assert.equal(runs, 1);
+  const restored = new RunJournal(base.file + '.runs');
+  assert.match(restored.summary(sessionKey('!dm:test', event())), /failed; last stage: delivering/);
+});
+
+test('journal summaries stay in the exact room, sender and thread even for linked agents', async t => {
+  const base = fixture(t), journal = new RunJournal(base.file + '.runs');
+  const f = fixture(t, 'codex', undefined, true, { journal, linkedSession: () => 'linked', status: () => 'status', isAuthorized: () => true });
+  await f.bridge.handle('!dm:test', event());
+  await f.bridge.handle('!dm:test', event('!status', '$status1'));
+  assert.match(f.replies.at(-1)!, /Recent connector runs/);
+  for (const [room, e] of [
+    ['!other:test', event('!status', '$status2')],
+    ['!dm:test', { ...event('!status', '$status3'), sender: '@other:test' }],
+    ['!dm:test', { ...event('!status', '$status4'), content: { ...event('!status').content, 'm.relates_to': { rel_type: 'm.thread', event_id: '$thread' } } }],
+  ] as [string, MatrixEvent][]) {
+    await f.bridge.handle(room, e);
+    assert.doesNotMatch(f.replies.at(-1)!, /Recent connector runs/);
+  }
+});
+
+test('journal records cancellation without treating it as a rollback', async t => {
+  const base = fixture(t), journal = new RunJournal(base.file + '.runs'), started = gate();
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, signal) => {
+    started.release();
+    await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    return 'unreachable';
+  }, true, { journal });
+  const task = f.bridge.handle('!dm:test', event());
+  await started.promise;
+  await f.bridge.handle('!dm:test', event('!cancel', '$cancel'));
+  await task;
+  const text = journal.summary(sessionKey('!dm:test', event()));
+  assert.match(text, /cancelled; last stage: running/);
+  assert.match(text, /may have made changes/);
+});
+
+test('separately executed follow-ups get their own journal entries', async t => {
+  const base = fixture(t), journal = new RunJournal(base.file + '.runs'), started = gate(), finish = gate();
+  let runs = 0;
+  const f = fixture(t, 'codex', async () => {
+    if (++runs === 1) { started.release(); await finish.promise; }
+    return 'result';
+  }, true, { journal, steer: async () => { finish.release(); return false; } });
+  const task = f.bridge.handle('!dm:test', event());
+  await started.promise;
+  await f.bridge.handle('!dm:test', event('second', '$second'));
+  await task;
+  const entries = JSON.parse(readFileSync(base.file + '.runs', 'utf8')).entries;
+  assert.equal(runs, 2);
+  assert.deepEqual(entries.map((e: any) => [e.event, e.outcome]), [['$1', 'completed'], ['$second', 'completed']]);
+});
+
+test('journal write failure prevents invoking the backend', async t => {
+  const base = fixture(t), journal = new RunJournal(base.file + '.runs');
+  mkdirSync(base.file + '.runs.tmp');
+  const f = fixture(t, 'codex', undefined, true, { journal });
+  await f.bridge.handle('!dm:test', event());
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.errors.length, 1);
+  assert.equal(journal.summary(sessionKey('!dm:test', event())), '');
+});
 
 test('task diagnostics use a separate owner route and never replace the public failure', async t => {
   const error = new OwnerDiagnosticError('Public failure', 'owner-only details');

@@ -199,6 +199,26 @@ The separate **Last CLI session report** section shows metadata reported when Co
 
 For ordinary bots, reports are scoped to the bot, sender, room and Matrix thread, survive connector restarts, and are cleared by `!reset`. A new conversation has no report until its CLI starts a task. Linked rooms share the linked session report; `!reset` is disabled for linked agents. Grok's `!status` shows queue/lease/delivery counts; its model settings and workspace are controlled by the external worker and are not reported to Riftjack.
 
+## Connector run journal
+
+For Codex and Claude, `!status` also shows the five latest connector runs in the
+exact chat, sender and thread, even when linked rooms share an engine session.
+The journal retains up to 100 runs per bot in `run-journal.json` under that bot's
+data directory. It records run IDs, originating event IDs, conversation scope,
+timestamps, preparation/engine/delivery stages and outcomes, not prompts,
+responses, tool arguments or credentials. History remains after `!reset`.
+
+After a connector restart, unfinished runs are marked `interrupted`, preserving
+their last recorded stage. No run is resumed or replayed from this journal.
+Inspect the engine session, working tree and delivery destination before asking
+for a retry: a failed, cancelled or interrupted run may already have performed
+actions or sent part of a response. `completed` means the connector finished
+handling the run, not that the requested task succeeded. Live steering updates
+belong to the current run; separately executed follow-ups get their own entries.
+This is a bounded operational record, not a durable tool-call audit or an
+exactly-once guarantee for external actions. Invalid journal state stops bot
+startup rather than silently discarding recovery evidence.
+
 ## Reviewed publication
 
 Codex and Claude Code can request publication themselves through the `prepare_publish` MCP tool. Ask the bot to publish committed changes; it supplies `repository`, `remote` and `branch`. Riftjack sends the HTML review to the current conversation, then asks for confirmation. The tool waits for your decision and returns the publication result to the agent. There is no keyword in the agent's reply that triggers a push.
