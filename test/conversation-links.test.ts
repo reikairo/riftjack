@@ -23,7 +23,7 @@ test('ordinary routing carries only current context and omits unchanged rules an
   for (const steering of [false, true]) {
     const prompt = f.links.prompt(bot, home, message('Hello'), 'Hello', steering);
     const context = JSON.parse(prompt.split('\n')[1]);
-    assert.deepEqual(context, { room: home, visibility: 'private', human, author: human, trigger: 'human-message' });
+    assert.deepEqual(context, { bot, room: home, visibility: 'private', human, author: human, trigger: 'human-message' });
     assert.ok(prompt.endsWith('Current human message:\nHello'));
     assert.doesNotMatch(prompt, /Matrix routing rules|matrix-mentions|unreadSharedMessages|remainingMessages/);
     assert.ok(prompt.length < 300);

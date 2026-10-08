@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Bridge, messageParts, sessionKey, type Backend, type MatrixEvent, type Mode } from '../src/bridge.js';
 import { isPrivateRoom } from '../src/private-room.js';
+import { matrixPrompt } from '../src/message-context.js';
 import { State } from '../src/state.js';
 import { RestartController, RESTART_EXIT_CODE } from '../src/restart.js';
 import { Accounts, provision } from '../src/accounts.js';
@@ -286,6 +287,51 @@ test('duplicate deliveries only run once and survive restart', async t => {
   await Promise.all([f.bridge.handle('!dm:test', event()), f.bridge.handle('!dm:test', event())]);
   assert.equal(f.calls.length, 1);
   assert.equal(new State(f.file).claim(JSON.stringify(['@bot:test', '$1'])), false);
+});
+
+for (const kind of ['codex', 'claude'] as const) test(`${kind} gets private context on initial, steered and fallback turns`, async t => {
+  const started = gate(), finish = gate();
+  const prompts: string[] = [], updates: string[] = [];
+  const f = fixture(t, kind, async (_mode, prompt) => {
+    prompts.push(prompt);
+    if (prompts.length === 1) { started.release(); await finish.promise; }
+    return 'answer';
+  }, true, {
+    decoratePrompt: (room, e, prompt) => matrixPrompt('@bot:example.com', room, e, prompt),
+    steer: async prompt => { updates.push(prompt); return updates.length === 1; },
+  });
+  await f.bridge.handle('!dm:test', event('!status', '$status'));
+  assert.equal(prompts.length, 0);
+  const task = f.bridge.handle('!dm:test', event('first', '$first'));
+  await started.promise;
+  await f.bridge.handle('!dm:test', event('second', '$second'));
+  await f.bridge.handle('!dm:test', event('third', '$third'));
+  finish.release(); await task;
+  for (const prompt of [...prompts, ...updates]) {
+    const context = JSON.parse(prompt.split('\n')[1]);
+    assert.equal(context.room, '!dm:test');
+    assert.equal(context.human, '@owner:test');
+    assert.equal(context.author, '@owner:test');
+    assert.equal(context.visibility, 'private');
+    assert.equal(context.bot, '@bot:example.com');
+  }
+  assert.equal(prompts.length, 2); assert.equal(updates.length, 2);
+  assert.ok(prompts[0].endsWith('\nfirst'));
+  assert.ok(prompts[1].endsWith('\nthird'));
+});
+
+test('a bang-prefixed attachment caption still receives context instead of becoming a command', async t => {
+  const image = { path: '/picture.png', name: 'picture.png', image: true, mimetype: 'image/png', size: 3 };
+  let received = '', delivered = 0;
+  const f = fixture(t, 'codex', async (_mode, prompt) => { received = prompt; return 'answer'; }, true, {
+    decoratePrompt: (room, e, prompt) => matrixPrompt('@bot:example.com', room, e, prompt),
+    receive: async () => image,
+    promptDelivered: () => { delivered++; },
+  });
+  await f.bridge.handle('!dm:test', { ...event('!caption'), content: { msgtype: 'm.image', body: '!caption' } });
+  assert.equal(JSON.parse(received.split('\n')[1]).human, '@owner:test');
+  assert.ok(received.endsWith('\n!caption'));
+  assert.equal(delivered, 1);
 });
 
 test('separate DMs and threads have separate conversations; reset persists', async t => {

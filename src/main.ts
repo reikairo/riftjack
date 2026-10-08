@@ -25,6 +25,7 @@ import { inlineCode, markdownText, managerBotList } from './manager-format.js';
 import { createMatrixUser, parseUserCreation } from './matrix-users.js';
 import { isPrivateRoom } from './private-room.js';
 import { ConversationLinks, mentionText } from './conversation-links.js';
+import { matrixPrompt } from './message-context.js';
 import { sendConfirmation } from './confirmation-message.js';
 import { createBackend } from './backends.js';
 import { Accounts, parseManagerRequest, provision, PublicError, type Account } from './accounts.js';
@@ -286,7 +287,8 @@ async function main() {
       since, timeoutMs: config.timeoutMs, state, report: error => diagnostics(error, account.userId),
       typing: (room, typing, timeout) => client.setTyping(room, typing, timeout),
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
-      decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering) : undefined,
+      decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering)
+        : account.kind === 'codex' || account.kind === 'claude' ? (room, event, prompt) => matrixPrompt(account.userId, room, event, prompt) : undefined,
       promptDelivered: linkedAgent ? () => links.acknowledge(account.userId) : undefined,
       roomMessages: linkedAgent ? (request, context, signal) => linkedRoomMessages(links, account.userId, context, {
         allowed: privateRoom, stopping: () => stopping || restart.pending,

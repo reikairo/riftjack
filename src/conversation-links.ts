@@ -3,7 +3,8 @@ import { Marked, type Token, type Tokens } from 'marked';
 import type { Account } from './accounts.js';
 import { PublicError } from './errors.js';
 import { randomUUID } from 'node:crypto';
-import { AGENT_TRIGGER, GRANT, NOTICE, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
+import { matrixPrompt } from './message-context.js';
+import { AGENT_TRIGGER, GRANT, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
 import type { State } from './state.js';
 import { isPrivateRoomState } from './private-room.js';
 import { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
@@ -275,7 +276,7 @@ export class ConversationLinks {
     return !Array.isArray(mentions) || mentions.length === 0 || mentions.includes(bot);
   }
   prompt(bot: string, room: string, event: MatrixEvent, prompt: string, steering = false): string {
-    const a = this.agent(bot)!, trigger = event.content?.[AGENT_TRIGGER], notice = event.content?.[NOTICE];
+    const a = this.agent(bot)!, trigger = event.content?.[AGENT_TRIGGER];
     const shared = this.room(bot, room);
     const shownBefore = !!trigger && !!shared && this.shownBefore(bot, room, trigger.events?.length ? trigger.events : [trigger.event]);
     const rooms = steering ? [] : shared ? [shared] : this.config.rooms.filter(r => r.bots.includes(bot));
@@ -312,16 +313,10 @@ export class ConversationLinks {
         !trigger?.events?.includes(m.id) && !log.quoted?.[bot]?.includes(m.id)).length;
     }
     if (!steering) this.deliveries.set(bot, delivery);
-    return 'Matrix message context:\n'
-      // A background result or timer is written by the connector; reaction feedback describes the human's reaction.
-      + JSON.stringify({ room, visibility: shared ? 'shared' : 'private', human: a.owner,
-        author: trigger?.agent ?? (notice && notice !== 'reaction' ? 'connector' : event.sender),
-        trigger: trigger ? 'agent-mention' : notice ?? 'human-message', ...(shared && { participants: [shared.owner, ...shared.bots] }),
+    return matrixPrompt(bot, room, event, prompt, { visibility: shared ? 'shared' : 'private', human: a.owner,
+        ...(shared && { participants: [shared.owner, ...shared.bots] }),
         ...(unread.length && { unreadSharedMessages: unread }), ...(remainingMessages && { remainingMessages }), ...(shared && { peerCredit: this.peerCredit(bot) }), ...(shownBefore && { alreadyDelivered: true }),
-        ...(connectorNotes.length && { connectorNotes }) })
-      + (trigger || notice ? '\nCurrent connector notice:\n' : '\nCurrent human message:\n')
-      + (shownBefore ? 'This mention was already shown to you as an unread observation in an earlier turn. '
-        + 'If you have already answered it, a second answer is not needed: reply with exactly NO_REPLY.\n' : '') + prompt;
+        ...(connectorNotes.length && { connectorNotes }) });
   }
   // Whether a successful earlier turn already delivered these messages to the
   // agent as observations: its read position passed them without quoting them.

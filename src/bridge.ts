@@ -377,16 +377,17 @@ export class Bridge {
             await this.reply(room, requestEvent, text, true, 'm.text');
           },
         };
+        const command = !isMedia(next.event.content?.msgtype) && next.prompt.startsWith('!');
         const task = verb === 'publish' ? o.publish!(publication, controller.signal, interact, () => this.authorize(room, current))
-          : o.run(verb as Mode, next.prompt.startsWith('!') ? next.prompt : o.decoratePrompt?.(room, next.event, next.prompt) ?? next.prompt,
+          : o.run(verb as Mode, command ? next.prompt : o.decoratePrompt?.(room, next.event, next.prompt) ?? next.prompt,
             backendKey, controller.signal, event.sender, next.attachments, interact, publish, hooks);
         current.markReady();
         let result: string | BackendReply;
-        try { result = await task; if (verb !== 'publish' && !next.prompt.startsWith('!')) o.promptDelivered?.(); }
+        try { result = await task; if (verb !== 'publish' && !command) o.promptDelivered?.(); }
         finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
-        const command = next.prompt.startsWith('!'), responseEvent = next.event;
+        const responseEvent = next.event;
         const files = typeof result === 'string' ? [] : result.attachments;
         const mention = command ? undefined : o.mentions?.(room, typeof result === 'string' ? result : result.text);
         const text = mention?.text ?? (typeof result === 'string' ? result : result.text);
