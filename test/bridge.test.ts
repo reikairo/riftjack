@@ -11,6 +11,7 @@ import { Accounts, provision } from '../src/accounts.js';
 import { parseProfileRequest, resolveProfileTarget } from '../src/bot-profile.js';
 import { loadConfig } from '../src/config.js';
 import { errorMessage, OwnerDiagnosticError } from '../src/errors.js';
+import { RoomNotes, notesCommand } from '../src/room-notes.js';
 
 function event(body = 'hello', id = '$1'): MatrixEvent {
   return { event_id: id, sender: '@owner:test', type: 'm.room.message', origin_server_ts: 2000, content: { body, msgtype: 'm.text' } };
@@ -20,6 +21,126 @@ function reaction(target: string, key = '✅', id = '$reaction'): MatrixEvent {
   return { type: 'm.reaction', event_id: id, sender: '@owner:test', origin_server_ts: 2000,
     content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: target, key } } };
 }
+
+test('room notes commands bypass the model, injection tracks linked rooms and revisions', async t => {
+  let notes!: RoomNotes;
+  const prompts: string[] = [];
+  const f = fixture(t, 'codex', async (_mode, prompt) => { prompts.push(prompt); return 'done'; }, true, {
+    linkedSession: () => 'linked',
+    notesCommand: (room, sender, prompt) => notesCommand(notes, room, sender, prompt),
+    notesContext: (key, room) => notes.context(key, room),
+  });
+  notes = new RoomNotes(f.file + '.notes');
+  await f.bridge.handle('!private:test', event('!notes set 0 private reference', '$set'));
+  assert.equal(prompts.length, 0);
+  await f.bridge.handle('!private:test', event('task', '$one'));
+  await f.bridge.handle('!private:test', event('task', '$two'));
+  await f.bridge.handle('!shared:test', event('task', '$three'));
+  assert.match(prompts[0], /private reference/);
+  assert.equal(prompts[1], 'task');
+  assert.ok(!prompts[2].includes('private reference'));
+  assert.match(prompts[2], /"room":"!shared:test"/);
+  await f.bridge.handle('!shared:test', event('!notes set 0 shared reference', '$update'));
+  await f.bridge.handle('!shared:test', event('task', '$four'));
+  assert.match(prompts[3], /shared reference/);
+  assert.deepEqual(f.errors, []);
+});
+
+test('compaction invalidates notes delivery receipts, including an in-flight receipt', async t => {
+  let notes!: RoomNotes;
+  const prompts: string[] = [];
+  const f = fixture(t, 'codex', async (_mode, prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
+    prompts.push(prompt); await hooks!.compaction!('completed'); return 'done';
+  }, true, { notesContext: (key, room) => notes.context(key, room), notesReset: key => notes.forget(key) });
+  notes = new RoomNotes(f.file + '.notes');
+  await f.bridge.handle('!dm:test', event('task', '$one'));
+  await f.bridge.handle('!dm:test', event('task', '$two'));
+  await f.bridge.handle('!dm:test', event('task', '$three'));
+  assert.equal(prompts.length, 3);
+  assert.ok(prompts.every(p => p.includes('Room notes')));
+});
+
+test('reset reinjects notes that were previously acknowledged without compaction', async t => {
+  let notes!: RoomNotes;
+  const prompts: string[] = [];
+  const f = fixture(t, 'codex', async (_mode, prompt) => { prompts.push(prompt); return 'done'; }, true,
+    { notesContext: (key, room) => notes.context(key, room), notesReset: key => notes.forget(key) });
+  notes = new RoomNotes(f.file + '.notes');
+  await f.bridge.handle('!dm:test', event('task', '$one'));
+  await f.bridge.handle('!dm:test', event('task', '$two'));
+  await f.bridge.handle('!dm:test', event('!reset', '$reset'));
+  await f.bridge.handle('!dm:test', event('task', '$three'));
+  assert.match(prompts[0], /Room notes/);
+  assert.equal(prompts[1], 'task');
+  assert.match(prompts[2], /Room notes/);
+});
+
+test('task-local notes tool rechecks authorization and expires after model completion', async t => {
+  let allowed = true, saved!: NonNullable<Parameters<Backend>[8]>['roomNotes'];
+  const rooms: string[] = [];
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
+    saved = hooks!.roomNotes!;
+    assert.equal(await saved!({ action: 'read' }, new AbortController().signal), 'notes');
+    allowed = false;
+    await assert.rejects(saved!({ action: 'read' }, new AbortController().signal), /membership changed/);
+    allowed = true;
+    return 'done';
+  }, true, { isPrivateRoom: async () => allowed, roomNotes: (_input, room) => { rooms.push(room); return 'notes'; } });
+  await f.bridge.handle('!dm:test', event());
+  await assert.rejects(saved!({ action: 'read' }, new AbortController().signal));
+  assert.deepEqual(rooms, ['!dm:test']);
+});
+
+test('notes command denial and version conflicts leave the document unchanged', async t => {
+  let notes!: RoomNotes, allowed = true;
+  const f = fixture(t, 'codex', undefined, true, {
+    isPrivateRoom: async () => allowed,
+    notesCommand: (room, sender, prompt) => notesCommand(notes, room, sender, prompt),
+  });
+  notes = new RoomNotes(f.file + '.notes');
+  await f.bridge.handle('!dm:test', event('!notes set 0 reference', '$first'));
+  await f.bridge.handle('!dm:test', event('!notes set 0 stale', '$stale'));
+  allowed = false;
+  await f.bridge.handle('!dm:test', event('!notes clear 1', '$denied'));
+  assert.equal(notes.read('!dm:test').text, 'reference');
+  assert.match(f.replies.at(-1)!, /Notes changed/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('notes commands work during a task and changed notes reach accepted steering', async t => {
+  let notes!: RoomNotes;
+  const ready = gate(), finish = gate(), updates: string[] = [];
+  let calls = 0;
+  const f = fixture(t, 'codex', async () => { calls++; ready.release(); await finish.promise; return 'done'; }, true, {
+    notesContext: (key, room) => notes.context(key, room),
+    notesCommand: (room, sender, prompt) => notesCommand(notes, room, sender, prompt),
+    steer: async prompt => { updates.push(prompt); return true; },
+  });
+  notes = new RoomNotes(f.file + '.notes');
+  const task = f.bridge.handle('!dm:test', event('task', '$start')); await ready.promise;
+  await f.bridge.handle('!dm:test', event('!notes set 0 new reference', '$edit'));
+  await f.bridge.handle('!dm:test', event('Continue', '$update'));
+  assert.equal(updates.length, 1);
+  assert.match(updates[0], /new reference/);
+  finish.release(); await task;
+  assert.equal(calls, 1);
+});
+
+test('connector notices can read notes but cannot edit them through the task tool', async t => {
+  const actions: unknown[] = [];
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
+    const signal = new AbortController().signal;
+    assert.equal(await hooks!.roomNotes!({ action: 'read' }, signal), 'reference');
+    await assert.rejects(hooks!.roomNotes!({ action: 'clear', expectedVersion: 1 }, signal), /human-started/);
+    const cancelled = new AbortController(); cancelled.abort();
+    await assert.rejects(hooks!.roomNotes!({ action: 'read' }, cancelled.signal));
+    return 'done';
+  }, true, { roomNotes: input => { actions.push(input); return 'reference'; } });
+  const notice = event(); notice.content!['riftjack.notice'] = 'timer';
+  f.state.update(sessionKey('!dm:test', notice), { codex: 'session' });
+  assert.equal(await f.bridge.resumeBackground('!dm:test', notice, 'session', () => {}), true);
+  assert.deepEqual(actions, [{ action: 'read' }]);
+});
 
 test('typing covers backend work and final delivery, but not local commands or denied messages', async t => {
   const calls: boolean[] = [], ready = gate(), finish = gate();

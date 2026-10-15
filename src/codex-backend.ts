@@ -1,4 +1,5 @@
 import { routingInstructions } from './routing-instructions.js';
+import { startNotesMcp, NOTES_SERVER, notesInstructions } from './room-notes-mcp.js';
 import { compactionNotices } from './compaction-notices.js';
 import { contextCheckpoints, checkpointDelivery, checkpointInstructions } from './context-checkpoints.js';
 import { startBackgroundMcp, BACKGROUND_SERVER, backgroundInstructions } from './background-mcp.js';
@@ -77,11 +78,13 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
     let media: Awaited<ReturnType<typeof startAttachmentMcp>> | undefined;
     let rooms: Awaited<ReturnType<typeof startRoomMessageMcp>> | undefined;
+    let notes: Awaited<ReturnType<typeof startNotesMcp>> | undefined;
     let web: Awaited<ReturnType<typeof startFetchMcp>> | undefined;
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
     try {
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
+      if (hooks?.roomNotes) notes = await startNotesMcp(hooks.roomNotes, AbortSignal.any([signal, mediaLifetime.signal]));
       // The tool writes response files into the workspace, so a read-only bot does not get it.
       if (config.fetch && config.sandbox !== 'read-only') web = await startFetchMcp(fetchAction(config.fetch, config.workspace), AbortSignal.any([signal, mediaLifetime.signal]));
       if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
@@ -152,7 +155,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       const session = state.session(key);
       const saved = session.codex;
       const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
-        + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '');
+        + (notes ? notesInstructions : '') + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
@@ -179,6 +182,9 @@ export function createCodexBackend(configuration: Config | (() => Config), state
           [`mcp_servers.${ROOM_MESSAGE_SERVER}`]: rooms ? { url: rooms.url, http_headers: rooms.headers,
             required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['room_messages'],
             tools: { room_messages: { approval_mode: 'approve' } },
+          } : disabledMcp,
+          [`mcp_servers.${NOTES_SERVER}`]: notes ? { url: notes.url, http_headers: notes.headers,
+            required: true, enabled: true, enabled_tools: ['room_notes'], tools: { room_notes: { approval_mode: 'approve' } },
           } : disabledMcp,
           // Read-only GET under human-configured URL prefixes; no approval needed.
           [`mcp_servers.${FETCH_SERVER}`]: web ? { url: web.url, http_headers: web.headers,
@@ -244,6 +250,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       mediaLifetime.abort();
       await media?.close();
       await rooms?.close();
+      await notes?.close();
       await web?.close();
       await progress.catch(() => {});
       await background?.close(); await publication?.close();
