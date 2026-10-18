@@ -448,7 +448,7 @@ async function main() {
           if (mention && bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
           return false;
         }
-        if (!links.addressed(account.userId, room, event)) return false;
+        if (!await links.shouldRespond(account.userId, room, event, reactionTarget, () => privateRoom(room, shared.owner))) return false;
       }
       return true;
     };

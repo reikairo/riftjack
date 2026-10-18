@@ -398,6 +398,116 @@ test('agent observations persist, do not become instructions or cross-room steer
   assert.equal(resumed.addressed(bot, group, message('For everyone')), true);
 });
 
+function responseModes(t: { after(fn: () => void): void }, modes: unknown = { [bot]: 'mentions-or-replies' }) {
+  const f = fixture(t);
+  writeFileSync(f.path, JSON.stringify({ ...f.config, rooms: [{ ...f.config.rooms[0], responseModes: modes }] }));
+  return { ...f, links: f.load() };
+}
+
+test('response modes validate participating bot IDs and the two supported values', t => {
+  for (const modes of [null, [], 'all', { [bot]: 'mentions' }, { '@outsider:test': 'all' }, { [bot]: null }]) {
+    assert.throws(() => responseModes(t, modes), /responseModes/);
+  }
+  assert.doesNotThrow(() => responseModes(t, { [bot]: 'all', [peer]: 'mentions-or-replies' }));
+});
+
+test('default response mode retains addressing and private routing without reading reply targets', async t => {
+  const f = fixture(t), strict = responseModes(t);
+  const noRead = async () => { throw new Error('Unexpected lookup'); };
+  const yes = async () => true;
+  assert.equal(await f.links.shouldRespond(bot, group, message('Everyone'), noRead, yes), true);
+  const other = message('Other agent'); other.content!['m.mentions'] = { user_ids: [peer] };
+  assert.equal(await f.links.shouldRespond(bot, group, other, noRead, yes), false);
+  assert.equal(await strict.links.shouldRespond(bot, home, message('Private'), noRead, yes), true);
+  assert.equal(await strict.links.shouldRespond(peer, group, message('Default for peer'), noRead, yes), true);
+  assert.equal(await responseModes(t, { [bot]: 'all' }).links.shouldRespond(bot, group, message('Explicit all'), noRead, yes), true);
+});
+
+test('strict response mode accepts real mentions and local controls, not names or quotes', async t => {
+  const f = responseModes(t), noRead = async () => { throw new Error('Unexpected lookup'); }, yes = async () => true;
+  for (const body of ['Hello', 'Builder, hello', '@builder:test', '> earlier\n\nHello', 'https://matrix.to/#/@builder:test']) {
+    assert.equal(await f.links.shouldRespond(bot, group, message(body), noRead, yes), false);
+  }
+  const mention = message('Hello'); mention.content!['m.mentions'] = { user_ids: [bot] };
+  assert.equal(await f.links.shouldRespond(bot, group, mention, noRead, yes), true);
+  mention.content!['m.mentions'] = { user_ids: [peer] };
+  assert.equal(await f.links.shouldRespond(bot, group, mention, noRead, yes), false);
+  for (const command of ['!status', '!cancel', '!approve request', '!answer request {}', '!deny request']) {
+    assert.equal(await f.links.shouldRespond(bot, group, message(command), noRead, yes), true);
+  }
+  const command = message('> bot\n\n !cancel');
+  command.content!['m.relates_to'] = { 'm.in_reply_to': { event_id: '$original' } };
+  assert.equal(await f.links.shouldRespond(bot, group, command, noRead, yes), true);
+  command.content!['m.mentions'] = { user_ids: [peer] };
+  assert.equal(await f.links.shouldRespond(bot, group, command, noRead, yes), false);
+  assert.equal(await f.links.shouldRespond(bot, group, { ...message(''), type: 'm.reaction' }, noRead, yes), true);
+});
+
+test('strict replies use the actual event author, exact target ID and fresh access checks', async t => {
+  const f = responseModes(t), reply = message('Reply');
+  reply.content!['m.relates_to'] = { 'm.in_reply_to': { event_id: '$original' } };
+  let reads = 0, checks = 0;
+  const read = async (room: string, id: string) => {
+    reads++; assert.equal(room, group); assert.equal(id, '$original');
+    return message('Original', '$original', bot);
+  };
+  const yes = async () => { checks++; return true; };
+  assert.equal(await f.links.shouldRespond(bot, group, reply, read, yes), true);
+  assert.equal(reads, 1); assert.equal(checks, 2);
+  // Mentioning a peer does not invalidate an explicit reply to this bot.
+  reply.content!['m.mentions'] = { user_ids: [peer] };
+  assert.equal(await f.links.shouldRespond(bot, group, reply, read, yes), true);
+  for (const target of [undefined, message('Other', '$original', peer), message('Human', '$original'),
+    message('Wrong ID', '$different', bot), { ...message('', '$original', bot), type: 'm.reaction' }]) {
+    assert.equal(await f.links.shouldRespond(bot, group, reply, async () => target, yes), false);
+  }
+  reads = 0;
+  assert.equal(await f.links.shouldRespond(bot, group, reply, read, async () => false), false);
+  assert.equal(reads, 0);
+  checks = 0;
+  assert.equal(await f.links.shouldRespond(bot, group, reply, read, async () => ++checks === 1), false);
+  await assert.rejects(f.links.shouldRespond(bot, group, reply, async () => { throw new Error('Offline'); }, yes), /Offline/);
+});
+
+test('thread roots and fallback replies are not explicit invocations', async t => {
+  const f = responseModes(t), noRead = async () => { throw new Error('Unexpected lookup'); }, yes = async () => true;
+  const reply = message('Thread update');
+  reply.content!['m.relates_to'] = { rel_type: 'm.thread', event_id: '$root' };
+  assert.equal(await f.links.shouldRespond(bot, group, reply, noRead, yes), false);
+  reply.content!['m.relates_to'] = { rel_type: 'm.thread', event_id: '$root', is_falling_back: true,
+    'm.in_reply_to': { event_id: '$original' } };
+  assert.equal(await f.links.shouldRespond(bot, group, reply, noRead, yes), false);
+  reply.content!['m.relates_to']!.is_falling_back = false;
+  assert.equal(await f.links.shouldRespond(bot, group, reply, async () => message('Original', '$original', bot), yes), true);
+});
+
+test('strict admission keeps silent messages as context and delivers only invoked turns and controls', async t => {
+  const f = responseModes(t), calls: string[] = [], replies: string[] = [];
+  const bridge = new Bridge({ botId: bot, owner: human, kind: 'codex', state: f.state, since: 0, timeoutMs: 5000,
+    isAuthorized: id => id === human, isPrivateRoom: async () => true,
+    linkedSession: (room, event) => f.links.key(bot, room, event),
+    decoratePrompt: (room, event, text) => f.links.prompt(bot, room, event, text),
+    run: async (_kind, prompt) => { calls.push(prompt); return 'done'; },
+    reply: async (_room, _event, text) => { replies.push(text); }, report: e => { throw e; },
+  });
+  const admit = async (event: MatrixEvent) => {
+    f.links.observe(bot, group, event);
+    if (await f.links.shouldRespond(bot, group, event, async () => message('Bot reply', '$original', bot), async () => true)) {
+      await bridge.handle(group, event);
+    }
+  };
+  await admit(message('Background finding', '$silent'));
+  assert.equal(calls.length, 0); assert.equal(replies.length, 0); assert.equal(f.state.queued(bot), 0);
+  const reply = message('Please explain', '$reply');
+  reply.content!['m.relates_to'] = { 'm.in_reply_to': { event_id: '$original' } };
+  await admit(reply);
+  assert.equal(calls.length, 1); assert.match(calls[0], /Background finding/); assert.match(calls[0], /Please explain/);
+  await admit(message('!approve request', '$approval'));
+  await admit(message('!cancel', '$cancel'));
+  assert.equal(calls.length, 1);
+  assert.ok(replies.some(text => /No pending confirmation/.test(text)));
+});
+
 test('unread batches have independent durable cursors and never discard an oversized message', t => {
   const f = fixture(t);
   const config = { ...f.config, agents: [...f.config.agents, { bot: peer, owner: human, home: '!peer-home:test', session: 'peer-thread' }] };
