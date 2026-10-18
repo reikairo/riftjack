@@ -11,6 +11,7 @@ import { Accounts, provision } from '../src/accounts.js';
 import { parseProfileRequest, resolveProfileTarget } from '../src/bot-profile.js';
 import { loadConfig } from '../src/config.js';
 import { errorMessage, OwnerDiagnosticError } from '../src/errors.js';
+import { threadRelation } from '../src/thread-reply.js';
 
 function event(body = 'hello', id = '$1'): MatrixEvent {
   return { event_id: id, sender: '@owner:test', type: 'm.room.message', origin_server_ts: 2000, content: { body, msgtype: 'm.text' } };
@@ -20,6 +21,38 @@ function reaction(target: string, key = '✅', id = '$reaction'): MatrixEvent {
   return { type: 'm.reaction', event_id: id, sender: '@owner:test', origin_server_ts: 2000,
     content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: target, key } } };
 }
+
+test('shared-room final text, attachments and mentions use the selected thread, not progress', async t => {
+  const delivered: { kind: string; event: MatrixEvent; text?: string; mentions?: string[] }[] = [];
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, _signal, _sender, _files, _interact, _publish, hooks) => {
+    await hooks!.progress!('Working');
+    return { text: 'Answer\n\n```matrix-thread\n{"create":true}\n```', attachments: [{ path: '/result.txt', root: '/' }] };
+  }, true, {
+    shared: () => true,
+    mentions: (_room, text) => ({ text, mentions: ['@peer:test'] }),
+    reply: async (_room, target, text, _markdown, _msgtype, mentions) => { delivered.push({ kind: 'text', event: target, text, mentions }); },
+    sendAttachments: async (_room, target) => { delivered.push({ kind: 'file', event: target }); },
+  });
+  const incoming = event('Please answer in a thread', '$human');
+  await f.bridge.handle('!group:test', incoming);
+  assert.deepEqual(delivered.map(d => d.kind), ['text', 'file', 'text']);
+  assert.equal(threadRelation(delivered[0].event), undefined);
+  for (const delivery of delivered.slice(1)) assert.equal(threadRelation(delivery.event)?.event_id, '$human');
+  assert.equal(delivered.at(-1)!.text, 'Answer');
+  assert.deepEqual(delivered.at(-1)!.mentions, ['@peer:test']);
+  assert.equal(incoming.content!['m.relates_to'], undefined);
+  assert.deepEqual(f.errors, []);
+});
+
+test('private chats reject thread directives without sending final attachments', async t => {
+  let files = 0;
+  const f = fixture(t, 'codex', async () => ({ text: 'Answer\n```matrix-thread\n{"create":true}\n```',
+    attachments: [{ path: '/result.txt', root: '/' }] }), true, { sendAttachments: async () => { files++; } });
+  await f.bridge.handle('!dm:test', event());
+  assert.equal(files, 0);
+  assert.equal(f.errors.length, 1);
+  assert.match(f.replies.at(-1)!, /human message in a shared room/);
+});
 
 test('typing covers backend work and final delivery, but not local commands or denied messages', async t => {
   const calls: boolean[] = [], ready = gate(), finish = gate();

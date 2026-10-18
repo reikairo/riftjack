@@ -2,6 +2,7 @@ import type { BackgroundAction } from './background-tasks.js';
 import type { CompactionPhase } from './compaction-notices.js';
 import { taskTyping } from './task-typing.js';
 import { roomMessageDelivery, type MessageRequest, type RoomMessageTool } from './room-messages.js';
+import { threadReply } from './thread-reply.js';
 import type { SendAttachments } from './attachment-delivery.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
@@ -27,7 +28,7 @@ export type Notice = 'background' | 'timer' | 'reaction' | 'restart';
 export const RESTART_PROMPT = 'Riftjack restarted. Check current work and background tasks; continue if there is work to do.';
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
-  content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; 'm.in_reply_to'?: { event_id: string } };
+  content?: MediaContent & { 'm.mentions'?: { user_ids?: string[] }; 'm.relates_to'?: { rel_type?: string; event_id?: string; key?: string; is_falling_back?: boolean; 'm.in_reply_to'?: { event_id: string } };
     'riftjack.executor_result'?: { jobId?: string; reason?: string; request?: string };
     [AGENT_TRIGGER]?: { agent: string; event: string; events?: string[] }; [SERVICE]?: unknown; [REPLY]?: unknown; [GRANT]?: unknown; [NOTICE]?: Notice };
 };
@@ -505,10 +506,13 @@ export class Bridge {
         finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
-        const command = next.prompt.startsWith('!'), responseEvent = next.event;
+        const command = next.prompt.startsWith('!');
+        const response = command ? { text: typeof result === 'string' ? result : result.text, event: next.event }
+          : threadReply(typeof result === 'string' ? result : result.text, next.event, !!o.shared?.(room));
+        const responseEvent = response.event;
         const files = typeof result === 'string' ? [] : result.attachments;
-        const mention = command ? undefined : o.mentions?.(room, typeof result === 'string' ? result : result.text);
-        const text = mention?.text ?? (typeof result === 'string' ? result : result.text);
+        const mention = command ? undefined : o.mentions?.(room, response.text);
+        const text = mention?.text ?? response.text;
         const mentions = mention?.mentions.length ? mention.mentions : undefined;
         const sendFiles = async () => {
           if (!files.length) return;
