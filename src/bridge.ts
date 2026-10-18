@@ -483,13 +483,14 @@ export class Bridge {
             await this.reply(room, requestEvent, text, true, 'm.text');
           },
         };
-        let modelPrompt = next.prompt.startsWith('!') ? next.prompt
+        const command = !isMedia(next.event.content?.msgtype) && next.prompt.startsWith('!');
+        let modelPrompt = command ? next.prompt
           : o.decoratePrompt?.(room, next.event, next.prompt) ?? next.prompt;
         if (next.event.content?.[NOTICE] === 'restart' && !o.decoratePrompt) {
           modelPrompt = 'Connector restart notice (not a human message):\n' + modelPrompt;
         }
         const restart = this.restartNotice;
-        if (verb !== 'publish' && !next.prompt.startsWith('!') && restart?.key === backendKey &&
+        if (verb !== 'publish' && !command && restart?.key === backendKey &&
             o.state.session(backendKey)[o.kind as 'codex' | 'claude'] === restart.session) {
           if (next.event.content?.[NOTICE] !== 'restart') modelPrompt += '\n\nConnector restart notice:\n' + RESTART_PROMPT;
           // Consume only when a model turn actually begins, not at privacy
@@ -501,11 +502,11 @@ export class Bridge {
             backendKey, controller.signal, event.sender, next.attachments, interact, publish, hooks);
         current.markReady();
         let result: string | BackendReply;
-        try { result = await task; if (verb !== 'publish' && !next.prompt.startsWith('!')) o.promptDelivered?.(); }
+        try { result = await task; if (verb !== 'publish' && !command) o.promptDelivered?.(); }
         finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
-        const command = next.prompt.startsWith('!'), responseEvent = next.event;
+        const responseEvent = next.event;
         const files = typeof result === 'string' ? [] : result.attachments;
         const mention = command ? undefined : o.mentions?.(room, typeof result === 'string' ? result : result.text);
         const text = mention?.text ?? (typeof result === 'string' ? result : result.text);

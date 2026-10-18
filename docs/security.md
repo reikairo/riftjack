@@ -45,6 +45,14 @@ keep sensitive conversations in dedicated private rooms.
 
 ## Shared resources
 
+Matrix messages sent to Codex and Claude, including updates to an active turn, carry
+connector-generated Matrix context: bot ID, room ID, human/author ID, trigger
+and thread ID when applicable. IDs identify accounts, not verified real-world
+people. This metadata does not grant permissions or isolate shared files.
+Ordinary private chats do not receive another room's observations. Linked agents
+retain their explicitly configured cross-room context. Bot Manager commands and
+the external Grok worker protocol are not model prompts covered by this format.
+
 Ordinary conversation histories are scoped by bot, account, room, and thread. Session links intentionally reuse one agent history across its private and shared rooms; routing rules do not provide strict separation of what that model knows. Bots still share the host OS account and the corresponding provider login. Bots assigned the same workspace can read and change the same files. Separate chats and per-bot access lists are not filesystem isolation. Use a separate OS account or container when you need that boundary.
 
 Codex uses a workspace-write or read-only sandbox; command network access is disabled by default. Optional `CODEX_NETWORK_ALLOW` allows exact domains through the Codex network proxy for workspace-write commands; it is a domain allowance for all such commands, not a Git-only or read-only permission. See [configuration and limits](setup.md#optional-codex-command-network-access). The default on-request policy forwards exceptions to Matrix. Claude has its own permission model, described in [Claude Code](claude.md#permissions). Connector credentials are filtered from both backends’ subprocess environments.
