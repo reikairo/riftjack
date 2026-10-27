@@ -1,3 +1,4 @@
+import { startConfirmationMcp, CONFIRMATION_SERVER, confirmationInstructions } from './confirmation-mcp.js';
 import { drawioAction } from './drawio.js';
 import { startDrawioMcp, DRAWIO_SERVER, drawioInstructions } from './drawio-mcp.js';
 import { startGitHubMcp, GITHUB_SERVER, githubInstructions } from './github-mcp.js';
@@ -76,6 +77,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let checkpointSender: ReturnType<typeof checkpointDelivery> | undefined;
     const seenCompactions = new Set<string>();
     let compactingId: string | undefined;
+    let confirmation: Awaited<ReturnType<typeof startConfirmationMcp>> | undefined;
     let github: Awaited<ReturnType<typeof startGitHubMcp>> | undefined;
     let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
     let publication: Awaited<ReturnType<typeof startPublishMcp>> | undefined;
@@ -86,6 +88,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
     try {
+      if (hooks?.confirmation) confirmation = await startConfirmationMcp(hooks.confirmation, AbortSignal.any([signal, mediaLifetime.signal]));
       if (hooks?.github) github = await startGitHubMcp(hooks.github, signal);
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
       // The tool writes response files into the workspace, so a read-only bot does not get it.
@@ -158,7 +161,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
+      const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (confirmation ? confirmationInstructions : '') + (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
         + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '') + (diagram ? drawioInstructions : '');
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
@@ -173,6 +176,10 @@ export function createCodexBackend(configuration: Config | (() => Config), state
             // Invoking this tool starts the review; requestPublish itself requires Matrix
             // approval after delivering the HTML. Avoid an empty MCP consent form first.
             tools: { prepare_publish: { approval_mode: 'approve' } },
+          } : disabledMcp,
+          [`mcp_servers.${CONFIRMATION_SERVER}`]: confirmation ? { url: confirmation.url, http_headers: confirmation.headers,
+            required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['request_confirmation'],
+            tools: { request_confirmation: { approval_mode: 'approve' } },
           } : disabledMcp,
           [`mcp_servers.${GITHUB_SERVER}`]: github ? { url: github.url, http_headers: github.headers,
             required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['github_subscriptions'],
@@ -261,7 +268,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       await rooms?.close();
       await web?.close(); await diagram?.close();
       await progress.catch(() => {});
-      await github?.close(); await background?.close(); await publication?.close();
+      await confirmation?.close(); await github?.close(); await background?.close(); await publication?.close();
       current.ready.resolve();
       await Promise.allSettled([...current.steering]);
       await current.server?.close();

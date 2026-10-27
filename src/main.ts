@@ -1,3 +1,4 @@
+import { requestConfirmation } from './confirmation-mcp.js';
 import { matrixTyping } from './matrix-typing.js';
 import { GitHubSubscriptions, githubReader, loadGitHubPolicies } from './github-subscriptions.js';
 import { linkedRoomMessages } from './room-messages.js';
@@ -348,6 +349,7 @@ async function main() {
       shared: linkedAgent ? room => !!links.room(account.userId, room) : undefined,
       // A newly accepted human message to this agent restores its peer credit.
       accepted: linkedAgent ? () => links.credit(account.userId) : undefined,
+      requestConfirmation: (account.kind === 'codex' || account.kind === 'claude') ? requestConfirmation : undefined,
       publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
       github: github ? async (input, { room, event, key }, signal) => {
