@@ -730,16 +730,23 @@ test('reply_to answers a message of the room and wakes its author agent unless t
 });
 
 test('reply_to finds the author of an unread message without the sender index', t => {
-  const f = pair(t), links = f.links;
-  links.observe(bot, group, message('Question from the peer', '$p1', peer));
-  links.credit(bot);
   const block = 'Answer\n```matrix-mentions\n{"reply_to":"$p1"}\n```';
+  const setup = () => {
+    const links = pair(t).links;
+    links.observe(bot, group, message('Question from the peer', '$p1', peer));
+    links.credit(bot);
+    return links;
+  };
   // A history saved before the sender index existed has only its messages.
-  delete (links as unknown as { history: Record<string, { senders?: unknown }> }).history[group].senders;
-  assert.deepEqual(links.mentions(bot, group, block), { text: 'Answer', mentions: [peer], replyTo: '$p1' });
+  const old = setup();
+  delete (old as unknown as { history: Record<string, { senders?: unknown }> }).history[group].senders;
+  assert.deepEqual(old.mentions(bot, group, block), { text: 'Answer', mentions: [peer], replyTo: '$p1' });
   // A thousand newer messages push the event out of the index while it is still unread.
-  for (let i = 0; i < 1000; i++) links.observe(bot, group, message('Chatter ' + i, '$h' + i));
-  assert.deepEqual(links.mentions(bot, group, block), { text: 'Answer', mentions: [peer], replyTo: '$p1' });
+  const busy = setup();
+  for (let i = 0; i < 1000; i++) busy.observe(bot, group, message('Chatter ' + i, '$h' + i));
+  const senders = (busy as unknown as { history: Record<string, { senders: [string, string][] }> }).history[group].senders;
+  assert.equal(senders.some(([id]) => id === '$p1'), false);
+  assert.deepEqual(busy.mentions(bot, group, block), { text: 'Answer', mentions: [peer], replyTo: '$p1' });
 });
 
 test('a reply_to reaches the Matrix reply as its event, inside the thread when there is one', async t => {
