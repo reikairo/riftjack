@@ -262,3 +262,55 @@ test('unrelated history is rejected without changing the destination', async t =
   f.git('checkout', '--detach', unrelated);
   await assert.rejects(f.prepare()); assert.equal(f.remoteHead(), f.base);
 });
+
+for (const rewrite of [false, true]) test(`published main history does not exhaust the limit on ${rewrite ? 'rebase' : 'merge'}`, async t => {
+  const f = setup(t);
+  f.git('push', 'origin', 'HEAD:feature');
+  f.git('--git-dir=' + f.remote, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  f.git('checkout', '-b', 'fresh', f.base);
+  writeFileSync(join(f.repo, 'upstream.txt'), 'Upstream must not appear in PR diff');
+  f.git('add', '.'); f.git('commit', '-m', 'Upstream change');
+  const tree = f.git('rev-parse', 'HEAD^{tree}');
+  let parent = f.git('rev-parse', 'HEAD');
+  for (let i = 0; i < 105; i++) parent = f.git('commit-tree', tree, '-p', parent, '-m', 'Published ' + i);
+  f.git('reset', '--hard', parent); f.git('push', 'origin', 'HEAD:main');
+  if (rewrite) f.git('cherry-pick', f.head);
+  else { f.git('checkout', 'main'); f.git('merge', '--no-ff', parent, '-m', 'Merge published main'); }
+  const head = f.git('rev-parse', 'HEAD');
+  // A forged tracking ref must not hide this unpublished commit.
+  f.git('update-ref', 'refs/remotes/origin/main', head);
+  const r = await preparePublish({ ...f.input, branch: 'feature' }, f.root, signal());
+  assert.deepEqual(r.commits, [head]);
+  assert.equal(r.publishedHistory.length, 106);
+  assert.equal(r.historyReplacement, rewrite);
+  assert.equal(r.removedHistory.length, rewrite ? 1 : 0);
+  assert.doesNotMatch(r.patch, /Upstream must not appear in PR diff/);
+  assert.match(r.patch, /script/);
+  assert.equal(r.reviewBase, parent);
+  assert.match(r.html, /Already published incoming history/);
+  assert.match(r.html, new RegExp(parent));
+  assert.equal(r.base, f.head);
+  await pushReviewed(r, signal());
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/feature').split('\t')[0], head);
+});
+
+test('history known only to another remote still counts towards the limit', async t => {
+  const f = setup(t);
+  const tree = f.git('rev-parse', 'HEAD^{tree}');
+  let parent = f.head;
+  for (let i = 0; i < 101; i++) parent = f.git('commit-tree', tree, '-p', parent, '-m', 'Unpublished ' + i);
+  f.git('update-ref', 'refs/heads/main', parent);
+  const other = join(f.root, 'other.git'); f.git('init', '--bare', other);
+  f.git('remote', 'add', 'other', other); f.git('push', 'other', 'main');
+  f.git('update-ref', 'refs/remotes/origin/main', parent);
+  await assert.rejects(f.prepare(), /100 outgoing and removed/);
+});
+
+test('a published reference changing after review requires fresh approval', async t => {
+  const f = setup(t);
+  f.git('push', 'origin', f.base + ':refs/heads/known');
+  const r = await f.prepare();
+  f.git('push', 'origin', f.head + ':refs/heads/known');
+  await assert.rejects(pushReviewed(r, signal()), /Published reference changed/);
+  assert.equal(f.remoteHead(), f.base);
+});

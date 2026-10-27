@@ -14,6 +14,8 @@ export type PublishInput = { repository: string; remote: string; branch: string 
 export type PublishReview = Readonly<PublishInput & {
   url: string; base: string | null; reviewBase: string | null;
   baseReference: Readonly<{ ref: string; head: string }> | null; head: string; createdAt: string;
+  publishedReferences: readonly Readonly<{ ref: string; head: string }>[];
+  publishedHistory: readonly string[];
   commits: readonly string[]; patch: string; history: readonly { oid: string; patch: string }[];
   historyReplacement: boolean; removedHistory: readonly { oid: string; patch: string }[];
   workingTreeDirty: boolean; html: string; sha256: string;
@@ -90,6 +92,17 @@ async function defaultBranch(repo: string, url: string, signal: AbortSignal) {
   return Object.freeze({ ref: match[1], head: tip.split('\t')[0] });
 }
 
+// Read the push destination itself: local tracking refs may be stale or forged.
+async function publishedBranches(repo: string, url: string, signal: AbortSignal) {
+  const output = (await git(repo, ['ls-remote', '--heads', '--', url], signal)).trim();
+  if (!output) return [];
+  return output.split('\n').map(line => {
+    const match = /^([a-f0-9]{40,64})\t(refs\/heads\/[^\s]+)$/.exec(line);
+    if (!match) throw new PublicError('Unexpected published branch response.');
+    return Object.freeze({ ref: match[2], head: match[1] });
+  });
+}
+
 export async function preparePublish(input: PublishInput, workspace: string, signal: AbortSignal): Promise<PublishReview> {
   input = publishInput(input);
   const root = await realpath(workspace), repository = await realpath(resolve(root, input.repository));
@@ -113,18 +126,31 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
     historyReplacement = ancestors[0] !== base;
   }
   let reviewBase = base;
-  const baseReference = base ? null : await defaultBranch(repository, url, signal);
+  const advertisedDefault = await defaultBranch(repository, url, signal);
+  const baseReference = base && advertisedDefault?.ref === 'refs/heads/' + input.branch ? null : advertisedDefault;
   if (baseReference) {
     await git(repository, ['fetch', '--no-tags', '--no-write-fetch-head', '--', url, baseReference.head], signal);
     const ancestors = (await git(repository, ['merge-base', '--all', head, baseReference.head], signal)).trim().split('\n');
     if (ancestors.length !== 1 || !/^[a-f0-9]{40,64}$/.test(ancestors[0])) {
-      throw new PublicError('A new branch requires a unique common ancestor with the remote default branch.');
+      throw new PublicError('A publication review requires a unique common ancestor with the remote default branch.');
     }
     reviewBase = ancestors[0];
   }
-  const historyRange = reviewBase ? reviewBase + '..' + head : head;
-  const commitList = (await git(repository, ['rev-list', '--max-count=101', '--reverse', historyRange], signal)).trim();
+  // The PR diff is relative to the published main; push safety and outgoing
+  // history are still relative to the exact destination branch tip.
+  const historyRange = base ? base + '..' + head : reviewBase ? reviewBase + '..' + head : head;
+  const publishedReferences = Object.freeze(await publishedBranches(repository, url, signal));
+  const publishedTips = [...new Set(publishedReferences.map(ref => ref.head))];
+  // Fetch immutable object IDs without changing shared remote-tracking refs.
+  if (publishedTips.length) {
+    await git(repository, ['fetch', '--no-tags', '--no-write-fetch-head', '--', url, ...publishedTips], signal);
+  }
+  const commitList = (await git(repository, ['rev-list', '--max-count=101', '--reverse', historyRange,
+    ...(publishedTips.length ? ['--not', ...publishedTips] : [])], signal)).trim();
   const commits = commitList ? commitList.split('\n') : [];
+  const outgoingList = (await git(repository, ['rev-list', '--reverse', historyRange], signal)).trim();
+  const novel = new Set(commits);
+  const publishedHistory = Object.freeze(outgoingList ? outgoingList.split('\n').filter(oid => !novel.has(oid)) : []);
   const removedList = historyReplacement
     ? (await git(repository, ['rev-list', '--max-count=101', '--reverse', head + '..' + base], signal)).trim() : '';
   const removed = removedList ? removedList.split('\n') : [];
@@ -133,7 +159,8 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
   const emptyTree = reviewBase ? undefined : (await git(repository, ['hash-object', '-w', '-t', 'tree', '--stdin'], signal, '')).trim();
   const patch = reviewBase ? await git(repository, ['diff', ...diffOptions, reviewBase, head, '--'], signal)
     : await git(repository, ['diff', ...diffOptions, emptyTree!, head, '--'], signal);
-  let size = Buffer.byteLength(patch);
+  let size = Buffer.byteLength(patch) + publishedHistory.join('\n').length;
+  if (size > LIMIT) throw new PublicError('Complete review exceeds 8 MiB of text. No truncated review will be approved.');
   async function readHistory(oids: string[]) {
     const history: { oid: string; patch: string }[] = [];
     for (const oid of oids) {
@@ -147,7 +174,7 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
   const history = await readHistory(commits), removedHistory = await readHistory(removed);
   const workingTreeDirty = !!(await git(repository, ['status', '--porcelain', '--untracked-files=normal'], signal)).trim();
   const data = { ...input, repository, url, base, reviewBase, baseReference, head, createdAt: new Date().toISOString(), commits: Object.freeze(commits), patch,
-    history, historyReplacement, removedHistory, workingTreeDirty };
+    history, historyReplacement, removedHistory, publishedReferences, publishedHistory, workingTreeDirty };
   const html = renderPublishReview(data);
   return Object.freeze({ ...data, html, sha256: createHash('sha256').update(html).digest('hex') });
 }
@@ -158,6 +185,10 @@ export async function pushReviewed(review: PublishReview, signal: AbortSignal, a
       await remoteHead(review.repository, review.url, 'refs/heads/' + review.branch, signal) !== review.base ||
       (review.baseReference && await remoteHead(review.repository, review.url, review.baseReference.ref, signal) !== review.baseReference.head)) {
     throw new PublicError('HEAD or the destination changed after review. Prepare a new report and request confirmation again.');
+  }
+  const currentPublished = new Map((await publishedBranches(review.repository, review.url, signal)).map(ref => [ref.ref, ref.head]));
+  if (review.publishedReferences.some(ref => currentPublished.get(ref.ref) !== ref.head)) {
+    throw new PublicError('Published reference changed after review. Prepare a new report and request confirmation again.');
   }
   await authorize();
   signal.throwIfAborted();
@@ -184,7 +215,8 @@ export async function requestPublish(input: unknown, workspace: string, reportRo
       { label: 'Review base', value: review.reviewBase ?? '[empty tree]', code: true },
       ...(review.baseReference ? [{ label: 'Published base reference', value: review.baseReference.ref + ' @ ' + review.baseReference.head, code: true as const }] : []),
       { label: 'Publish HEAD', value: review.head, code: true },
-      { label: 'Outgoing commits', value: String(review.commits.length) },
+      { label: 'New commits on destination', value: String(review.commits.length) },
+      { label: 'Already published incoming commits', value: String(review.publishedHistory.length) },
       ...(review.historyReplacement ? [{ label: 'Removed commits', value: String(review.removedHistory.length) }] : []),
       { label: 'Report SHA-256', value: review.sha256, code: true },
       { value: 'Only this commit and its history are published. Local uncommitted files and unrelated tags are excluded. Changed HEAD or destination requires a new review.' },
