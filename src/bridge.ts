@@ -31,7 +31,8 @@ export type MatrixEvent = {
     'riftjack.executor_result'?: { jobId?: string; reason?: string; request?: string };
     [AGENT_TRIGGER]?: { agent: string; event: string; events?: string[] }; [SERVICE]?: unknown; [REPLY]?: unknown; [GRANT]?: unknown; [NOTICE]?: Notice };
 };
-export type Mentions = { text: string; mentions: string[]; error?: string };
+// replyTo: an event of the same room the reply answers (sent as a Matrix reply).
+export type Mentions = { text: string; mentions: string[]; replyTo?: string; error?: string };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
 export type BackendHooks = { detached?: BackgroundAction; confirmation?: BackgroundAction; github?: BackgroundAction; background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool };
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
@@ -47,7 +48,7 @@ type Options = {
   ownerDiagnostic?: (error: unknown, context: { room: string; sender: string }) => Promise<void>;
   isStopping?: () => boolean;
   restart?: (reply: (text: string) => Promise<void>, target: RestartTarget, scope: RestartScope) => Promise<void>;
-  reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[], sent?: (eventId: string) => void) => Promise<void>;
+  reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[], sent?: (eventId: string) => void, replyTo?: string) => Promise<void>;
   turnStarted?: () => Promise<void>;
   turnCompleted?: (room: string, eventId: string, sender: string) => Promise<void>;
   typing?: (room: string, typing: boolean, timeout: number, signal: AbortSignal) => Promise<unknown>;
@@ -578,7 +579,7 @@ export class Bridge {
         const files = typeof result === 'string' ? [] : result.attachments;
         const mention = command ? undefined : o.mentions?.(room, typeof result === 'string' ? result : result.text);
         const text = mention?.text ?? (typeof result === 'string' ? result : result.text);
-        const mentions = mention?.mentions.length ? mention.mentions : undefined;
+        const mentions = mention?.mentions.length ? mention.mentions : undefined, replyTo = mention?.replyTo;
         const sendFiles = async () => {
           if (!files.length) return;
           if (!o.sendAttachments) throw new PublicError('Attachment sending is not configured.');
@@ -593,7 +594,7 @@ export class Bridge {
         if (!quiet || files.length) {
           // A mention wakes the peer, so it goes out only after everything else.
           if (mentions) await sendFiles();
-          const respond = (body: string) => this.reply(room, responseEvent, body, !command, command ? 'm.notice' : 'm.text', mentions, sentHere);
+          const respond = (body: string) => this.reply(room, responseEvent, body, !command, command ? 'm.notice' : 'm.text', mentions, sentHere, replyTo);
           // A declined reply sends no text and wakes nobody.
           if (!quiet && (text || mentions)) await respond(text);
           else if (!quiet && !files.length) await respond(typeof result === 'string' ? 'The task completed without a text response.' : 'The task completed without a response.');

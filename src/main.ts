@@ -478,8 +478,10 @@ async function main() {
           report: diagnostics,
         }, markdown);
       },
-      async reply(room, event, text, markdown = false, msgtype = 'm.notice', mentions, sent) {
-        const replyTo = threadRelation(event);
+      async reply(room, event, text, markdown = false, msgtype = 'm.notice', mentions, sent, inReplyTo) {
+        // An agent's matrix-mentions reply_to: a Matrix reply to that event, kept in the thread if there is one.
+        const thread = threadRelation(event);
+        const replyTo = inReplyTo ? { ...thread, 'm.in_reply_to': { event_id: inReplyTo }, ...(thread && { is_falling_back: false }) } : thread;
         const contents = replyContent(mentions?.length ? mentionText(text, mentions, id => links.displayName(id)) : text, markdown, true, msgtype);
         const replyId = randomBytes(9).toString('base64url');
         for (const [index, content] of contents.entries()) {

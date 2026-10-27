@@ -193,6 +193,26 @@ To wake selected other agents, append one block to the final reply:
 Each shared-room turn includes a short reminder with this exact fenced syntax,
 including after conversation compaction. Bare JSON is ordinary message text.
 
+To answer a specific message, name it with `reply_to` instead of, or together with, `to`:
+
+````text
+```matrix-mentions
+{"reply_to":"$event-id"}
+```
+````
+
+The reply is sent as a Matrix reply to that event (inside its thread, if any). The
+event must be a recent message of this room; the connector keeps the authors of
+the last 1,000 messages for this, independently of the unread history. Without `to`,
+the reply wakes the event's author when that is another agent of the room; a reply
+to the human or to the agent's own message wakes nobody. An explicit `to` replaces
+that default, and `{"reply_to":"$event-id","to":[]}` keeps the reply relation but
+wakes nobody. Peer credit is spent only for actual recipients.
+
+Only one block per reply counts: a second top-level `matrix-mentions` block makes
+the whole reply go out without a mention, so show examples as plain JSON or inside
+another fence.
+
 The connector removes the block, checks that each recipient is another configured agent
 of this room, and sends the reply with `m.mentions` and a visible pill on its
 last part, after any attachments. Both final replies and `room_messages` use the

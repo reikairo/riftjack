@@ -20,7 +20,10 @@ type Delivery = Record<string, { members: string; cursor: Cursor; notes: number;
 // quoted: messages an agent already received inside a mention notice;
 // notes: connector notices for an agent's next turn.
 type ExecutorRequest = { sender: string; executor: string; id: string; action: string; wakeIntervalSeconds?: number };
+// senders: [event id, sender] of recent messages, kept after the messages themselves are read and pruned,
+// so a reply can name the event it answers and reach its author.
 type History = Record<string, { members: string; messages: Entry[]; next: number; seen: string[]; readers: Record<string, Cursor>;
+  senders?: [string, string][];
   executorRequests?: Record<string, ExecutorRequest>; mentioned?: Record<string, string[]>; quoted?: Record<string, string[]>; notes?: Record<string, string[]> }>;
 // A local agent's reserve for starting its peer, and when the human message
 // it derives from arrived. A grant is one paid mention, reserved when the
@@ -193,6 +196,7 @@ export class ConversationLinks {
       } catch { /* Ordinary text, not a structured executor request. */ }
     }
     log.seen.push(event.event_id); log.seen = log.seen.slice(-10_000);
+    log.senders = [...log.senders ?? [], [event.event_id, event.sender] as [string, string]].slice(-1000);
     this.history[room] = log;
     this.saveHistory();
     return true;
@@ -281,16 +285,30 @@ export class ConversationLinks {
     if (!blocks.length) return { text, mentions: [] };
     // Rebuilt from the top-level tokens, so an identical example elsewhere is kept.
     const rest = tokens.filter(token => !isMentionBlock(token)).map(token => token.raw).join('').trim();
-    let to: unknown;
-    try { to = (JSON.parse(blocks[0].text) as { to?: unknown } | null)?.to; } catch {}
+    let to: unknown, replyTo: unknown, parsed = false;
+    try {
+      const block = JSON.parse(blocks[0].text) as { to?: unknown; reply_to?: unknown } | null;
+      parsed = !!block && typeof block === 'object' && !Array.isArray(block);
+      ({ to, reply_to: replyTo } = parsed ? block! : {});
+    } catch {}
+    // reply_to: the reply is sent as a Matrix reply to that event of this room. Without "to" it wakes the
+    // event's author when that is another agent here; an explicit "to" replaces that, and {"to":[]} keeps
+    // the reply relation but wakes nobody.
+    const author = typeof replyTo === 'string' ? this.log(room)?.senders?.find(([id]) => id === replyTo)?.[1] : undefined;
+    // (a reply to the human or to oneself wakes nobody by default)
+    if (replyTo !== undefined && to === undefined && author) to = author !== bot && shared.bots.includes(author) ? [author] : [];
+    const recipients = Array.isArray(to) && to.every(id => typeof id === 'string') ? [...new Set(to as string[])] : undefined;
     const error = blocks.length > 1 ? 'Mention not sent: use a single matrix-mentions block.'
       : rest.length > MENTION_REPLY_LIMIT ? `Mention not sent: a reply that mentions another agent must be at most ${MENTION_REPLY_LIMIT} characters.`
-      : !Array.isArray(to) || !to.length || !to.every(id => typeof id === 'string') ? 'Mention not sent: the matrix-mentions block needs JSON like {"to":["@agent:example.com"]}.'
-      : !to.every(id => id !== bot && shared.bots.includes(id)) ? 'Mention not sent: only other agents in this shared room can be mentioned.'
-      : this.peerCredit(bot) < 1 ? 'Mention not sent: no peer credit is left. It is restored when the human next writes to you.'
-      : new Set(to as string[]).size > this.peerCredit(bot) ? 'Mention not sent: insufficient peer credit for all recipients; select fewer agents.' : undefined;
+      : !parsed || (replyTo !== undefined && typeof replyTo !== 'string') ? 'Mention not sent: the matrix-mentions block needs JSON like {"to":["@agent:example.com"]} or {"reply_to":"$event"}.'
+      : replyTo !== undefined && !author ? 'Mention not sent: reply_to must name a recent message of this room.'
+      : replyTo === undefined && (!recipients || !recipients.length) ? 'Mention not sent: the matrix-mentions block needs JSON like {"to":["@agent:example.com"]}.'
+      : !recipients ? 'Mention not sent: "to" must be a list of agents, or [] to wake nobody.'
+      : !recipients.every(id => id !== bot && shared.bots.includes(id)) ? 'Mention not sent: only other agents in this shared room can be mentioned.'
+      : recipients.length && this.peerCredit(bot) < 1 ? 'Mention not sent: no peer credit is left. It is restored when the human next writes to you.'
+      : recipients.length > this.peerCredit(bot) ? 'Mention not sent: insufficient peer credit for all recipients; select fewer agents.' : undefined;
     if (error) { this.note(bot, room, error); return { text: rest, mentions: [], error }; }
-    return { text: rest, mentions: [...new Set(to as string[])] };
+    return { text: rest, mentions: recipients!, ...(typeof replyTo === 'string' && { replyTo }) };
   }
   // Delivered once with the agent's next prompt that includes this room.
   note(bot: string, room: string, text: string): void {

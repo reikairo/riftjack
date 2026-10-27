@@ -694,6 +694,41 @@ test('credit passed to the peer never adds to the peer\'s own pending mentions',
   assert.ok(replies.filter(event => links.mention(peer, group, event)).length <= PEER_CREDIT - 1);
 });
 
+test('reply_to answers a message of the room and wakes its author agent unless to says otherwise', t => {
+  const f = pair(t), links = f.links;
+  links.observe(bot, group, message('Task', '$h1'));
+  links.observe(bot, group, message('Question from the peer', '$p1', peer));
+  links.credit(bot);
+  const block = (json: string) => 'Answer\n```matrix-mentions\n' + json + '\n```';
+  // default: the author of the event, if it is another agent of the room
+  assert.deepEqual(links.mentions(bot, group, block('{"reply_to":"$p1"}')), { text: 'Answer', mentions: [peer], replyTo: '$p1' });
+  // a reply to the human wakes nobody, but keeps the relation
+  assert.deepEqual(links.mentions(bot, group, block('{"reply_to":"$h1"}')), { text: 'Answer', mentions: [], replyTo: '$h1' });
+  // to:[] opts out of waking; an explicit to replaces the default
+  assert.deepEqual(links.mentions(bot, group, block('{"reply_to":"$p1","to":[]}')), { text: 'Answer', mentions: [], replyTo: '$p1' });
+  assert.deepEqual(links.mentions(bot, group, block(`{"reply_to":"$h1","to":["${peer}"]}`)),
+    { text: 'Answer', mentions: [peer], replyTo: '$h1' });
+  // the author is still known after the message itself was read and pruned from the history
+  links.prompt(bot, group, message('Next', '$h2'), 'Next');
+  links.acknowledge(bot);
+  links.prompt(peer, group, message('Next', '$h2'), 'Next');
+  links.acknowledge(peer);
+  assert.deepEqual(links.mentions(bot, group, block('{"reply_to":"$p1"}'))!.mentions, [peer]);
+  // unknown events, wrong types and to:[] without reply_to are refused; the text still goes out
+  for (const bad of ['{"reply_to":"$unknown"}', '{"reply_to":5}', '{"reply_to":"$p1","to":"x"}', '{"to":[]}', '["$p1"]',
+    `{"reply_to":"$p1","to":["${human}"]}`]) {
+    const parsed = links.mentions(bot, group, block(bad))!;
+    assert.deepEqual(parsed.mentions, [], bad);
+    assert.equal(parsed.replyTo, undefined, bad);
+    assert.ok(parsed.error, bad);
+    assert.equal(parsed.text, 'Answer');
+  }
+  // only one block counts: two blocks, even one being an intended example, send no mention
+  const two = links.mentions(bot, group, block('{"reply_to":"$p1"}') + '\n' + block('{"to":[]}'))!;
+  assert.deepEqual(two.mentions, []);
+  assert.match(two.error!, /single/);
+});
+
 test('mention blocks are validated, removed and reported back to the agent', t => {
   const f = pair(t), links = f.links;
   links.observe(bot, group, message('Task', '$h1'));
