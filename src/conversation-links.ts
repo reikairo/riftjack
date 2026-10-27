@@ -294,7 +294,9 @@ export class ConversationLinks {
     // reply_to: the reply is sent as a Matrix reply to that event of this room. Without "to" it wakes the
     // event's author when that is another agent here; an explicit "to" replaces that, and {"to":[]} keeps
     // the reply relation but wakes nobody.
-    const author = typeof replyTo === 'string' ? this.log(room)?.senders?.find(([id]) => id === replyTo)?.[1] : undefined;
+    const log = typeof replyTo === 'string' ? this.log(room) : undefined;
+    // Unread messages stay in the log even when older histories lack senders or the index has moved past them.
+    const author = log?.messages.find(entry => entry.id === replyTo)?.sender ?? log?.senders?.find(([id]) => id === replyTo)?.[1];
     // (a reply to the human or to oneself wakes nobody by default)
     if (replyTo !== undefined && to === undefined && author) to = author !== bot && shared.bots.includes(author) ? [author] : [];
     const recipients = Array.isArray(to) && to.every(id => typeof id === 'string') ? [...new Set(to as string[])] : undefined;

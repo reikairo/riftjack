@@ -171,6 +171,14 @@ function splitHtml(html: string, msgtype: Content['msgtype']): Content[] {
   return parts;
 }
 
+// The m.relates_to of a bot reply. It stays in the thread of the message being answered. An agent's
+// matrix-mentions reply_to adds a Matrix reply to that event; inside a thread is_falling_back:false
+// marks it as a real reply rather than the thread fallback.
+export function replyRelation(thread: { rel_type: string; event_id?: string } | undefined, inReplyTo?: string) {
+  if (!inReplyTo) return thread;
+  return { ...thread, 'm.in_reply_to': { event_id: inReplyTo }, ...(thread && { is_falling_back: false }) };
+}
+
 export function replyContent(text: string, formatted = false, truncate = true, msgtype: Content['msgtype'] = 'm.notice'): Content[] {
   if (!formatted) return messageParts(text).map(body => ({ msgtype, body }));
   const chars = Array.from(text);

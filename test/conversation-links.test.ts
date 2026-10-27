@@ -7,7 +7,7 @@ import { MatrixMedia } from '../src/media.js';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ConversationLinks, isSharedRoomState, MENTION_REPLY_LIMIT, mentionText, PEER_CREDIT } from '../src/conversation-links.js';
-import { replyContent } from '../src/message-format.js';
+import { replyContent, replyRelation } from '../src/message-format.js';
 import { State } from '../src/state.js';
 import { linkedRoomMessages, roomMessageDelivery } from '../src/room-messages.js';
 import { AGENT_TRIGGER, Bridge, GRANT, NOTICE, REPLY, SERVICE, sessionKey, type MatrixEvent } from '../src/bridge.js';
@@ -727,6 +727,43 @@ test('reply_to answers a message of the room and wakes its author agent unless t
   const two = links.mentions(bot, group, block('{"reply_to":"$p1"}') + '\n' + block('{"to":[]}'))!;
   assert.deepEqual(two.mentions, []);
   assert.match(two.error!, /single/);
+});
+
+test('reply_to finds the author of an unread message without the sender index', t => {
+  const f = pair(t), links = f.links;
+  links.observe(bot, group, message('Question from the peer', '$p1', peer));
+  links.credit(bot);
+  const block = 'Answer\n```matrix-mentions\n{"reply_to":"$p1"}\n```';
+  // A history saved before the sender index existed has only its messages.
+  delete (links as unknown as { history: Record<string, { senders?: unknown }> }).history[group].senders;
+  assert.deepEqual(links.mentions(bot, group, block), { text: 'Answer', mentions: [peer], replyTo: '$p1' });
+  // A thousand newer messages push the event out of the index while it is still unread.
+  for (let i = 0; i < 1000; i++) links.observe(bot, group, message('Chatter ' + i, '$h' + i));
+  assert.deepEqual(links.mentions(bot, group, block), { text: 'Answer', mentions: [peer], replyTo: '$p1' });
+});
+
+test('a reply_to reaches the Matrix reply as its event, inside the thread when there is one', async t => {
+  assert.equal(replyRelation(undefined), undefined);
+  assert.deepEqual(replyRelation({ rel_type: 'm.thread', event_id: '$root' }), { rel_type: 'm.thread', event_id: '$root' });
+  assert.deepEqual(replyRelation(undefined, '$p1'), { 'm.in_reply_to': { event_id: '$p1' } });
+  assert.deepEqual(replyRelation({ rel_type: 'm.thread', event_id: '$root' }, '$p1'),
+    { rel_type: 'm.thread', event_id: '$root', 'm.in_reply_to': { event_id: '$p1' }, is_falling_back: false });
+  const f = pair(t), replies: (string | undefined)[] = [];
+  f.links.credit(bot);
+  f.links.observe(bot, group, message('Question from the peer', '$p1', peer));
+  const answers = ['Yes\n```matrix-mentions\n{"reply_to":"$p1"}\n```', 'Plain answer'];
+  const builder = new Bridge({ botId: bot, owner: human, kind: 'codex', state: f.state, since: 0, timeoutMs: 5000,
+    isAuthorized: id => id === human, isPrivateRoom: async () => true,
+    linkedSession: (room, event) => f.links.key(bot, room, event), report: e => { throw e; },
+    mentions: (room, text) => f.links.mentions(bot, room, text),
+    reply: async (_room, _event, text, _markdown, msgtype = 'm.notice', _mentions, _sent, replyTo) => {
+      if (msgtype === 'm.text') replies.push(`${text}|${replyTo}`);
+    },
+    run: async () => answers.shift()!,
+  });
+  await builder.handle(group, message('Answer the peer', '$h1'));
+  await builder.handle(group, message('And now plainly', '$h2'));
+  assert.deepEqual(replies, ['Yes|$p1', 'Plain answer|undefined']);
 });
 
 test('mention blocks are validated, removed and reported back to the agent', t => {
