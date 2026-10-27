@@ -27,6 +27,31 @@ test('GitHub MCP has scoped authentication and closes at the end of the task', a
   await assert.rejects(post(server.headers.Authorization, 3));
 });
 
+test('GitHub MCP reads approved repositories without a subscription or a command approval', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'github-mcp-read-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const requests: string[] = [];
+  const subscriptions = new GitHubSubscriptions(join(root, 'subscriptions.json'), { ghConfigDir: root, repositories: ['example/project'] },
+    new BackgroundTasks(join(root, 'background.json'), root), async endpoint => { requests.push(endpoint); return [{ id: 7, body: 'Full review body', commit_id: 'a'.repeat(40) }]; });
+  const target = { room: '!room:test', sender: '@alice:test', key: 'key', session: 'session' };
+  const server = await startGitHubMcp((args, signal) => subscriptions.action(args, target, signal), new AbortController().signal);
+  t.after(() => server.close()); let id = 0;
+  const rpc = async (method: string, params?: object) => (await (await fetch(server.url, { method: 'POST',
+    headers: { ...server.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) })).json());
+  const schema = (await rpc('tools/list')).result.tools[0].inputSchema.properties;
+  assert.ok(schema.action.enum.includes('read')); assert.ok(schema.resource.enum.includes('review_comments'));
+  const args = { action: 'read', repository: 'example/project', pull_request: 1, resource: 'reviews', per_page: 10 };
+  const response = await rpc('tools/call', { name: 'github_subscriptions', arguments: args });
+  assert.ok(!response.result.isError);
+  const result = JSON.parse(response.result.content[0].text);
+  assert.equal(result.data[0].body, 'Full review body'); assert.equal(result.next_page, null);
+  assert.deepEqual(requests, ['repos/example/project/pulls/1/reviews?per_page=10&page=1']);
+  const denied = await rpc('tools/call', { name: 'github_subscriptions', arguments: { ...args, repository: 'private/other' } });
+  assert.ok(denied.result.isError); assert.equal(requests.length, 1);
+  const list = await rpc('tools/call', { name: 'github_subscriptions', arguments: { action: 'list' } });
+  assert.deepEqual(JSON.parse(list.result.content[0].text).subscriptions, []);
+});
+
 for (const kind of ['codex', 'claude'] as const) test(`${kind} registers through MCP and resumes the same session after a PR change`, { timeout: 20_000 }, async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'background-mcp-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));

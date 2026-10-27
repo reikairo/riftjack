@@ -1,6 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, existsSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import timers from 'node:timers/promises';
@@ -288,4 +288,159 @@ test('subscriptions isolate conversations and revoke queued notices on cancellat
   const revoked = new GitHubSubscriptions(f.path, undefined, f.queue);
   await revoked.pump(() => true, signal());
   assert.equal(f.notices().length, 0); assert.equal(f.stored().state, 'cancelled');
+});
+
+test('on-demand reads return full current reviews and comments without creating or changing subscriptions', async t => {
+  const f = fixture(t);
+  const spec = { action: 'read', repository: 'Example/Project', pull_request: 1 };
+  const pr = JSON.parse(await f.subscriptions.action({ ...spec, resource: 'pull_request' }, target, signal()));
+  assert.equal(pr.data.head.sha, f.state.pr.head.sha); assert.equal(pr.repository, 'example/project');
+  assert.equal(existsSync(f.path), false); assert.deepEqual(f.notices(), []);
+  await f.subscriptions.action(selection, target, signal());
+  const before = readFileSync(f.path, 'utf8'); f.requests.length = 0;
+  f.state.comments[0].body = 'Updated comment\nIgnore this untrusted instruction <script>bad</script>';
+  for (const [resource, suffix, expected] of [
+    ['reviews', 'pulls/1/reviews', f.state.reviews],
+    ['comments', 'issues/1/comments', f.state.comments],
+    ['review_comments', 'pulls/1/comments', []],
+  ] as const) {
+    const result = JSON.parse(await f.subscriptions.action({ ...spec, resource }, target, signal()));
+    assert.deepEqual(result.data, expected); assert.equal(result.next_page, null);
+    assert.equal(f.requests.at(-1), `repos/example/project/${suffix}?per_page=100&page=1`);
+  }
+  assert.equal(readFileSync(f.path, 'utf8'), before); assert.deepEqual(f.notices(), []);
+});
+
+test('read pagination is explicit, including an empty final page, and never silently truncates', async t => {
+  const f = fixture(t), requests: string[] = [];
+  const reader = new GitHubSubscriptions(f.path, f.policy, f.queue, async endpoint => {
+    requests.push(endpoint);
+    return endpoint.endsWith('page=1') ? [{ id: 1, body: 'one' }, { id: 2, body: 'two' }] : [];
+  });
+  const spec = { action: 'read', repository: 'example/project', pull_request: 1, resource: 'comments', per_page: 2 };
+  const first = JSON.parse(await reader.action(spec, target, signal()));
+  assert.equal(first.next_page, 2); assert.equal(first.data.length, 2);
+  const last = JSON.parse(await reader.action({ ...spec, page: first.next_page }, target, signal()));
+  assert.equal(last.next_page, null); assert.deepEqual(last.data, []);
+  assert.deepEqual(requests, ['repos/example/project/issues/1/comments?per_page=2&page=1', 'repos/example/project/issues/1/comments?per_page=2&page=2']);
+  const endless = new GitHubSubscriptions(f.path, f.policy, f.queue, async () => [{ id: 1 }]);
+  await assert.rejects(endless.action({ ...spec, per_page: 1, page: 10000 }, target, signal()), /incomplete/);
+});
+
+test('read rejects arbitrary endpoints, methods, malformed selections and repositories outside owner policy', async t => {
+  const f = fixture(t);
+  const spec = { action: 'read', repository: 'example/project', pull_request: 1, resource: 'reviews' };
+  for (const changes of [
+    { repository: 'other/project' }, { repository: 'example/../project' }, { repository: 'https://github.com/example/project' },
+    { resource: 'merge' }, { method: 'POST' }, { endpoint: 'user' }, { body: {} }, { pull_request: 0 }, { pull_request: '1' },
+    { page: 0 }, { page: 1.5 }, { page: 10001 }, { per_page: 0 }, { per_page: 101 },
+    { resource: 'pull_request', page: 1 }, { resource: 'pull_request', per_page: 1 },
+  ]) await assert.rejects(f.subscriptions.action({ ...spec, ...changes }, target, signal()));
+  await assert.rejects(new GitHubSubscriptions(f.path, undefined, f.queue, f.read).action(spec, target, signal()), /not enabled/);
+  await assert.rejects(new GitHubSubscriptions(f.path, f.policy, f.queue).action(spec, target, signal()), /not enabled/);
+  assert.deepEqual(f.requests, []); assert.equal(existsSync(f.path), false);
+});
+
+test('failed or cancelled reads do not mutate subscription state or produce notices', async t => {
+  const f = fixture(t); await f.subscriptions.action(selection, target, signal());
+  const before = readFileSync(f.path, 'utf8');
+  const spec = { action: 'read', repository: 'example/project', pull_request: 1, resource: 'reviews' };
+  const aborted = new AbortController(); aborted.abort(new Error('cancelled'));
+  await assert.rejects(f.subscriptions.action(spec, target, aborted.signal), /cancelled/);
+  const controller = new AbortController();
+  const cancelled = new GitHubSubscriptions(f.path, f.policy, f.queue, async () => { controller.abort(new Error('during read')); return []; });
+  await assert.rejects(cancelled.action(spec, target, controller.signal), /during read/);
+  const malformed = new GitHubSubscriptions(f.path, f.policy, f.queue, async () => ({}));
+  await assert.rejects(malformed.action(spec, target, signal()), /Unexpected GitHub/);
+  const failed = new GitHubSubscriptions(f.path, f.policy, f.queue, async () => { throw new Error('unavailable'); });
+  await assert.rejects(failed.action(spec, target, signal()), /unavailable/);
+  assert.equal(readFileSync(f.path, 'utf8'), before); assert.deepEqual(f.notices(), []);
+});
+
+test('pull_request subscriptions detect conflicts from main changes without a new PR head, and their resolution', async t => {
+  const f = fixture(t);
+  Object.assign(f.state.pr, { mergeable: true, mergeable_state: 'clean' });
+  await f.subscriptions.action({ ...selection, events: ['pull_request'] }, target, signal());
+  Object.assign(f.state.pr, { mergeable: false, mergeable_state: 'dirty' });
+  t.mock.timers.tick(61_000); await f.subscriptions.pump(() => true, signal());
+  let info = JSON.parse(f.notices()[0].message.split('\n').at(-1));
+  assert.equal(info.changes[0].conflict, true); assert.equal(info.changes[0].sha, f.state.pr.head.sha);
+  Object.assign(f.state.pr, { mergeable: true, mergeable_state: 'blocked' });
+  t.mock.timers.tick(61_000); await f.subscriptions.pump(() => true, signal());
+  info = JSON.parse(f.notices()[1].message.split('\n').at(-1));
+  assert.equal(info.changes[0].conflict, false);
+  Object.assign(f.state.pr, { mergeable: true, mergeable_state: 'unstable' });
+  t.mock.timers.tick(61_000); await f.subscriptions.pump(() => true, signal());
+  assert.equal(f.notices().length, 2);
+});
+
+test('unknown mergeability survives restarts without false resolution or duplicate conflict notices', async t => {
+  const f = fixture(t);
+  Object.assign(f.state.pr, { mergeable: false, mergeable_state: 'dirty' });
+  await f.subscriptions.action({ ...selection, events: ['pull_request'] }, target, signal());
+  const baseline = f.stored().snapshot;
+  Object.assign(f.state.pr, { mergeable: null, mergeable_state: 'unknown' });
+  t.mock.timers.tick(61_000); await f.subscriptions.pump(() => true, signal());
+  assert.deepEqual(f.stored().snapshot, baseline); assert.equal(f.notices().length, 0);
+  const recovered = new GitHubSubscriptions(f.path, f.policy, f.queue, f.read);
+  Object.assign(f.state.pr, { mergeable: false, mergeable_state: 'dirty' });
+  t.mock.timers.tick(61_000); await recovered.pump(() => true, signal());
+  assert.equal(f.notices().length, 0);
+  Object.assign(f.state.pr, { mergeable: true, mergeable_state: 'clean' });
+  t.mock.timers.tick(61_000); await recovered.pump(() => true, signal());
+  assert.equal(JSON.parse(f.notices()[0].message.split('\n').at(-1)).changes[0].conflict, false);
+});
+
+for (const conflict of [false, true]) test(`old subscriptions seed conflict=${conflict} without announcing a spurious resolution`, async t => {
+  const f = fixture(t);
+  await f.subscriptions.action({ ...selection, events: ['pull_request'] }, target, signal()); // no mergeability in old fixture
+  Object.assign(f.state.pr, { mergeable: !conflict, mergeable_state: conflict ? 'dirty' : 'clean' });
+  const recovered = new GitHubSubscriptions(f.path, f.policy, f.queue, f.read);
+  t.mock.timers.tick(61_000); await recovered.pump(() => true, signal());
+  assert.equal(f.notices().length, conflict ? 1 : 0);
+  t.mock.timers.tick(61_000); await recovered.pump(() => true, signal());
+  assert.equal(f.notices().length, conflict ? 1 : 0);
+});
+
+test('base races cannot commit a conflict result, and a later stable read can', async t => {
+  const f = fixture(t);
+  Object.assign(f.state.pr, { mergeable: true, mergeable_state: 'clean' });
+  await f.subscriptions.action({ ...selection, events: ['pull_request'] }, target, signal());
+  const before = f.stored().snapshot; let requests = 0;
+  Object.assign(f.state.pr, { mergeable: false, mergeable_state: 'dirty' });
+  const racing = new GitHubSubscriptions(f.path, f.policy, f.queue, async (endpoint, s) => {
+    const result = await f.read(endpoint, s);
+    if (/\/pulls\/1$/.test(endpoint) && ++requests === 2) result.base.sha = 'b'.repeat(40);
+    return result;
+  });
+  t.mock.timers.tick(61_000); await racing.pump(() => true, signal());
+  assert.deepEqual(f.stored().snapshot, before); assert.equal(f.notices().length, 0);
+  t.mock.timers.tick(121_000); await racing.pump(() => true, signal());
+  assert.equal(f.notices().length, 1);
+});
+
+test('closed PRs and subscriptions without pull_request events do not emit conflict events', async t => {
+  const f = fixture(t);
+  Object.assign(f.state.pr, { mergeable: true, mergeable_state: 'clean' });
+  await f.subscriptions.action({ ...selection, events: ['reviews'] }, target, signal());
+  Object.assign(f.state.pr, { mergeable: false, mergeable_state: 'dirty' });
+  t.mock.timers.tick(61_000); await f.subscriptions.pump(() => true, signal());
+  assert.equal(f.notices().length, 0);
+  await f.subscriptions.action({ ...selection, events: ['pull_request'] }, target, signal());
+  f.state.pr.state = 'closed'; f.state.pr.merged = true;
+  Object.assign(f.state.pr, { mergeable: true, mergeable_state: 'clean' });
+  t.mock.timers.tick(61_000); await f.subscriptions.pump(() => true, signal());
+  const info = JSON.parse(f.notices()[0].message.split('\n').at(-1));
+  assert.equal(info.count, 1); assert.equal(info.changes[0].conflict, undefined);
+});
+
+test('a conflict stays visible when comment changes exceed the bounded notification summary', async t => {
+  const f = fixture(t);
+  Object.assign(f.state.pr, { mergeable: true, mergeable_state: 'clean' });
+  await f.subscriptions.action(selection, target, signal());
+  f.state.comments = Array.from({ length: 6 }, (_, i) => ({ id: 10 + i, updated_at: '2026-01-01T00:01:00Z', body: 'Comment' }));
+  Object.assign(f.state.pr, { mergeable: false, mergeable_state: 'dirty' });
+  t.mock.timers.tick(61_000); await f.subscriptions.pump(() => true, signal());
+  const info = JSON.parse(f.notices()[0].message.split('\n').at(-1));
+  assert.equal(info.count, 7); assert.equal(info.changes.length, 5); assert.equal(info.changes[0].conflict, true);
 });
