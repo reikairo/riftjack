@@ -616,3 +616,37 @@ test('uncertain one-time room delivery remains current without automatic replay'
   assert.equal(JSON.parse(queue.action({ action: 'list' }, target, signal()))[0].state, 'interrupted');
   assert.equal(JSON.parse(queue.action({ action: 'history' }, target, signal())).total, 0);
 });
+
+test('watch read failures persist safe diagnostics and clear them after recovery', async t => {
+  const f = setup(t);
+  f.queue.action(input, target, signal());
+  writeFileSync(join(f.root, 'status.json'), '{private token');
+  const options = { valid: () => true, deliver: async () => false, report };
+  await f.queue.pump(options);
+  let entry = JSON.parse(f.queue.action({ action: 'list' }, target, signal()))[0];
+  assert.match(entry.last_error, /SyntaxError/);
+  assert.ok(entry.last_error_at);
+  assert.doesNotMatch(entry.last_error, /private|token/);
+  const restored = new BackgroundTasks(f.file, f.root);
+  assert.equal(JSON.parse(restored.action({ action: 'list' }, target, signal()))[0].last_error, entry.last_error);
+  f.status('building');
+  await restored.pump(options);
+  entry = JSON.parse(restored.action({ action: 'list' }, target, signal()))[0];
+  assert.equal(entry.last_error, undefined);
+});
+
+test('failed notification delivery remains diagnosable across restart and clears after success', async t => {
+  const f = setup(t);
+  f.queue.action(input, target, signal());
+  f.status('complete');
+  await f.queue.pump({ valid: () => true, report: () => {}, deliver: async (_target, _event, admitted) => {
+    admitted(); throw Object.assign(new Error('private response body'), { code: 'ECONNRESET' });
+  } });
+  const saved = JSON.parse(f.queue.action({ action: 'list' }, target, signal()))[0];
+  assert.match(saved.last_error, /ECONNRESET/);
+  assert.equal(saved.last_error_stage, 'delivery');
+  const restored = new BackgroundTasks(f.file, f.root);
+  await restored.pump({ valid: () => true, report, deliver: async (_target, _event, admitted) => { admitted(); return true; } });
+  const history = JSON.parse(restored.action({ action: 'history' }, target, signal()));
+  assert.equal(history.items[0].last_error, undefined);
+});

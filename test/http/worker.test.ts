@@ -75,3 +75,19 @@ test('worker HTTP API authenticates per bot, supports long polling, and validate
   assert.ok(feedback.conversation.includes('$thread'));
 
 });
+
+test('worker service failures expose a safe cause without leaking exception text', async t => {
+  const server = new WorkerServer();
+  server.add('@worker:test', 'a'.repeat(43), { claim: async () => {
+    throw Object.assign(new Error('private database path and token'), { code: 'ENOSPC', syscall: 'write' });
+  } } as unknown as WorkerService);
+  const port = await server.start(0);
+  t.after(() => server.stop());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/bots/%40worker%3Atest/tasks`, {
+    headers: { Authorization: 'Bearer ' + 'a'.repeat(43) },
+  });
+  assert.equal(response.status, 503);
+  const body = await response.text();
+  assert.match(body, /ENOSPC.*write/);
+  assert.doesNotMatch(body, /private database|token/);
+});

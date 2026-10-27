@@ -9,7 +9,7 @@ import { uploadEncrypted, type UploadMeasurement } from './media-upload.js';
 
 export const MAX_ATTACHMENTS = 10;
 export type IncomingAttachment = { path: string; name: string; mimetype: string; size: number; image: boolean;
-  transcription?: { status: 'complete'; text: string; automatic: true } | { status: 'unavailable'; reason: string } };
+  transcription?: { status: 'complete'; text: string; automatic: true } | { status: 'unavailable'; reason: string; diagnostic?: { stage: string; summary: string } } };
 export type OutgoingAttachment = { path: string; root: string; name?: string };
 export type BackendReply = { text: string; attachments: OutgoingAttachment[] };
 export type MediaContent = {

@@ -6,6 +6,21 @@ import { readFileSync, writeFileSync, renameSync, openSync, closeSync, fsyncSync
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// This file is copied by itself into each approved run. Keep diagnostics self-contained and
+// allowlisted: subprocess errors can contain the complete command, environment or output.
+class RunnerError extends Error {}
+export function failureDetails(error, stage) {
+  const codes = new Set(['EPERM', 'EACCES', 'ENOENT', 'ENOSPC', 'EDQUOT', 'EMFILE', 'ENFILE', 'EIO', 'EROFS', 'EEXIST', 'ESRCH', 'EINVAL', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'ETIMEDOUT']);
+  const names = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'AbortError', 'TimeoutError']);
+  const signals = new Set(['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGSEGV', 'SIGBUS']);
+  return { stage, ...(error instanceof RunnerError && { message: error.message }), ...(names.has(error?.name) && { type: error.name }),
+    ...(codes.has(error?.code) && { code: error.code }),
+    ...(Number.isInteger(error?.code) && error.code >= 0 && error.code <= 255 && { exit_code: error.code }),
+    ...(signals.has(error?.signal) && { signal: error.signal }),
+    ...(error?.killed === true && { killed: true }) };
+}
+let phase = 'validate_launch';
+
 export const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 export function save(path, value) {
   const fd = openSync(path + '.tmp', 'w', 0o600);
@@ -28,14 +43,14 @@ export const same = (a, b) => !!a && !!b && a.pid === b.pid && a.birth === b.bir
 async function main() {
   process.umask(0o077);
   const [dir, hash, mode] = process.argv.slice(2);
-  if (!dir || !/^[a-f0-9]{64}$/.test(hash ?? '')) throw new Error('Use the exact launch argv returned by run_detached.');
+  if (!dir || !/^[a-f0-9]{64}$/.test(hash ?? '')) throw new RunnerError('Use the exact launch argv returned by run_detached.');
   const bytes = readFileSync(join(dir, 'command.json'));
-  if (digest(bytes) !== hash) throw new Error('Run specification changed; prepare a new run.');
+  if (digest(bytes) !== hash) throw new RunnerError('Run specification changed; prepare a new run.');
   const spec = JSON.parse(bytes);
-  if (digest(readFileSync(fileURLToPath(import.meta.url))) !== spec.launcher_sha256) throw new Error('Launcher changed.');
-  for (const file of spec.snapshots) if (digest(readFileSync(file.path)) !== file.sha256) throw new Error('Script snapshot changed.');
+  if (digest(readFileSync(fileURLToPath(import.meta.url))) !== spec.launcher_sha256) throw new RunnerError('Launcher changed.');
+  for (const file of spec.snapshots) if (digest(readFileSync(file.path)) !== file.sha256) throw new RunnerError('Script snapshot changed.');
   if (mode !== '--supervise') {
-    if (Date.now() > spec.launch_by || existsSync(join(dir, 'stop'))) throw new Error('Launch expired or stopped; prepare a new run.');
+    if (Date.now() > spec.launch_by || existsSync(join(dir, 'stop'))) throw new RunnerError('Launch expired or stopped; prepare a new run.');
     // Never automatically retry an uncertain spawn: the claim is permanent.
     const claim = openSync(join(dir, 'claimed'), 'wx', 0o600); closeSync(claim);
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), dir, hash, '--supervise'], {
@@ -47,10 +62,12 @@ async function main() {
     return;
   }
   // A copied supervisor cannot start the command twice either.
+  phase = 'claim_supervisor';
   const lock = openSync(join(dir, 'supervised'), 'wx', 0o600); closeSync(lock);
+  phase = 'inspect_process_table';
   let table = processes();
   const identity = table.find(p => p.pid === process.pid);
-  if (!identity) throw new Error('Cannot establish supervisor process identity.');
+  if (!identity) throw new RunnerError('Cannot establish supervisor process identity.');
   const state = { id: spec.id, status: 'starting', supervisor: identity, started_at: new Date().toISOString(), updated_at: '',
     child: null, descendants: [], exit_code: null, signal: null, reason: null, log_truncated: false,
     containment: 'Observed descendants only; processes escaping between observations cannot be guaranteed stopped.' };
@@ -69,9 +86,10 @@ async function main() {
     log = Buffer.concat([log, chunk]).subarray(-spec.max_log_bytes);
     writeFileSync(join(dir, 'output.log'), log, { mode: 0o600 });
   };
+  phase = 'spawn_command';
   const child = spawn(spec.argv[0], spec.argv.slice(1), { cwd: spec.cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', output); child.stderr.on('data', output);
-  child.once('error', error => { spawnError = true; state.reason = error.code || 'spawn_failed'; exited = true; });
+  child.once('error', error => { spawnError = true; state.reason = 'spawn_failed'; state.diagnostic = failureDetails(error, 'spawn_command'); exited = true; });
   child.once('exit', (code, signal) => { state.exit_code = code; state.signal = signal; exited = true; });
   const stop = reason => { if (!stopping) { stopping = Date.now(); state.reason = reason; } };
   process.on('SIGTERM', () => stop('stop_requested')); process.on('SIGINT', () => stop('stop_requested'));
@@ -103,13 +121,13 @@ async function main() {
         // cannot be checked. Escaped observed descendants are signalled singly.
         const leader = processes().find(p => p.pid === state.child?.pid);
         if (same(leader, state.child) && leader.pgid === leader.pid) {
-          try { process.kill(-leader.pgid, signal); } catch { /* individual identity checks below */ }
+          try { process.kill(-leader.pgid, signal); } catch (error) { state.diagnostic = failureDetails(error, 'signal_process_group'); /* individual identity checks below */ }
         }
         for (const p of alive) {
           try {
             const current = processes().find(x => x.pid === p.pid);
             if (same(current, p)) process.kill(p.pid, signal);
-          } catch (error) { if (error.code !== 'ESRCH') uncertain = true; }
+          } catch (error) { if (error.code !== 'ESRCH') { uncertain = true; state.diagnostic = failureDetails(error, 'signal_descendant'); } }
         }
       }
       if (exited && !alive.length) break;
@@ -118,7 +136,8 @@ async function main() {
       const changed = state.status !== next;
       state.status = next;
       if (changed || Date.now() - Date.parse(state.updated_at) >= 5000) persist();
-    } catch {
+    } catch (error) {
+      state.diagnostic = failureDetails(error, 'observe_running_command');
       // Failure to observe cannot justify sending signals to old identities.
       uncertain = true; state.reason = 'process_observation_failed'; break;
     }
@@ -134,8 +153,8 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
     try {
       const path = join(process.argv[2], 'status.json');
       const state = JSON.parse(readFileSync(path, 'utf8'));
-      save(path, { ...state, status: 'lost', reason: 'supervisor_failed', updated_at: new Date().toISOString() });
+      save(path, { ...state, status: 'lost', reason: 'supervisor_failed', diagnostic: failureDetails(error, phase), updated_at: new Date().toISOString() });
     } catch { /* the observer also treats missing or invalid status as lost */ }
   }
-  console.error(error.message); process.exitCode = 1;
+  console.error(JSON.stringify(failureDetails(error, phase))); process.exitCode = 1;
 });

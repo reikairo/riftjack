@@ -3,3 +3,5 @@ export function digest(bytes: string | Buffer): string;
 export function processes(): ProcessIdentity[];
 export function same(a?: ProcessIdentity, b?: ProcessIdentity): boolean;
 export function save(path: string, value: unknown): void;
+
+export function failureDetails(error: unknown, stage: string): { stage: string; type?: string; code?: string; exit_code?: number; signal?: string; killed?: boolean };

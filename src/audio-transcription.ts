@@ -1,3 +1,4 @@
+import { safeErrorSummary } from './errors.js';
 import { spawn } from 'node:child_process';
 import { accessSync, constants, realpathSync, statSync } from 'node:fs';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
@@ -78,11 +79,11 @@ async function run(executable: string, args: string[], signal: AbortSignal, inpu
       if (size > limit) stop(new Error('Decoded audio exceeds the duration limit.'));
       else chunks.push(data);
     });
-    child.once('close', code => {
+    child.once('close', (code, killed) => {
       clearTimeout(killTimer);
       signal.removeEventListener('abort', abort);
       if (failure) reject(failure);
-      else if (code !== 0) reject(new Error('Audio subprocess failed.'));
+      else if (code !== 0 || killed) reject(Object.assign(new Error('Audio subprocess failed.'), { code, signal: killed }));
       else resolve(Buffer.concat(chunks, size));
     });
     if (signal.aborted) abort();
@@ -111,24 +112,30 @@ export class AudioTranscriber {
     if (file.size > MAX_INPUT_BYTES) return unavailable('input-limit');
     this.busy = true;
     let directory: string | undefined;
+    let stage = 'read_audio';
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]);
     try {
-      const deadline = AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]);
       const input = await readOutgoing({ path: file.path, root: dirname(file.path) }, MAX_INPUT_BYTES);
+      stage = 'decode_audio';
       const pcm = await run(this.config.ffmpeg, ['-nostdin', '-hide_banner', '-loglevel', 'error',
         '-protocol_whitelist', 'pipe', '-i', 'pipe:0', '-map', '0:a:0', '-ac', '1', '-ar', '16000',
         '-t', String(this.config.maxSeconds + 1), '-f', 's16le', 'pipe:1'], deadline, input, (this.config.maxSeconds + 1) * 32000);
       if (!pcm.length || pcm.length % 2 || pcm.length > this.config.maxSeconds * 32000) return unavailable('duration-limit');
       deadline.throwIfAborted();
+      stage = 'prepare_transcription';
       directory = await realpath(await mkdtemp(join(tmpdir(), 'riftjack-audio-')));
       const audio = join(directory, 'audio.wav'), output = join(directory, 'transcript.txt');
       await writeFile(audio, wav(pcm), { mode: 0o600, flag: 'wx' });
+      stage = 'transcribe_audio';
       await run(this.config.executable, ['-m', this.config.model, '--quiet', '--threads', '2', '--timestamps', 'none', '-o', output, audio], deadline);
+      stage = 'read_transcript';
       const text = (await readOutgoing({ path: output, root: directory }, MAX_TEXT_BYTES)).toString('utf8').trim();
       deadline.throwIfAborted();
       return { ...file, transcription: { status: 'complete', text, automatic: true } };
-    } catch {
+    } catch (error) {
       signal.throwIfAborted(); // Cancellation stops the task; other failures keep the audio usable.
-      return unavailable('processing-failed');
+      return { ...file, transcription: { status: 'unavailable', reason: 'processing-failed',
+        diagnostic: { stage, summary: safeErrorSummary(deadline.aborted ? deadline.reason : error) } } };
     } finally {
       try { if (directory) await rm(directory, { recursive: true, force: true }); }
       finally { this.busy = false; }

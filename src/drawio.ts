@@ -50,7 +50,7 @@ export const renderDrawio: Renderer = async (executable, directory, signal) => {
       const kill = (sig: NodeJS.Signals) => {
         if (!child.pid) return;
         try { process.kill(-child.pid, sig); }
-        catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ESRCH') failure ??= new Error('Could not stop draw.io.'); }
+        catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ESRCH') failure ??= new PublicError('Could not stop draw.io.', { cause: e }); }
       };
       const stop = (error: Error) => {
         if (failure) return;
@@ -62,12 +62,12 @@ export const renderDrawio: Renderer = async (executable, directory, signal) => {
         if (s.size > MAX_PNG) stop(new PublicError('Rendered PNG exceeds 32 MiB.'));
       }).catch(() => {}); }, 100);
       child.once('error', e => { failure = e; });
-      child.once('close', code => {
+      child.once('close', (code, killed) => {
         clearInterval(sizeTimer); clearTimeout(killTimer); signal.removeEventListener('abort', abort);
         // Also reap helpers left by a failed/aborted Electron parent before cleanup.
         kill('SIGKILL');
         if (failure) reject(failure);
-        else if (code !== 0) reject(new PublicError('draw.io export failed. Check the configured desktop executable and display on the host.'));
+        else if (code !== 0 || killed) reject(new PublicError('draw.io export failed. Check the configured desktop executable and display on the host.', { cause: { code, signal: killed } }));
         else resolve();
       });
       if (signal.aborted) abort();

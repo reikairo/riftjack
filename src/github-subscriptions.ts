@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, relative } from 'node:path';
 import timers from 'node:timers/promises';
-import { PublicError } from './errors.js';
+import { PublicError, errorMessage, safeErrorSummary } from './errors.js';
 import type { BackgroundTarget, BackgroundTasks } from './background-tasks.js';
 
 const record = (x: unknown): x is Record<string, any> => !!x && typeof x === 'object' && !Array.isArray(x);
@@ -105,7 +105,7 @@ export function githubReader(policy: GitHubPolicy): GitHubRead {
               // Do not expose stderr or the untrusted API response body.
               reject(new PublicError(secondary || exhausted || retry > 0
                 ? `GitHub request failed (HTTP ${status || 'unknown'} rate limit). Requests sharing these credentials are paused until ${new Date(shared.notBefore).toISOString()}.`
-                : 'GitHub request failed. Check gh authentication, repository access and API rate limits.'));
+                : `GitHub request failed (${safeErrorSummary(Object.assign(new Error(), { cause: error, status }))}). ${status === 401 ? 'Authentication was rejected; check the configured gh account.' : status === 403 ? 'Access was denied; check repository permissions and organization policy.' : status === 404 ? 'Repository or resource was not found, or the account cannot access it.' : status >= 500 ? 'GitHub returned a server error; retry later.' : 'Check gh availability, authentication and connectivity.'}`));
               return;
             }
             try { resolve(JSON.parse(body)); } catch { reject(new PublicError('GitHub returned an invalid JSON response.')); }
@@ -337,7 +337,7 @@ export class GitHubSubscriptions {
         } catch (error) {
           if (signal.aborted) return;
           s.failures = Math.min(s.failures + 1, 10);
-          s.last_error = error instanceof PublicError ? error.message : 'GitHub subscription polling failed.';
+          s.last_error = errorMessage(error, 'GitHub subscription polling failed');
           s.next = Date.now() + Math.min(3_600_000, s.interval_seconds * 1000 * 2 ** s.failures); this.save();
           if (s.failures === 3 && valid(s) && s.state === 'active') {
             try {

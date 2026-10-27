@@ -46,9 +46,10 @@ async function git(repo: string, args: string[], signal: AbortSignal, input?: st
     operation.child.stdin?.end(input);
     const { stdout } = await operation;
     return stdout;
-  } catch {
+  } catch (cause) {
     signal.throwIfAborted();
-    throw new PublicError('Git review operation failed or exceeded its size/time limit. Check repository access and Git authentication on the host.');
+    const operation = args.find(arg => ['rev-parse', 'config', 'ls-remote', 'rev-list', 'diff', 'show', 'log', 'merge-base', 'status', 'push', 'for-each-ref', 'check-ref-format', 'cat-file'].includes(arg)) ?? 'request';
+    throw new PublicError(`Git review operation failed or exceeded its size/time limit (operation: ${operation}). Check repository access and Git authentication on the host.`, { cause });
   }
 }
 
@@ -195,8 +196,8 @@ export async function pushReviewed(review: PublishReview, signal: AbortSignal, a
   try {
     await git(review.repository, ['-c', 'push.followTags=false', 'push', '--porcelain', '--no-follow-tags', '--recurse-submodules=no',
       '--force-with-lease=refs/heads/' + review.branch + ':' + (review.base ?? ''), '--', review.url, review.head + ':refs/heads/' + review.branch], signal);
-  } catch {
-    throw new PublicError('Publication was not confirmed. It may have reached the remote; check the destination before retrying. Nothing was retried automatically.');
+  } catch (cause) {
+    throw new PublicError('Publication was not confirmed. It may have reached the remote; check the destination before retrying. Nothing was retried automatically.', { cause });
   }
 }
 

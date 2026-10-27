@@ -444,3 +444,15 @@ test('a conflict stays visible when comment changes exceed the bounded notificat
   const info = JSON.parse(f.notices()[0].message.split('\n').at(-1));
   assert.equal(info.count, 7); assert.equal(info.changes.length, 5); assert.equal(info.changes[0].conflict, true);
 });
+
+for (const [status, hint] of [[401, /Authentication was rejected/], [403, /Access was denied/], [404, /not found/], [503, /server error/]] as const) {
+  test(`GitHub HTTP ${status} remains diagnosable without forwarding the response body`, async t => {
+    const f = rateFixture(t, [{ status, message: 'private token and server details' }]);
+    await assert.rejects(f.read(), (error: Error) => {
+      assert.match(error.message, new RegExp(`HTTP ${status}`));
+      assert.match(error.message, hint);
+      assert.doesNotMatch(error.message, /private token|server details/);
+      return true;
+    });
+  });
+}

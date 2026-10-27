@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type ServerResponse } from 'node:http';
-import { PublicError } from './errors.js';
+import { errorMessage } from './errors.js';
 export type ToolAction = (input: unknown, signal: AbortSignal) => Promise<string>;
 export type ToolConnection = { url: string; headers: { Authorization: string } };
 export type ToolDefinition = { name: string; description: string; inputSchema: object; annotations: object };
@@ -104,13 +104,17 @@ export async function startToolMcp(tool: ToolDefinition, action: ToolAction, sig
       } catch (cause) {
         result({ isError: true, content: [{ type: 'text', text: callSignal.aborted
           ? messages.cancelled
-          : cause instanceof PublicError ? cause.message : messages.failed }] });
+          : errorMessage(cause, messages.failed) }] });
       } finally {
         res.removeListener('close', disconnected); requests.delete(id);
         if (acquired) release();
       }
     };
-    const operation = handle().catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
+    const operation = handle().catch(cause => {
+      if (!res.headersSent && !res.destroyed) res.writeHead(500, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        .end(JSON.stringify({ error: errorMessage(cause, 'MCP request transport failed') }));
+      else res.end();
+    });
     operations.add(operation);
     void operation.finally(() => operations.delete(operation));
   });

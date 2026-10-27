@@ -1,7 +1,7 @@
 import { constants, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, writeFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
-import { PublicError } from './errors.js';
+import { PublicError, errorMessage } from './errors.js';
 import { NOTICE, type MatrixEvent } from './bridge.js';
 import { nextReminder, validSchedule, validStart, occurrenceInWindow, remainingOccurrences, scheduleDescription, type ReminderSchedule } from './reminder-schedule.js';
 
@@ -13,6 +13,9 @@ type Watch = BackgroundTarget & { id: string; label: string; file: string; field
   workspace: string; expires: number; state: 'waiting' | 'dispatching' | 'delivered' | 'cancelled' | 'interrupted'; result?: string;
   delivery?: { id: string; body: string; notice: 'timer' | 'background'; time: number; attempts: number };
   notification?: { group: string; progress: boolean };
+  last_error?: string;
+  last_error_at?: string;
+  last_error_stage?: 'status_read' | 'delivery';
   pid?: number;
   stale?: { minutes: number; updated: number };
   timer?: { message: string; deliver: 'agent' | 'room'; schedule?: ReminderSchedule; exhausted?: boolean;
@@ -21,10 +24,10 @@ type Watch = BackgroundTarget & { id: string; label: string; file: string; field
 const current = (w: Watch) => w.state === 'waiting' || w.state === 'dispatching' || w.state === 'interrupted' || !!w.delivery;
 const hasFuture = (w: Watch) => !!w.timer?.schedule && !w.timer.exhausted;
 const describe = (w: Watch) => w.timer
-  ? { id: w.id, label: w.label, kind: 'timer', deliver: w.timer.deliver, room: w.room, due: w.timer.exhausted ? null : new Date(w.expires).toISOString(), message: w.timer.message, state: w.state,
+  ? { id: w.id, label: w.label, kind: 'timer', deliver: w.timer.deliver, room: w.room, due: w.timer.exhausted ? null : new Date(w.expires).toISOString(), message: w.timer.message, state: w.state, last_error: w.last_error, last_error_at: w.last_error_at, last_error_stage: w.last_error_stage,
     ...(w.timer.schedule && { schedule: w.timer.schedule, lastRun: w.timer.lastRun, exhausted: !!w.timer.exhausted,
       remaining: remainingOccurrences(w.timer.schedule, w.expires, w.timer.exhausted), result: w.result }) }
-  : { id: w.id, label: w.label, kind: 'watch', status_file: w.file, state: w.state, result: w.result,
+  : { id: w.id, label: w.label, kind: 'watch', status_file: w.file, state: w.state, result: w.result, last_error: w.last_error, last_error_at: w.last_error_at, last_error_stage: w.last_error_stage,
     ...(w.pid !== undefined && { pid: w.pid }), ...(w.stale && { stale_after_minutes: w.stale.minutes, last_update: new Date(w.stale.updated).toISOString() }), expires: new Date(w.expires).toISOString() };
 export const MAX_REMINDER_MINUTES = 60 * 24 * 60;
 const MAX_STALE_MINUTES = 7 * 24 * 60;
@@ -212,7 +215,7 @@ export class BackgroundTasks {
     }
     let file: string;
     try { file = this.statusFile(input.status_file).file; }
-    catch { throw new PublicError('Create a valid JSON status file inside the bot workspace before registering it (maximum 64 KiB).'); }
+    catch (cause) { throw new PublicError('Create a valid JSON status file inside the bot workspace before registering it (maximum 64 KiB).', { cause }); }
     const duplicate = this.watches.find(w => visible(w) && !w.timer && (w.state === 'waiting' || !!w.delivery) && w.file === file && w.field === input.field);
     if (duplicate) {
       if (duplicate.pid !== input.pid) throw new PublicError('This watch has a different PID. Cancel it before changing the PID.');
@@ -262,6 +265,7 @@ export class BackgroundTasks {
           (remainingOccurrences(schedule, w.expires, w.timer?.exhausted) !== undefined
             ? `\nRemaining scheduled occurrences${schedule.frequency === 'interval' ? '' : ' in this series'}: ${remainingOccurrences(schedule, w.expires, w.timer?.exhausted)}` : '') : '') +
         (last ? `\nLast delivery: ${last.state} (${new Date(last.due).toISOString()})` : '') +
+        (w.last_error ? `\nLast error: ${w.last_error}` : '') +
         (!w.timer && short(w.result, 80) ? `\nObserved status: ${w.result}` : '');
     });
     return `Background ${options.history ? 'task history' : 'tasks'} (${start + 1}–${start + page.length} of ${items.length}; newest registrations first):\n\n` +
@@ -290,6 +294,7 @@ export class BackgroundTasks {
         if (!outcome) {
           try {
             const { value, modified } = this.statusFile(watch.file);
+            if (watch.last_error_stage === 'status_read') { delete watch.last_error; delete watch.last_error_at; delete watch.last_error_stage; this.save(); }
             // Only a readable, valid status file refreshes liveness. Persist it
             // so missing files and connector restarts cannot reset the clock.
             if (watch.stale && modified <= now) {
@@ -298,7 +303,11 @@ export class BackgroundTasks {
             }
             const status = Object.hasOwn(value, watch.field) ? value[watch.field] : undefined;
             if (typeof status === 'string' && watch.terminal.includes(status)) outcome = status;
-          } catch { /* Retry until stale timeout or expiry; malformed writes are not heartbeats. */ }
+          } catch (error) {
+            const diagnostic = errorMessage(error, 'Reading watched status failed').slice(0, 1200);
+            if (watch.last_error !== diagnostic) { watch.last_error = diagnostic; watch.last_error_stage = 'status_read'; watch.last_error_at = new Date().toISOString(); this.save(); }
+            // Retry until stale timeout or expiry; malformed writes are not heartbeats.
+          }
           if (!outcome && watch.pid !== undefined && processMissing(watch.pid)) outcome = 'watch_process_missing';
           if (!outcome && watch.stale && now - watch.stale.updated >= watch.stale.minutes * 60_000) outcome = 'watch_stalled';
         }
@@ -309,7 +318,7 @@ export class BackgroundTasks {
             + 'watch_process_missing means the watched PID no longer exists, but child processes may still be running. '
             + 'watch_stalled means the status file stopped receiving valid updates; the task may still be running. Inspect the process and logs before retrying any work. This notification ends the watch; register a new watch if monitoring should continue. '
             + 'watch_expired means no terminal state was observed before the deadline; it does not mean the process stopped.\n'
-            + JSON.stringify({ id: watch.id, label: watch.label, status_file: watch.file, field: watch.field, ...(watch.pid !== undefined && { pid: watch.pid }), status: outcome }),
+            + JSON.stringify({ id: watch.id, label: watch.label, status_file: watch.file, field: watch.field, ...(watch.pid !== undefined && { pid: watch.pid }), status: outcome, last_error: watch.last_error, last_error_at: watch.last_error_at, last_error_stage: watch.last_error_stage }),
             ...(watch.thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: watch.thread } }) } };
         await this.deliverAgent(watch, options, event, () => { watch.result = outcome; });
       }
@@ -328,6 +337,7 @@ export class BackgroundTasks {
     const completed = (cancelled = false) => {
       if (watch.delivery?.id !== snapshot.id || watch.state === 'cancelled') return;
       delete watch.delivery;
+      if (watch.last_error_stage === 'delivery') { delete watch.last_error; delete watch.last_error_at; delete watch.last_error_stage; }
       if (watch.timer?.lastRun) watch.timer.lastRun.state = cancelled ? 'cancelled' : 'delivered';
       if (!cancelled) this.skipElapsed(watch, Date.now());
       watch.state = cancelled ? 'cancelled' : hasFuture(watch) ? 'waiting' : 'delivered';
@@ -343,6 +353,8 @@ export class BackgroundTasks {
       }, () => watch.state === 'waiting' && eligible() && options.valid(watch), completed);
       if (finished) completed();
     } catch (error) {
+      watch.last_error = errorMessage(error, 'Background agent delivery failed').slice(0, 1200);
+      watch.last_error_at = new Date().toISOString(); watch.last_error_stage = 'delivery'; this.save();
       options.report(error);
     } finally {
       if (watch.state === 'dispatching') {
@@ -402,12 +414,15 @@ export class BackgroundTasks {
         admitOccurrence(); timer.state = 'dispatching'; this.save();
       }, () => timer.state === 'waiting' && eligible() && options.valid(timer));
       if (sent) {
+        delete timer.last_error; delete timer.last_error_at; delete timer.last_error_stage;
         if (timer.timer!.lastRun) timer.timer!.lastRun.state = 'delivered';
         this.skipElapsed(timer, Math.max(now, Date.now()));
         if (timer.state !== 'cancelled') timer.state = hasFuture(timer) ? 'waiting' : 'delivered';
         this.save();
       }
     } catch (error) {
+      timer.last_error = errorMessage(error, 'Background room delivery failed').slice(0, 1200);
+      timer.last_error_at = new Date().toISOString(); timer.last_error_stage = 'delivery'; this.save();
       if ((timer.state as string) === 'dispatching') {
         if (timer.timer!.lastRun) timer.timer!.lastRun.state = 'interrupted';
         timer.state = hasFuture(timer) ? 'waiting' : 'interrupted'; this.save();

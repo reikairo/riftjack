@@ -110,3 +110,18 @@ test('log control bytes cannot prevent durable completion notification', async (
   assert.equal(f.notices.length, 1);
   assert.ok(!/[\x00-\x08\x0b-\x1f]/.test(f.notices[0][2]));
 });
+
+test('observation failures retain safe diagnostics through status and completion notification', async () => {
+  const f = setup(), run = await f.action(f.request);
+  save(join(f.directory, run.id, 'status.json'), { id: run.id, status: 'running',
+    supervisor: { pid: 123, ppid: 1, pgid: 123, birth: 'fixture' }, updated_at: new Date().toISOString() });
+  f.hooks.processTable = () => { throw Object.assign(new Error('private command and token'), { code: 'EPERM' }); };
+  const status = await f.action({ action: 'status', id: run.id });
+  assert.equal(status.status, 'lost');
+  assert.deepEqual(status.diagnostic, { stage: 'inspect_process_table', type: 'Error', code: 'EPERM' });
+  f.manager.pump(() => true);
+  assert.match(JSON.stringify(f.notices), /inspect_process_table.*EPERM/);
+  assert.doesNotMatch(JSON.stringify(f.notices), /private command|token/);
+  writeFileSync(join(f.directory, run.id, 'status.json'), '{private secret');
+  assert.equal((await f.action({ action: 'status', id: run.id })).diagnostic.type, 'SyntaxError');
+});

@@ -63,8 +63,8 @@ export class AppServer {
     this.closed = new Promise(resolve => this.child.once('close', (code, signal) => {
       fail(new PublicError(`Codex App Server exited${signal ? ` (${signal})` : code !== null ? ` (code ${code})` : ''}.`)); resolve();
     }));
-    this.child.once('error', () => fail(new PublicError('Could not start Codex CLI. Install it on the host and set CODEX_PATH to its executable if it is not on PATH.')));
-    this.child.stdin.on('error', () => fail(new PublicError('Codex App Server input pipe failed.')));
+    this.child.once('error', cause => fail(new PublicError('Could not start Codex CLI. Install it on the host and set CODEX_PATH to its executable if it is not on PATH.', { cause })));
+    this.child.stdin.on('error', cause => fail(new PublicError('Codex App Server input pipe failed.', { cause })));
     // Diagnostics from Codex may contain sensitive data. Do not forward them verbatim.
     this.child.stderr.resume();
     const lines = createInterface({ input: this.child.stdout });
@@ -100,7 +100,7 @@ export class AppServer {
               return;
             }
             this.write(result !== undefined ? { id: message.id, result } : { id: message.id, error: { code: -32601, message: 'This interactive request is not supported by this connector.' } });
-          })().catch(() => fail(new PublicError('Could not answer Codex App Server request.')));
+          })().catch(cause => fail(new PublicError('Could not answer Codex App Server request.', { cause })));
         } else if (message.method) {
           if (message.method === 'serverRequest/resolved') {
             const entry = this.incoming.get(message.params?.requestId);
@@ -117,7 +117,7 @@ export class AppServer {
           if (message.error) request.reject(new RpcError(message.error.code, message.error.message, request.method));
           else request.resolve(message.result);
         }
-      } catch { fail(new PublicError('Could not process a Codex App Server response. Check the installed Codex version.')); }
+      } catch (cause) { fail(new PublicError('Could not process a Codex App Server response. Check the installed Codex version.', { cause })); }
     });
   }
 

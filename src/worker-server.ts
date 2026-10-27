@@ -1,3 +1,4 @@
+import { errorMessage } from './errors.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { WorkerError } from './worker-queue.js';
@@ -71,7 +72,7 @@ export class WorkerServer {
       send(200, result);
     } catch (error) {
       if (!controller.signal.aborted) send(error instanceof WorkerError ? error.status : 503,
-        { error: error instanceof WorkerError ? error.message : 'Worker service is temporarily unavailable.' });
+        { error: error instanceof WorkerError ? error.message : errorMessage(error, 'Worker service is temporarily unavailable') });
     } finally { this.controllers.delete(controller); }
   }
 }

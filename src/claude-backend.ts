@@ -76,11 +76,11 @@ function runClaude(config: Config, args: string[], signal: AbortSignal, consume:
     };
     const abort = () => { failure = signal.reason; stop(); };
     signal.addEventListener('abort', abort, { once: true });
-    child.once('error', () => {
-      failure = new PublicError('Could not start Claude Code. Install it on the host and set CLAUDE_PATH to its executable if it is not on PATH.');
+    child.once('error', error => {
+      failure = new PublicError('Could not start Claude Code. Install it on the host and set CLAUDE_PATH to its executable if it is not on PATH.', { cause: error });
     });
-    child.stdin.on('error', () => {
-      failure ??= new PublicError('Claude Code closed its input unexpectedly. Check its installation and login on the host.');
+    child.stdin.on('error', error => {
+      failure ??= new PublicError('Claude Code closed its input unexpectedly. Check its installation and login on the host.', { cause: error });
       stop();
     });
     const stdin: ClaudeInput = {
@@ -98,7 +98,7 @@ function runClaude(config: Config, args: string[], signal: AbortSignal, consume:
       if (killTimer) clearTimeout(killTimer);
       if (signal.aborted) reject(signal.reason);
       else if (failure) reject(failure);
-      else if (code !== 0 || killed) reject(new PublicError('Claude Code exited unsuccessfully. Check its login, installed version and permissions on the host.'));
+      else if (code !== 0 || killed) reject(new PublicError('Claude Code exited unsuccessfully. Check its login, installed version and permissions on the host.', { cause: { code, signal: killed } }));
       else resolve();
     });
     if (signal.aborted) abort();

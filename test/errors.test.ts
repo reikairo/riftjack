@@ -24,3 +24,18 @@ test('only intentionally public errors are displayed verbatim', () => {
   assert.equal(errorMessage(new PublicError('Check the tunnel.')), 'Check the tunnel.');
   assert.equal(errorMessage(new Error('private data'), 'Bot startup failed'), 'Bot startup failed: Error.');
 });
+
+test('process and filesystem causes retain safe details across public wrappers', () => {
+  const raw = Object.assign(new Error('token=secret, /private/data'), {
+    code: 'ENOSPC', syscall: 'write', stderr: 'Bearer secret', signal: 'SIGKILL', killed: true,
+    cause: { code: 7, statusCode: 503 },
+  });
+  const message = errorMessage(new PublicError('Saving output failed.', { cause: raw }));
+  for (const detail of ['ENOSPC', 'write', 'SIGKILL', 'process killed', 'exit 7', 'HTTP 503']) assert.ok(message.includes(detail));
+  assert.doesNotMatch(message, /secret|Bearer|private/);
+  assert.equal(safeErrorSummary({ code: -32603, signal: 'PRIVATE_SIGNAL', syscall: 'spawn /secret/path' }), 'Error (no safe diagnostic details available)');
+});
+
+test('SQLite diagnostics retain the bounded engine code without database contents', () => {
+  assert.equal(safeErrorSummary({ code: 'ERR_SQLITE_ERROR', errcode: 13, message: 'secret database path' }), 'ERR_SQLITE_ERROR, SQLite 13');
+});

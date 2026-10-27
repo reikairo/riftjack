@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
-import { PublicError } from './errors.js';
+import { PublicError, errorMessage, safeErrorSummary } from './errors.js';
 
 export type TunnelConfig = { target: string; port: number; localPort: number; remotePort: number; identity?: string };
 
@@ -85,13 +85,13 @@ export class SshTunnel {
         else if (/Connection refused/i.test(line)) this.problem = 'SSH connection was refused. Check the server address and SYNAPSE_SSH_PORT.';
         else if (/Connection timed out|Operation timed out|No route to host|Network is unreachable/i.test(line)) this.problem = 'SSH server is unreachable or timed out. Check the network and server availability.';
       });
-      child.once('error', () => { this.problem = 'Could not launch OpenSSH. Install ssh and ensure it is on the connector PATH.'; });
-      child.once('close', () => {
+      child.once('error', error => { this.problem = errorMessage(error, 'Could not launch OpenSSH. Install ssh and ensure it is on the connector PATH.'); });
+      child.once('close', (code, signal) => {
         lines.close(); this.child = undefined; this.ready = false;
         if (!this.stopped) {
           if (this.problem === 'SSH connection is starting.') this.problem = 'SSH connection closed.';
           const retryMs = this.options.retryMs ?? Math.min(30_000, 1000 * 2 ** Math.min(this.attempts++, 5));
-          this.options.report(`${this.problem} Reconnecting in ${retryMs / 1000}s.`);
+          this.options.report(`${this.problem} ${safeErrorSummary({ code, signal })}. Reconnecting in ${retryMs / 1000}s.`);
           this.retry = setTimeout(() => this.launch(), retryMs);
         }
         resolve();

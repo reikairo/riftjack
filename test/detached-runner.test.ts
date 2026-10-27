@@ -78,5 +78,7 @@ test('unavailable process observation fails closed before executing the command'
   f.launch();
   const final = await until(() => f.status()?.status === 'lost' && f.status());
   assert.equal(final.reason, 'supervisor_failed');
+  assert.equal(final.diagnostic.stage, 'inspect_process_table');
+  assert.equal(final.diagnostic.code, 'EPERM');
   assert.equal(existsSync(join(f.workspace, 'executed')), false);
 });

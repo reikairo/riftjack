@@ -1,3 +1,4 @@
+import { errorMessage } from './errors.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -74,13 +75,13 @@ export async function supervise(options: Options = {}): Promise<number> {
     try {
       const saved = snapshot && options.history?.promote(snapshot);
       if (saved) log(`Saved working connector version ${saved}.`);
-    } catch { log('Could not save a snapshot of the working connector version. Check disk space and permissions.'); }
+    } catch (error) { log(errorMessage(error, 'Could not save a snapshot of the working connector version. Check disk space and permissions.')); }
   };
   try {
     while (!stopping) {
       let candidate: Snapshot | undefined;
       try { candidate = options.history?.capture(); }
-      catch { log('Could not capture the launch version. This run will not create a working snapshot.'); }
+      catch (error) { log(errorMessage(error, 'Could not capture the launch version. This run will not create a working snapshot.')); }
       let stable = false;
       let stableTimer: ReturnType<typeof setTimeout> | undefined;
       const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
@@ -113,7 +114,7 @@ export async function supervise(options: Options = {}): Promise<number> {
         child.once('close', (code, signal) => { clearTimeout(stableTimer); resolve({ code, signal }); });
       }).finally(() => {
         try { if (candidate) options.history?.discard(candidate); }
-        catch { log('Could not remove the pending launch snapshot. Check disk space and permissions.'); }
+        catch (error) { log(errorMessage(error, 'Could not remove the pending launch snapshot. Check disk space and permissions.')); }
       });
       child = undefined;
       if (stopping) return 0;
@@ -152,7 +153,7 @@ export async function supervise(options: Options = {}): Promise<number> {
             if (!target) { try { target = notice.target(); } catch {} }
             notice.save(target, rollbackMessage(!!requester, rolled.snapshot, rolled.failed));
           }
-        } catch { log('Automatic rollback failed. Check .connector-history and restore the code manually.'); }
+        } catch (error) { log(errorMessage(error, 'Automatic rollback failed. Check .connector-history and restore the code manually.')); }
       }
       const delay = retryMs(failures);
       log(`Connector exited unexpectedly (${result.signal || 'code ' + result.code}). Restarting in ${delay / 1000}s.`);
@@ -177,8 +178,8 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
     // Snapshots belong to this instance, next to its .env and data/, not inside the code repository.
     history: new CodeHistory(root, resolve('.connector-history')),
     upgrade: { changed: () => supervisorCodeHash() !== started, args: [...process.execArgv, ...process.argv.slice(1)] },
-  }).then(code => { process.exitCode = code; }).catch(() => {
-    console.error('Could not launch the connector process. Check the Node executable and connector files.');
+  }).then(code => { process.exitCode = code; }).catch(error => {
+    console.error(errorMessage(error, 'Could not launch the connector process. Check the Node executable and connector files.'));
     process.exitCode = 1;
   });
 }

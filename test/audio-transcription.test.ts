@@ -120,7 +120,7 @@ test('unsafe audio paths and duration overruns keep the original attachment with
   const f = fixture(t, '', 'process.stdin.resume(); process.stdin.on("end",()=>process.stdout.end(Buffer.alloc(40000)));');
   assert.deepEqual((await f.transcriber.transcribe(f.file, signal())).transcription, { status: 'unavailable', reason: 'duration-limit' });
   const link = join(f.root, 'link.ogg'); symlinkSync(f.file.path, link);
-  assert.deepEqual((await f.transcriber.transcribe({ ...f.file, path: link }, signal())).transcription, { status: 'unavailable', reason: 'processing-failed' });
+  assert.deepEqual((await f.transcriber.transcribe({ ...f.file, path: link }, signal())).transcription, { status: 'unavailable', reason: 'processing-failed', diagnostic: { stage: 'read_audio', summary: 'Error' } });
 });
 
 for (const [name, body] of [
@@ -132,7 +132,12 @@ for (const [name, body] of [
   // Record only the temporary directory, not audio or transcript contents.
   writeFileSync(f.config.executable, `#!${process.execPath}\nconst fs=require('node:fs');const args=process.argv.slice(2);fs.writeFileSync(${JSON.stringify(join(f.root, 'temp-path'))},require('node:path').dirname(args.at(-1)));${body}`, { mode: 0o700 });
   const transcriber = new AudioTranscriber({ ...f.config, timeoutMs: name === 'timeout' ? 700 : 5000 });
-  assert.equal((await transcriber.transcribe(f.file, signal())).transcription?.status, 'unavailable');
+  const result = (await transcriber.transcribe(f.file, signal())).transcription;
+  assert.equal(result?.status, 'unavailable');
+  if (result?.status === 'unavailable') {
+    if (name === 'failure') { assert.equal(result.diagnostic?.stage, 'transcribe_audio'); assert.match(result.diagnostic?.summary ?? '', /exit 7/); }
+    if (name === 'timeout') assert.match(result.diagnostic?.summary ?? '', /TimeoutError/);
+  }
   // Under load the overall timeout may expire during decoding, before the engine starts.
   const marker = join(f.root, 'temp-path');
   if (name !== 'timeout' || existsSync(marker)) {

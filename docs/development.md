@@ -137,3 +137,40 @@ retry loop. State survives connector restarts. Replayed completion events
 alone do not enqueue another reminder. Unobserved compaction during a
 connector crash cannot enqueue the fallback reminder.
 The existing human-facing private compaction notices are unchanged.
+
+
+## Error diagnostics
+
+Keep the operation and its safe cause together when an error crosses a boundary.
+Use `PublicError(message, { cause })` for connector-authored context and
+`errorMessage(error, context)` at delivery boundaries. Do not replace an exception
+with a generic message before the formatter can inspect its cause. The formatter
+follows a bounded cause/aggregate chain and retains only allowed error names,
+system and Matrix codes, HTTP status, process exit code, signal and syscall.
+Unknown exception text, command arguments, paths, environment, response bodies
+and stderr are not public diagnostics. Codex provider details retain their existing
+separate owner-only delivery route.
+
+| Failure surface | Where to inspect the diagnostic |
+| --- | --- |
+| MCP tool calls and transport | The error response includes the operation context and safe cause. Cancellation remains a separate result. |
+| GitHub reads and subscription polling | The response or `last_error` distinguishes HTTP authentication, permission, missing-resource, server and rate-limit failures. Rate-limit messages include the shared retry deadline. |
+| Git publication | The error identifies the Git operation and safe process cause. A failed push still has an uncertain remote outcome; inspect the destination before retrying. |
+| Codex, Claude and SSH subprocesses | Startup, pipe and exit errors retain available system codes or exit/signal information. RPC and authentication classifiers remain in place. |
+| Detached runs | `status.json`, `run_detached status` and completion notices include `diagnostic.stage` and safe process metadata. `log_error` explains why no log tail could be read. |
+| Watches and reminder delivery | `list`, retained history and `!tasks` show `last_error`; structured results also include its time and stage. Read errors clear after the status file recovers; delivery errors clear after confirmed successful delivery. |
+| Worker HTTP API | Unexpected service failures return HTTP 503 with a safe cause; expected protocol and authorization errors keep their specific statuses. |
+| Audio and diagram subprocesses | Audio metadata identifies decoding, transcription or file-reading failures. Diagram export failures retain exit/signal information. Original audio remains available when transcription fails. |
+| Connector supervision | Snapshot, launch and rollback failures include safe filesystem/process diagnostics in the supervisor log. |
+
+A detached supervisor copies its diagnostic formatter into the approved run along
+with the launcher, so changes affect newly prepared runs only. `lost` means that
+observation or containment is uncertain; a diagnostic code does not prove that
+all descendants stopped. Missing `output.log` can be normal before command start.
+
+Regression checks should inject errors with sensitive messages and assert both
+that the useful code survives and that the sensitive text does not. Include
+failure followed by recovery and cancellation races. A successful test does not
+establish that every third-party failure exposes a structured code: unknown
+errors can still report a generic type, and some deliberately ignored cleanup
+errors do not change the primary operation's result.
