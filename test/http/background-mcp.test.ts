@@ -73,6 +73,34 @@ test('background MCP advertises and schedules delayed messages', async t => {
 
 });
 
+test('background MCP exposes interval series and updates one persisted ID', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'background-mcp-series-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const queue = new BackgroundTasks(join(root, 'watches.json'), root);
+  const target = { room: '!room:test', sender: '@alice:test', key: 'key', session: 'session' };
+  const server = await startBackgroundMcp(async (args, signal) => queue.action(args, target, signal), new AbortController().signal);
+  t.after(() => server.close());
+  let id = 0;
+  const rpc = async (method: string, params?: object) => (await (await fetch(server.url, { method: 'POST',
+    headers: { ...server.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) })).json());
+  const call = async (args: object) => (await rpc('tools/call', { name: 'background_tasks', arguments: args })).result;
+  const schema = (await rpc('tools/list')).result.tools[0].inputSchema.properties;
+  assert.ok(schema.action.enum.includes('update')); assert.ok(schema.schedule.properties.frequency.enum.includes('interval'));
+  assert.deepEqual(schema.schedule.required, ['frequency']); assert.ok(schema.schedule.properties.weekdays.uniqueItems);
+  const spec = { action: 'remind', label: 'Six checks', message: 'Check progress', deliver: 'agent',
+    schedule: { frequency: 'interval', interval_minutes: 10, count: 6 } };
+  const saved = JSON.parse((await call(spec)).content[0].text);
+  assert.equal(saved.remaining, 6); assert.equal(saved.schedule.start_at, saved.due);
+  const updated = JSON.parse((await call({ ...spec, action: 'update', id: saved.id,
+    schedule: { frequency: 'daily', time: '10:00', timezone: 'UTC', weekdays: [1,2,3,4,5], interval_minutes: 15, end_time: '12:00' } })).content[0].text);
+  assert.equal(updated.id, saved.id); assert.equal(updated.schedule.end_time, '12:00');
+  assert.equal(JSON.parse((await call({ action: 'list' })).content[0].text).length, 1);
+  const invalid = await call({ ...spec, schedule: { ...spec.schedule, interval_minutes: 0 } });
+  assert.ok(invalid.isError); assert.match(invalid.content[0].text, /valid schedule/);
+  await call({ action: 'cancel', id: saved.id });
+  assert.deepEqual(JSON.parse((await call({ action: 'list' })).content[0].text), []);
+});
+
 for (const kind of ['codex', 'claude'] as const) test(`${kind} registers through MCP and resumes the same session after completion`, { timeout: 20_000 }, async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'background-mcp-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
