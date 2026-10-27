@@ -1,3 +1,4 @@
+import { startDetachedMcp, DETACHED_SERVER, DETACHED_TOOL, detachedInstructions } from './detached-mcp.js';
 import { startConfirmationMcp, CONFIRMATION_SERVER, CONFIRMATION_TOOL, confirmationInstructions } from './confirmation-mcp.js';
 import { drawioAction } from './drawio.js';
 import { startDrawioMcp, DRAWIO_SERVER, DRAWIO_TOOL, drawioInstructions } from './drawio-mcp.js';
@@ -159,7 +160,7 @@ export function claudeApprovals(config: Config): boolean {
 }
 
 export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection, media?: PublishConnection, rooms?: PublishConnection,
-  replay = false, systemPromptSnapshot = false, web?: PublishConnection, hookEvents = false, github?: PublishConnection, diagram?: PublishConnection, confirmation?: PublishConnection): string[] {
+  replay = false, systemPromptSnapshot = false, web?: PublishConnection, hookEvents = false, github?: PublishConnection, diagram?: PublishConnection, confirmation?: PublishConnection, detached?: PublishConnection): string[] {
   const readOnly = config.sandbox === 'read-only';
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
@@ -176,7 +177,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const allowed = readOnly ? ['Read', 'Glob', 'Grep'] : [];
   const servers: Record<string, object> = {};
   for (const [name, connection, tool] of [[PUBLISH_SERVER, !readOnly && publication, PUBLISH_TOOL],
-    [CONFIRMATION_SERVER, confirmation, CONFIRMATION_TOOL], [GITHUB_SERVER, github, GITHUB_TOOL], [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL], [ROOM_MESSAGE_SERVER, rooms, ROOM_MESSAGE_TOOL], [FETCH_SERVER, web, FETCH_TOOL], [DRAWIO_SERVER, !readOnly && diagram, DRAWIO_TOOL]] as const) {
+    [DETACHED_SERVER, !readOnly && detached, DETACHED_TOOL], [CONFIRMATION_SERVER, confirmation, CONFIRMATION_TOOL], [GITHUB_SERVER, github, GITHUB_TOOL], [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL], [ROOM_MESSAGE_SERVER, rooms, ROOM_MESSAGE_TOOL], [FETCH_SERVER, web, FETCH_TOOL], [DRAWIO_SERVER, !readOnly && diagram, DRAWIO_TOOL]] as const) {
     if (!connection) continue;
     servers[name] = { type: 'http', url: connection.url, headers: connection.headers, timeout: config.timeoutMs };
     allowed.push(tool);
@@ -277,6 +278,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     const close = () => { for (const controller of pending.values()) controller.abort(); pending.clear(); };
     const answer = (stdin: ClaudeInput, requestId: string, response: object) =>
       stdin.write({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response } });
+    let detached: Awaited<ReturnType<typeof startDetachedMcp>> | undefined;
     let confirmation: Awaited<ReturnType<typeof startConfirmationMcp>> | undefined;
     let github: Awaited<ReturnType<typeof startGitHubMcp>> | undefined;
     let background: Awaited<ReturnType<typeof startBackgroundMcp>> | undefined;
@@ -293,6 +295,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       unconfirmed(); mediaLifetime.abort(); close(); stdinRef?.end();
     };
     try {
+      if (hooks?.detached && config.sandbox !== 'read-only') detached = await startDetachedMcp(hooks.detached, AbortSignal.any([signal, mediaLifetime.signal]));
       if (hooks?.confirmation) confirmation = await startConfirmationMcp(hooks.confirmation, AbortSignal.any([signal, mediaLifetime.signal]));
       if (hooks?.github) github = await startGitHubMcp(hooks.github, signal);
       if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
@@ -310,8 +313,8 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
       }
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (confirmation ? confirmationInstructions : '') + (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
-          + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '') + (diagram ? drawioInstructions : ''), publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation), signal, (line, stdin) => {
+        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (detached ? detachedInstructions : '') + (confirmation ? confirmationInstructions : '') + (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
+          + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '') + (diagram ? drawioInstructions : ''), publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
@@ -431,7 +434,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       await compactions.close();
       if (live.get(key) === steerHere) live.delete(key);
       accepting = false; clearTimeout(grace); unconfirmed();
-      close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await web?.close(); await diagram?.close(); await progress.catch(() => {}); await confirmation?.close(); await github?.close(); await background?.close(); await publication?.close();
+      close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await web?.close(); await diagram?.close(); await progress.catch(() => {}); await detached?.close(); await confirmation?.close(); await github?.close(); await background?.close(); await publication?.close();
       await checkpointSender?.settled();
     }
     signal.throwIfAborted();

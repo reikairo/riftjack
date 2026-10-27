@@ -1,3 +1,4 @@
+import { DetachedRuns } from './detached-runs.js';
 import { requestConfirmation } from './confirmation-mcp.js';
 import { matrixTyping } from './matrix-typing.js';
 import { GitHubSubscriptions, githubReader, loadGitHubPolicies } from './github-subscriptions.js';
@@ -203,6 +204,9 @@ async function main() {
     // Also reject owner configuration placed inside a separately assigned bot workspace.
     loadGitHubPolicies(config.githubSubscriptionsFile, botConfig.workspace);
     const githubPolicy = githubPolicies[account.userId];
+    const detached = background && ['darwin', 'linux'].includes(process.platform) && botConfig.sandbox !== 'read-only' ? new DetachedRuns(join(botConfig.workspace, '.riftjack', 'runs', createHash('sha256').update(account.userId).digest('hex')), botConfig.workspace, {
+      notify: (id, target, message) => background.notify(id, target, message, { group: id, progress: false }, 'Detached process result'),
+    }) : undefined;
     const github = background ? new GitHubSubscriptions(join(dir, 'github-subscriptions.json'), githubPolicy, background,
       githubPolicy ? githubReader(githubPolicy) : undefined) : undefined;
     const storage = new SimpleFsStorageProvider(join(dir, 'matrix.json'));
@@ -349,6 +353,13 @@ async function main() {
       shared: linkedAgent ? room => !!links.room(account.userId, room) : undefined,
       // A newly accepted human message to this agent restores its peer credit.
       accepted: linkedAgent ? () => links.credit(account.userId) : undefined,
+      detached: detached ? async (input, { room, event, key }, signal, interact, authorize) => {
+        const session = state.session(key)[account.kind as 'codex' | 'claude'];
+        if (!session) throw new PublicError('The agent session is not ready for a detached run.');
+        const relation = event.content?.['m.relates_to'];
+        return detached.action(input, { room, sender: event.sender!, key, session,
+          thread: relation?.rel_type === 'm.thread' ? relation.event_id : undefined }, signal, interact, authorize);
+      } : undefined,
       requestConfirmation: (account.kind === 'codex' || account.kind === 'claude') ? requestConfirmation : undefined,
       publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
@@ -546,6 +557,7 @@ async function main() {
         if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
         await codingBridge.drainQueued();
         github?.reconcile(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session);
+        detached?.pump(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session);
         await background.pump({
           valid: target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
           deliver: (target, event, admitted, ready, completed) => codingBridge.resumeBackground(target.room, event, target.session, admitted, ready, completed),

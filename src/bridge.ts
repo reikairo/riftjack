@@ -33,7 +33,7 @@ export type MatrixEvent = {
 };
 export type Mentions = { text: string; mentions: string[]; error?: string };
 export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
-export type BackendHooks = { confirmation?: BackgroundAction; github?: BackgroundAction; background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool };
+export type BackendHooks = { detached?: BackgroundAction; confirmation?: BackgroundAction; github?: BackgroundAction; background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool };
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
@@ -60,6 +60,7 @@ type Options = {
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal, sent?: (eventId: string) => void) => Promise<void>;
   status?: (key: string) => string;
   tasks?: (room: string, event: MatrixEvent, key: string, options: { history: boolean; page: number }) => string;
+  detached?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   requestConfirmation?: (input: unknown, signal: AbortSignal, interact: Interact) => Promise<string>;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   github?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
@@ -493,6 +494,13 @@ export class Bridge {
         const messages = o.roomMessages && roomMessageDelivery((request, signal) =>
           o.roomMessages!(request, { room, event: requestEvent, key: backendKey, sent }, signal));
         const hooks: BackendHooks = {
+          detached: o.detached ? async (input, callSignal) => {
+            const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
+            signal.throwIfAborted();
+            await this.authorize(room, current);
+            signal.throwIfAborted();
+            return o.detached!(input, { room, event: requestEvent, key: backendKey }, signal, interact, () => this.authorize(room, current));
+          } : undefined,
           confirmation: o.requestConfirmation ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
             signal.throwIfAborted();

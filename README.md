@@ -142,6 +142,42 @@ See [working through Matrix](docs/chat.md) for confirmations, attachments, plugi
 
 [Access and encryption](docs/security.md) explains these boundaries. [Restarts and recovery](docs/operations.md) explains the supervisor and rollback behavior.
 
+## Detached processes
+
+Coding bots with workspace-write access expose `run_detached` on macOS and Linux.
+`start` reviews an absolute executable and argument array, workspace `cwd`, optional
+environment overrides, and a timeout (up to seven days). The human confirms that
+the task may outlive the turn and connector. Never put secrets in arguments or
+environment overrides: the review and saved command contain their literal values.
+
+The tool returns **prepared**, not running. The agent invokes the returned
+`launch_argv` once through its normal command tool within five minutes. This keeps
+the command tool's sandbox and approval checks; the MCP server does not execute
+arbitrary commands on the connector host. The launch may still need the ordinary
+command approval. Inspect `status` before claiming it started or retrying an
+uncertain call. An exclusive launch claim prevents executing the same run twice.
+
+`snapshot_args` selects argument indexes containing scripts to copy before review.
+Imports, executables, other dependencies and the working directory remain live.
+The copied launcher and command have SHA-256 checks. A separate supervisor writes
+atomic status and a heartbeat, retains the last 1 MiB of output, and observes the
+command's descendants. `status` includes the last 40 log lines; `list` is scoped
+to the originating conversation and session. Completion notifications use durable
+IDs and survive restart; delivery is not promised exactly once.
+
+`stop` requests TERM followed by KILL for processes whose recorded birth identity
+still matches. A live group leader allows signalling its group; observed escaped
+descendants are checked individually. Processes that escape between observations
+cannot be guaranteed tracked. `lost` means observation is unavailable, **not**
+that all children stopped. It continues to occupy capacity and never releases a
+shared resource. Inspect it manually before retrying work. Session reset revokes
+unlaunched commands and suppresses notifications, but does not kill running jobs.
+
+State lives in `.riftjack/runs/<bot-hash>/` inside the workspace. Each bot has a
+limit of two active or uncertain runs and 100 retained runs. An operator must
+archive finished history before that retention limit is reached. This first stage
+does not manage shared resource leases. Read-only bots do not receive the tool.
+
 ## Further reading
 
 - [Installation and configuration](docs/setup.md)
