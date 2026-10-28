@@ -214,15 +214,37 @@ test('restart context separates the saved status from a fresh process check, per
   save(join(f.directory, done.id, 'status.json'), { id: done.id, status: 'succeeded', exit_code: 0 });
   // After a restart the supervisor is gone: the record says running, the check says lost.
   const restarted = new DetachedRuns(f.directory, f.workspace, f.hooks), now = Date.parse('2026-10-28T00:30:00Z');
-  assert.deepEqual(restarted.unfinished(target.key, target.session, now), [{ id: lost.id, label: 'fixture',
+  assert.deepEqual(restarted.unfinished(target, now), [{ id: lost.id, label: 'fixture',
     saved: { status: 'running', updated_at: '2026-10-28T00:14:03Z' },
-    observed: { checked_at: '2026-10-28T00:30:00.000Z', status: 'lost', reason: 'supervisor_missing_or_pid_reused' },
+    observed: { status: 'lost', reason: 'supervisor_missing_or_pid_reused',
+      process_check: { checked_at: '2026-10-28T00:30:00.000Z', result: 'recorded_processes_absent', recorded: 1, present: 0 } },
     log: join(f.directory, lost.id, 'output.log') }]);
-  // Another conversation, or a reset session of this one, does not see the run.
-  assert.deepEqual(restarted.unfinished('other-key', target.session), []);
-  assert.deepEqual(restarted.unfinished(target.key, 'new-session'), []);
+  // Linked rooms share a key and session: another room, sender, thread or a reset session does not see the run.
+  for (const other of [{ ...target, room: '!shared:example.com' }, { ...target, sender: '@bob:example.com' },
+    { ...target, thread: '$thread' }, { ...target, key: 'other-key' }, { ...target, session: 'new-session' }]) {
+    assert.deepEqual(restarted.unfinished(other), []);
+  }
   // Listing only reads: nothing is notified, stopped or closed.
   assert.equal(f.notices.length, 0);
   assert.equal(readdirSync(join(f.directory, lost.id)).includes('stop'), false);
-  assert.equal(restarted.unfinished(target.key, target.session).length, 1);
+  assert.equal(restarted.unfinished(target).length, 1);
+});
+test('restart context checks processes of a saved lost run now, and omits it once closed', async () => {
+  const f = setup(), run = await lostRun(f);
+  let reads = 0;
+  // An escaped descendant's process group is still present.
+  f.hooks.processTable = () => { reads++; return [{ pid: 999, ppid: 1, pgid: 125, birth: 'new' }]; };
+  const manager = new DetachedRuns(f.directory, f.workspace, f.hooks);
+  const [listed] = manager.unfinished(target, Date.parse('2026-10-28T00:30:00Z'));
+  assert.equal(reads, 1);
+  assert.deepEqual(listed.saved, { status: 'lost' });
+  assert.deepEqual(listed.observed, { status: 'lost', reason: 'supervisor_failed',
+    process_check: { checked_at: '2026-10-28T00:30:00.000Z', result: 'recorded_processes_present', recorded: 3, present: 1 } });
+  // A failed check is reported as such, never as absence.
+  f.hooks.processTable = () => { throw Object.assign(new Error('ps denied'), { code: 'EPERM' }); };
+  assert.equal(manager.unfinished(target)[0].observed.process_check.result, 'check_failed');
+  f.hooks.processTable = () => [];
+  await manager.action({ action: 'close', id: run.id, evidence }, target, signal, approve, async () => {});
+  assert.deepEqual(manager.unfinished(target), []);
+  assert.deepEqual(new DetachedRuns(f.directory, f.workspace, f.hooks).unfinished(target), []);
 });

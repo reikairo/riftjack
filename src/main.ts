@@ -337,7 +337,12 @@ async function main() {
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
       decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering) : undefined,
       promptDelivered: linkedAgent ? () => links.acknowledge(account.userId) : undefined,
-      restartContext: background ? (key, session) => restartContext(detached?.unfinished(key, session) ?? [], background.unfinished(key, session)) : undefined,
+      // Scoped exactly as the run_detached and background_tasks tools of that room would see them.
+      restartContext: background ? (room, event, key, session) => {
+        const relation = event.content?.['m.relates_to'];
+        const target = { room, sender: event.sender!, key, session, thread: relation?.rel_type === 'm.thread' ? relation.event_id : undefined };
+        return restartContext(detached?.unfinished(target) ?? [], background.unfinished(target));
+      } : undefined,
       roomMessages: linkedAgent ? (request, context, signal) => linkedRoomMessages(links, account.userId, context, {
         allowed: privateRoom, stopping: () => stopping || restart.pending,
         send: async (room, content) => {

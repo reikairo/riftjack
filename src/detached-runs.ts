@@ -20,6 +20,9 @@ export type RunStatus = { id: string; status: string; supervisor?: ProcessIdenti
   reason?: string; exit_code?: number | null; signal?: string | null; [key: string]: unknown };
 type Hooks = { processTable?: typeof processes; notify: (id: string, target: BackgroundTarget, message: string) => void };
 
+// Linked private and shared rooms share a key and session, so the room, sender and thread must match too.
+const visibleTo = (r: Run, target: BackgroundTarget) => (['key', 'session', 'room', 'sender', 'thread'] as const).every(k => r.target[k] === target[k]);
+
 function regular(path: string, max: number) {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
@@ -101,10 +104,24 @@ export class DetachedRuns {
     }
     return state;
   }
-  // For the restart notice: runs of one conversation that are still active or were lost. `saved` is
-  // what the run's status file last recorded; `observed` is the outcome of a process check made now.
-  unfinished(key: string, session: string, now = Date.now()) {
-    return this.runs.filter(r => r.target.key === key && r.target.session === session).flatMap(run => {
+  // A fresh look at the processes a run recorded. state() may answer from a saved
+  // lost status without reading the process table, so the restart notice asks here.
+  private processCheck(state: RunStatus, now: number) {
+    const checked_at = new Date(now).toISOString();
+    const identities = [state.supervisor, state.child, ...(Array.isArray(state.descendants) ? state.descendants : [])]
+      .filter((p): p is ProcessIdentity => object(p) && Number.isInteger(p.pid) && Number.isInteger(p.pgid) && text(p.birth, 200));
+    if (!identities.length) return { checked_at, result: 'no_recorded_processes' };
+    try {
+      const table = (this.hooks.processTable ?? processes)();
+      const present = identities.filter(identity => table.some(p => same(p, identity) || p.pgid === identity.pgid)).length;
+      return { checked_at, result: present ? 'recorded_processes_present' : 'recorded_processes_absent', recorded: identities.length, present };
+    } catch (error) { return { checked_at, result: 'check_failed', diagnostic: failureDetails(error, 'inspect_process_table') }; }
+  }
+  // For the restart notice: runs of the conversation that are still active, or lost and not closed.
+  // `saved` is what the run's status file last recorded; `observed` is derived now, and its
+  // process check says whether processes were actually inspected.
+  unfinished(target: BackgroundTarget, now = Date.now()) {
+    return this.runs.filter(r => visibleTo(r, target) && !r.closed).flatMap(run => {
       const observed = this.state(run);
       if (!active.has(observed.status)) return [];
       let saved: RunStatus | undefined;
@@ -112,7 +129,7 @@ export class DetachedRuns {
       const log = join(this.dir(run), 'output.log');
       return [{ id: run.id, label: run.label,
         saved: saved ? { status: saved.status, ...(saved.updated_at && { updated_at: saved.updated_at }) } : 'missing',
-        observed: { checked_at: new Date(now).toISOString(), status: observed.status, ...(observed.reason && { reason: observed.reason }) },
+        observed: { status: observed.status, ...(observed.reason && { reason: observed.reason }), process_check: this.processCheck(observed, now) },
         ...(existsSync(log) && { log }) }];
     });
   }
@@ -141,7 +158,7 @@ export class DetachedRuns {
   async action(input: unknown, target: BackgroundTarget, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) {
     signal.throwIfAborted();
     if (!object(input)) throw new PublicError('Supply a detached run action.');
-    const visible = (r: Run) => ['key', 'session', 'room', 'sender', 'thread'].every(k => (r.target as any)[k] === (target as any)[k]);
+    const visible = (r: Run) => visibleTo(r, target);
     if (input.action === 'list' && Object.keys(input).length === 1) return JSON.stringify(this.runs.filter(visible).map(r => ({ label: r.label, ...this.state(r), closed: r.closed })));
     if (input.action === 'close') {
       if (Object.keys(input).some(k => !['action', 'id', 'evidence'].includes(k)) || !text(input.evidence, 2000) || !input.evidence.trim()) {

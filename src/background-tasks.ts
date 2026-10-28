@@ -38,6 +38,11 @@ const processMissing = (pid: number): boolean => {
   try { process.kill(pid, 0); return false; }
   catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
 };
+// The same probe for a report: EPERM and other errors mean the check failed, not that the process exists.
+const pidState = (pid: number): 'exists' | 'missing' | 'unknown' => {
+  try { process.kill(pid, 0); return 'exists'; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'missing' : 'unknown'; }
+};
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const short = (value: unknown, max = 160): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f]/.test(value);
 const timerMessage = (value: unknown): value is string => typeof value === 'string' && !!value.trim() && value.length <= 4000 && !/[\x00-\x08\x0b-\x1f]/.test(value);
@@ -242,18 +247,21 @@ export class BackgroundTasks {
   }
   // For the restart notice: file watches of one conversation that are still waiting, or whose
   // notification turn was interrupted. `observed` is read now; the watch itself is not changed.
-  unfinished(key: string, session: string, now = Date.now()) {
-    return this.watches.filter(w => !w.timer && w.key === key && w.session === session && w.workspace === this.workspace &&
+  // Like overview(), the room, sender and thread must match: linked rooms share a key and session.
+  unfinished(target: BackgroundTarget, now = Date.now()) {
+    return this.watches.filter(w => !w.timer && w.key === target.key && w.session === target.session && w.room === target.room &&
+      w.sender === target.sender && w.thread === target.thread && w.workspace === this.workspace &&
       ['waiting', 'dispatching', 'interrupted'].includes(w.state)).map(w => {
       let status: unknown, modified: number | undefined;
       try {
         const file = this.statusFile(w.file);
         status = Object.hasOwn(file.value, w.field) ? file.value[w.field] : undefined; modified = file.modified;
       } catch { /* Missing or invalid now; reported as unreadable. */ }
+      // The watched field is reported as data; its name cannot overwrite the check's own fields.
       return { id: w.id, label: w.label, state: w.state, status_file: w.file, ...(w.pid !== undefined && { pid: w.pid }),
         observed: { checked_at: new Date(now).toISOString(), status_file: modified === undefined ? 'unreadable' : 'readable',
-          ...(short(status, 80) && { [w.field]: status }), ...(modified !== undefined && { modified_at: new Date(modified).toISOString() }),
-          ...(w.pid !== undefined && { pid_exists: !processMissing(w.pid) }) } };
+          field: w.field, value: short(status, 80) ? status : null, ...(modified !== undefined && { modified_at: new Date(modified).toISOString() }),
+          ...(w.pid !== undefined && { pid: pidState(w.pid) }) } };
     });
   }
   summary(key: string, session?: string): string {

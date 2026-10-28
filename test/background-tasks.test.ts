@@ -505,22 +505,39 @@ test('PID checks survive restart, treat EPERM as unknown and prefer terminal sta
 
 test('restart context lists waiting watches of one conversation with a fresh read of their status', t => {
   const f = setup(t);
-  t.mock.method(process, 'kill', () => { throw Object.assign(new Error('probe'), { code: 'ESRCH' }); });
+  let code = 'ESRCH';
+  t.mock.method(process, 'kill', () => { if (code) throw Object.assign(new Error('probe'), { code }); return true; });
   const watch = JSON.parse(f.queue.action({ ...input, pid: 12345 }, target, signal()));
   f.queue.action({ action: 'remind', label: 'Later', message: 'Check later', deliver: 'agent', delay_minutes: 5 }, target, signal());
   const now = Date.parse('2026-10-28T00:30:00Z');
-  const [listed, ...rest] = f.queue.unfinished(target.key, target.session, now);
+  const [listed, ...rest] = f.queue.unfinished(target, now);
   assert.deepEqual(rest, []);
   assert.equal(listed.id, watch.id); assert.equal(listed.state, 'waiting'); assert.equal(listed.pid, 12345);
   assert.equal(listed.observed.checked_at, '2026-10-28T00:30:00.000Z');
-  assert.equal((listed.observed as Record<string, unknown>).stage, 'building'); assert.equal(listed.observed.pid_exists, false);
+  assert.equal(listed.observed.field, 'stage'); assert.equal(listed.observed.value, 'building');
   assert.ok(Number.isFinite(Date.parse(listed.observed.modified_at!)));
   // Only the watched field is read, never other data in the status file.
   assert.ok(!JSON.stringify(listed).includes('do not forward'));
+  // PID: missing, existing and a failed check are three different answers.
+  assert.equal(listed.observed.pid, 'missing');
+  code = ''; assert.equal(f.queue.unfinished(target)[0].observed.pid, 'exists');
+  code = 'EPERM'; assert.equal(f.queue.unfinished(target)[0].observed.pid, 'unknown');
   rmSync(join(f.root, 'status.json'));
-  assert.equal(f.queue.unfinished(target.key, target.session)[0].observed.status_file, 'unreadable');
-  assert.deepEqual(f.queue.unfinished('other-key', target.session), []);
-  assert.deepEqual(f.queue.unfinished(target.key, 'session-2'), []);
+  assert.equal(f.queue.unfinished(target)[0].observed.status_file, 'unreadable');
+  // Linked rooms share a key and session; the room, sender and thread still separate them.
+  for (const other of [{ ...target, room: '!shared:test' }, { ...target, sender: '@bob:test' }, { ...target, thread: undefined },
+    { ...target, key: 'other-key' }, { ...target, session: 'session-2' }]) {
+    assert.deepEqual(f.queue.unfinished(other), []);
+  }
+});
+
+test('a watched field named like a diagnostic cannot overwrite the check', t => {
+  const f = setup(t);
+  writeFileSync(join(f.root, 'status.json'), JSON.stringify({ checked_at: 'forged' }));
+  f.queue.action({ ...input, field: 'checked_at' }, target, signal());
+  const { observed } = f.queue.unfinished(target, Date.parse('2026-10-28T00:30:00Z'))[0];
+  assert.equal(observed.checked_at, '2026-10-28T00:30:00.000Z');
+  assert.equal(observed.field, 'checked_at'); assert.equal(observed.value, 'forged');
 });
 
 test('diagnostic watch options are bounded, visible and cannot silently change an existing watch', t => {

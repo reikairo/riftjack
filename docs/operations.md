@@ -60,14 +60,19 @@ conversation receives a short connector notice:
 
 When that conversation has unfinished detached runs or waiting file watches, the
 notice also lists them as data, read when the turn starts. For a detached run,
-`saved` is the status its supervisor last recorded and `observed` is a process
-check made at that moment, so a run recorded as running but whose supervisor is
-gone appears as lost. Watches show their status field as read at the same time,
-whether the status file is readable and, if a PID was given, whether it still
-exists. The list never repeats, stops or closes anything. A restart alone does
-not prove that it interrupted the work, and lost does not prove that child
-processes stopped. Runs and watches of another conversation, or of a session
-that was reset, are not shown.
+`saved` is the status its supervisor last recorded and `observed` is derived at
+that moment, so a run recorded as running but whose supervisor is gone appears
+as lost. Its `process_check` looks up the recorded supervisor, child and
+descendants (or their process groups) in the process table and reports whether
+they are present, absent, or that the check failed. Watches show the watched
+field and its value as read at the same time, whether the status file is
+readable and, if a PID was given, whether it exists, is missing or could not be
+checked. The list never repeats, stops or closes anything; closed lost runs are
+not shown. A restart alone does not prove that it interrupted the work, and
+lost does not prove that child processes stopped. Like the `run_detached` and
+`background_tasks` tools, the list is limited to the room, sender, thread and
+session the notice is delivered in, so a linked private room's work does not
+appear in a shared room.
 
 If a turn in that session already starts from a recovered message, incoming
 message or due background event, the notice is added to it. Otherwise the bot

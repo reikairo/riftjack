@@ -116,12 +116,13 @@ test('unlinked bots label the startup prompt as a connector notice', async t => 
 });
 
 test('the restart turn lists unfinished work of its own conversation, read when the turn starts', async t => {
-  const asked: [string, string][] = [];
+  const asked: [string, string | undefined, string, string][] = [];
   let unfinished: string | undefined;
-  const f = fixture(t, { restartContext: (key, session) => { asked.push([key, session]); return unfinished; } });
+  const f = fixture(t, { restartContext: (target, input, key, session) => { asked.push([target, input.sender, key, session]); return unfinished; } });
   unfinished = 'Unfinished background work of this conversation: run-1';
   await f.bridge.resumeRestart();
-  assert.deepEqual(asked, [[f.key, 'session']]);
+  // The room and sender the notice is delivered to, not only the shared session key.
+  assert.deepEqual(asked, [[room, sender, f.key, 'session']]);
   assert.equal(f.prompts[0], RESTART_PROMPT + '\nUnfinished background work of this conversation: run-1');
   // A recovered human message carries the same list after the notice, and nothing is added without work.
   const g = fixture(t, { restartContext: () => 'Unfinished: run-2' });

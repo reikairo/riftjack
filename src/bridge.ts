@@ -76,8 +76,8 @@ type Options = {
   linkedSession?: (room: string, event: MatrixEvent) => string;
   decoratePrompt?: (room: string, event: MatrixEvent, prompt: string, steering?: boolean) => string;
   promptDelivered?: () => void;
-  // Unfinished background work of the restarted conversation, appended to its restart notice.
-  restartContext?: (key: string, session: string) => string | undefined;
+  // Unfinished background work of the conversation this restart notice is delivered in.
+  restartContext?: (room: string, event: MatrixEvent, key: string, session: string) => string | undefined;
   // Extracts a validated peer mention request from a final reply in a shared room.
   mentions?: (room: string, text: string) => Mentions | undefined;
   // Shared rooms: the agent may decline a human message with NO_REPLY, so no
@@ -564,7 +564,7 @@ export class Bridge {
         if (verb !== 'publish' && !next.prompt.startsWith('!') && restart?.key === backendKey &&
             o.state.session(backendKey)[o.kind as 'codex' | 'claude'] === restart.session) {
           if (next.event.content?.[NOTICE] !== 'restart') modelPrompt += '\n\nConnector restart notice:\n' + RESTART_PROMPT;
-          const unfinished = o.restartContext?.(backendKey, restart.session);
+          const unfinished = o.restartContext?.(room, requestEvent, backendKey, restart.session);
           if (unfinished) modelPrompt += '\n' + unfinished;
           // Consume only when a model turn actually begins, not at privacy
           // checks or admission. A backend failure gets no immediate retry.
