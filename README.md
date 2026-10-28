@@ -170,7 +170,16 @@ still matches. A live group leader allows signalling its group; observed escaped
 descendants are checked individually. Processes that escape between observations
 cannot be guaranteed tracked. `lost` means observation is unavailable, **not**
 that all children stopped. It continues to occupy capacity and never releases a
-shared resource. Inspect it manually before retrying work. Session reset revokes
+shared resource. Inspect it manually before retrying work. After checking for
+remaining processes, use `close` with the run `id` and `evidence` describing when
+and how you checked, including escaped descendants. The human confirms releasing
+capacity. The tool requires an expired launch window and checks the recorded
+process identities and groups both before and after confirmation. An unreadable
+process table or a remaining process/group prevents closure. This operation does
+not send signals, delete files or claim success: `lost` remains visible, with
+separate closure metadata. Repeating a completed closure is harmless. Unknown
+escaped descendants cannot be excluded automatically; manual inspection matters.
+Closed runs remain in retained history. Session reset revokes
 unlaunched commands and suppresses notifications, but does not kill running jobs.
 
 State lives in `.riftjack/runs/<bot-hash>/` inside the workspace. Each bot has a

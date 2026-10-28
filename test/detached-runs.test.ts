@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DetachedRuns } from '../src/detached-runs.js';
@@ -124,4 +124,85 @@ test('observation failures retain safe diagnostics through status and completion
   assert.doesNotMatch(JSON.stringify(f.notices), /private command|token/);
   writeFileSync(join(f.directory, run.id, 'status.json'), '{private secret');
   assert.equal((await f.action({ action: 'status', id: run.id })).diagnostic.type, 'SyntaxError');
+});
+
+async function lostRun(f: ReturnType<typeof setup>) {
+  const run = await f.action(f.request);
+  const index = JSON.parse(readFileSync(join(f.directory, 'index.json'), 'utf8'));
+  index.runs.find((r: any) => r.id === run.id).launchBy = Date.now() - 1;
+  save(join(f.directory, 'index.json'), index);
+  save(join(f.directory, run.id, 'status.json'), { id: run.id, status: 'lost', reason: 'supervisor_failed',
+    supervisor: { pid: 123, ppid: 1, pgid: 123, birth: 'old' },
+    child: { pid: 124, ppid: 123, pgid: 124, birth: 'old-child' },
+    descendants: [{ pid: 125, ppid: 1, pgid: 125, birth: 'escaped' }] });
+  return run;
+}
+const evidence = 'Checked the full process table at 12:00 UTC; recorded groups and escaped descendants are absent.';
+test('closing lost runs retains forensic files, releases capacity and survives restart', async () => {
+  const f = setup(), first = await lostRun(f);
+  const manager = new DetachedRuns(f.directory, f.workspace, f.hooks);
+  const act = (input: unknown, interact = approve) => manager.action(input, target, signal, interact, async () => {}).then(JSON.parse);
+  await act(f.request);
+  await assert.rejects(act(f.request), /already active/);
+  const statusPath = join(f.directory, first.id, 'status.json'), original = readFileSync(statusPath, 'utf8');
+  writeFileSync(join(f.directory, first.id, 'output.log'), 'original output');
+  const closed = await act({ action: 'close', id: first.id, evidence });
+  assert.equal(closed.status, 'lost'); assert.equal(closed.closed.evidence, evidence);
+  assert.equal(readFileSync(statusPath, 'utf8'), original);
+  assert.equal(readFileSync(join(f.directory, first.id, 'output.log'), 'utf8'), 'original output');
+  assert.ok(!readdirSync(join(f.directory, first.id)).includes('stop'));
+  const repeat = await act({ action: 'close', id: first.id, evidence }, async () => { throw Error('Unexpected repeat confirmation'); });
+  assert.deepEqual(repeat.closed, closed.closed);
+  const recovered = new DetachedRuns(f.directory, f.workspace, f.hooks);
+  const list = JSON.parse(await recovered.action({ action: 'list' }, target, signal, approve, async () => {}));
+  assert.deepEqual(list[0].closed, closed.closed);
+  assert.equal(JSON.parse(await recovered.action(f.request, target, signal, approve, async () => {})).status, 'prepared');
+});
+test('closure rejects live supervisors, children, escaped descendants and remaining groups', async () => {
+  const f = setup(), run = await lostRun(f), manager = new DetachedRuns(f.directory, f.workspace, f.hooks);
+  for (const process of [
+    { pid: 123, pgid: 999, birth: 'old' }, { pid: 124, pgid: 999, birth: 'old-child' },
+    { pid: 125, pgid: 999, birth: 'escaped' }, { pid: 900, pgid: 124, birth: 'other' },
+  ]) {
+    f.hooks.processTable = () => [process];
+    await assert.rejects(manager.action({ action: 'close', id: run.id, evidence }, target, signal, approve, async () => {}), /still present/);
+  }
+  f.hooks.processTable = () => [{ pid: 123, pgid: 999, birth: 'reused' }];
+  const result = JSON.parse(await manager.action({ action: 'close', id: run.id, evidence }, target, signal, approve, async () => {}));
+  assert.equal(result.status, 'lost'); assert.ok(result.closed);
+});
+test('closure rechecks after confirmation, requires readable process table and preserves refusal', async () => {
+  const f = setup(), run = await lostRun(f), manager = new DetachedRuns(f.directory, f.workspace, f.hooks);
+  const request = { action: 'close', id: run.id, evidence };
+  const act = (interact = approve, auth = async () => {}) => manager.action(request, target, signal, interact, auth).then(JSON.parse);
+  assert.deepEqual(await act(async r => r.deny), { status: 'declined' });
+  await assert.rejects(act(async () => { throw Error('delivery failed'); }), /delivery failed/);
+  await assert.rejects(act(approve, async () => { throw Error('revoked'); }), /revoked/);
+  await assert.rejects(act(async r => {
+    f.hooks.processTable = () => [{ pid: 125, pgid: 125, birth: 'escaped' }]; return r.approve!;
+  }), /still present/);
+  f.hooks.processTable = () => { throw Object.assign(new Error('private detail'), { code: 'EPERM' }); };
+  await assert.rejects(act(), /Cannot verify processes/);
+  assert.equal(JSON.parse(readFileSync(join(f.directory, 'index.json'), 'utf8')).runs[0].closed, undefined);
+});
+test('closure requires evidence, scope, lost status and an expired launch window', async () => {
+  const f = setup(), run = await f.action(f.request);
+  await assert.rejects(f.action({ action: 'close', id: run.id, evidence }), /Only a lost/);
+  save(join(f.directory, run.id, 'status.json'), { id: run.id, status: 'lost' });
+  await assert.rejects(f.action({ action: 'close', id: run.id, evidence }), /launch window/);
+  for (const value of [undefined, '', ' ', 'x'.repeat(2001)]) {
+    await assert.rejects(f.action({ action: 'close', id: run.id, evidence: value }), /inspection|evidence/);
+  }
+  await assert.rejects(f.action({ action: 'close', id: run.id, evidence }, approve, { ...target, room: '!other:test' }), /not found/);
+});
+
+test('failed closure persistence does not release capacity in memory', async () => {
+  const f = setup(), run = await lostRun(f);
+  const manager = new DetachedRuns(f.directory, f.workspace, f.hooks);
+  await manager.action(f.request, target, signal, approve, async () => {});
+  mkdirSync(join(f.directory, 'index.json.tmp'));
+  await assert.rejects(manager.action({ action: 'close', id: run.id, evidence }, target, signal, approve, async () => {}));
+  const status = JSON.parse(await manager.action({ action: 'status', id: run.id }, target, signal, approve, async () => {}));
+  assert.equal(status.closed, undefined);
+  await assert.rejects(manager.action(f.request, target, signal, approve, async () => {}), /already active/);
 });

@@ -14,7 +14,8 @@ const active = new Set(['prepared', 'starting', 'running', 'stopping', 'lost']);
 const terminal = new Set(['succeeded', 'failed', 'stopped', 'lost']);
 const idPattern = /^[a-f0-9-]{36}$/;
 export type Run = { id: string; target: BackgroundTarget; label: string; created: number; launchBy: number;
-  sha256: string; notified?: string; cancelled?: boolean };
+  sha256: string; notified?: string; cancelled?: boolean;
+  closed?: { at: string; evidence: string; reason?: string } };
 export type RunStatus = { id: string; status: string; supervisor?: ProcessIdentity; updated_at?: string;
   reason?: string; exit_code?: number | null; signal?: string | null; [key: string]: unknown };
 type Hooks = { processTable?: typeof processes; notify: (id: string, target: BackgroundTarget, message: string) => void };
@@ -43,7 +44,8 @@ export class DetachedRuns {
     const value = existsSync(path) ? JSON.parse(regular(path, 1024 * 1024).toString()) : { version: 1, runs: [] };
     if (value.version !== 1 || !Array.isArray(value.runs) || value.runs.length > 100 || value.runs.some((r: Run) =>
       !object(r) || !idPattern.test(r.id) || !text(r.label, 160) || !Number.isFinite(r.created) || !Number.isFinite(r.launchBy) ||
-      !/^[a-f0-9]{64}$/.test(r.sha256) || !object(r.target) || !['room', 'sender', 'key', 'session'].every(k => text((r.target as any)[k], 4096)))) {
+      !/^[a-f0-9]{64}$/.test(r.sha256) || !object(r.target) || !['room', 'sender', 'key', 'session'].every(k => text((r.target as any)[k], 4096)) ||
+      (r.closed !== undefined && (!object(r.closed) || !text(r.closed.evidence, 2000) || !Number.isFinite(Date.parse(r.closed.at)))))) {
       throw new Error('Invalid detached run index; restore state before restarting.');
     }
     this.runs = value.runs;
@@ -81,6 +83,24 @@ export class DetachedRuns {
     try { return { text: regular(join(this.dir(run), 'output.log'), 1024 * 1024).subarray(-6000).toString('utf8').split('\n').slice(-40).join('\n').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '\uFFFD') }; }
     catch (error) { return { text: '', error: safeErrorSummary(error) }; }
   }
+  private checkClosable(run: Run) {
+    const state = this.state(run);
+    if (state.status !== 'lost') throw new PublicError('Only a lost run can be closed after inspection.');
+    if (Date.now() <= run.launchBy) throw new PublicError('Wait until the five-minute launch window expires before closing this run.');
+    let table: ProcessIdentity[];
+    try { table = (this.hooks.processTable ?? processes)(); }
+    catch (cause) { throw new PublicError('Cannot verify processes before closing the run.', { cause }); }
+    const identities = [state.supervisor, state.child, ...(Array.isArray(state.descendants) ? state.descendants : [])].filter(Boolean);
+    for (const identity of identities) {
+      if (!object(identity) || !Number.isInteger(identity.pid) || !Number.isInteger(identity.pgid) || !text(identity.birth, 200)) {
+        throw new PublicError('Recorded process identity is invalid; retain this run for investigation.');
+      }
+      if (table.some(p => same(p, identity as ProcessIdentity) || p.pgid === identity.pgid)) {
+        throw new PublicError('A recorded process or process group is still present. Inspect it before closing the run.');
+      }
+    }
+    return state;
+  }
   pump(valid: (target: BackgroundTarget) => boolean) {
     for (const run of this.runs) {
       if (!valid(run.target)) {
@@ -107,7 +127,32 @@ export class DetachedRuns {
     signal.throwIfAborted();
     if (!object(input)) throw new PublicError('Supply a detached run action.');
     const visible = (r: Run) => ['key', 'session', 'room', 'sender', 'thread'].every(k => (r.target as any)[k] === (target as any)[k]);
-    if (input.action === 'list' && Object.keys(input).length === 1) return JSON.stringify(this.runs.filter(visible).map(r => ({ label: r.label, ...this.state(r) })));
+    if (input.action === 'list' && Object.keys(input).length === 1) return JSON.stringify(this.runs.filter(visible).map(r => ({ label: r.label, ...this.state(r), closed: r.closed })));
+    if (input.action === 'close') {
+      if (Object.keys(input).some(k => !['action', 'id', 'evidence'].includes(k)) || !text(input.evidence, 2000) || !input.evidence.trim()) {
+        throw new PublicError('Use close with id and evidence describing when and how remaining processes were checked.');
+      }
+      const run = this.runs.find(r => r.id === input.id && visible(r));
+      if (!run) throw new PublicError('Run not found in this conversation.');
+      if (!run.closed) {
+        this.checkClosable(run);
+        const approved = {}, declined = {};
+        const result = await interact({ ...confirmationDetails([
+          { label: 'Close lost run', value: `${run.label} (${run.id})` },
+          { label: 'Manual inspection evidence', value: input.evidence },
+          { value: 'Release this run from the active-run limit. No process is started or stopped. The original status and logs are retained, and success is not claimed. Recorded processes and groups must be absent; unobserved escaped descendants require the manual inspection above.' },
+        ]), approve: approved, deny: declined }, signal);
+        signal.throwIfAborted();
+        if (result === declined) return JSON.stringify({ status: 'declined' });
+        if (result !== approved) throw new PublicError('No closure approval was established.');
+        await authorize(); signal.throwIfAborted();
+        const state = this.checkClosable(run);
+        run.closed = { at: new Date().toISOString(), evidence: input.evidence, reason: state.reason };
+        try { this.persist(); }
+        catch (error) { delete run.closed; throw error; }
+      }
+      return JSON.stringify({ label: run.label, ...this.state(run), closed: run.closed });
+    }
     if (input.action === 'status' || input.action === 'stop') {
       if (Object.keys(input).some(k => !['action', 'id'].includes(k))) throw new PublicError('Use only action and id.');
       const run = this.runs.find(r => r.id === input.id && visible(r));
@@ -117,7 +162,7 @@ export class DetachedRuns {
         writeFileSync(join(this.dir(run), 'stop'), '', { mode: 0o600 }); run.cancelled = true; this.persist();
       }
       const log = this.tail(run);
-      return JSON.stringify({ label: run.label, ...this.state(run), log_tail: log.text, log_error: log.error,
+      return JSON.stringify({ label: run.label, ...this.state(run), closed: run.closed, log_tail: log.text, log_error: log.error,
         ...(input.action === 'stop' && { stop_requested: true, note: 'Only the live supervisor can stop its observed processes. A request is not proof that they stopped; lost requires manual inspection.' }) });
     }
     if (input.action !== 'start' || Object.keys(input).some(k => !['action', 'label', 'cwd', 'argv', 'env', 'timeout_seconds', 'snapshot_args'].includes(k)) ||
@@ -137,7 +182,10 @@ export class DetachedRuns {
       return { index: i, original: path, bytes: regular(path, 1024 * 1024) };
     });
     if (this.runs.length >= 100) throw new PublicError('Run history limit reached (100). Archive finished runs before adding more.');
-    if (this.pending + this.runs.filter(r => active.has(this.state(r).status)).length >= 2) throw new PublicError('Two runs are already active or uncertain. Inspect them before starting another.');
+    if (this.pending + this.runs.filter(r => {
+      const state = this.state(r);
+      return active.has(state.status) && !(r.closed && state.status === 'lost');
+    }).length >= 2) throw new PublicError('Two runs are already active or uncertain. Inspect them; use close with inspection evidence for lost runs whose processes have ended.');
     this.pending++;
     try {
       const approved = {}, declined = {};

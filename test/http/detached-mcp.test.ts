@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, realpathSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createBackend } from '../../src/backends.js';
@@ -57,4 +57,39 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
   const result = await backend(kind, 'Ask before starting.', 'key', new AbortController().signal, '@alice:test', [],
     interact, undefined, { detached: (input, signal) => manager.action(input, { key: 'key', room: '!room:test', sender: '@alice:test', session: 'detached-session' }, signal, interact, async () => {}) });
   assert.equal(result, 'prepared'); assert.equal(count, 1); assert.equal(interactions.size, 0);
+});
+
+
+test('detached MCP exposes confirmed closure and preserves lost status', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'detached-close-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { startDetachedMcp } = await import('../../src/detached-mcp.js');
+  const { save } = await import('../../scripts/detached-runner.mjs');
+  const target = { key: 'key', room: '!room:test', sender: '@alice:test', session: 'session' };
+  const lifetime = new AbortController();
+  const hooks = { processTable: () => [], notify() {} };
+  const directory = join(root, 'runs');
+  let manager = new DetachedRuns(directory, root, hooks);
+  const run = JSON.parse(await manager.action({ action: 'start', label: 'fixture', cwd: root,
+    argv: [process.execPath, '-e', 'process.exit(0)'] }, target, lifetime.signal, async r => r.approve!, async () => {}));
+  const index = JSON.parse(readFileSync(join(directory, 'index.json'), 'utf8'));
+  index.runs[0].launchBy = Date.now() - 1; save(join(directory, 'index.json'), index);
+  save(join(directory, run.id, 'status.json'), { id: run.id, status: 'lost', reason: 'supervisor_failed' });
+  manager = new DetachedRuns(directory, root, hooks);
+  let approvals = 0;
+  const server = await startDetachedMcp((input, signal) => manager.action(input, target, signal,
+    async r => { approvals++; return r.approve!; }, async () => {}), lifetime.signal);
+  t.after(() => server.close()); let id = 0;
+  const rpc = async (method: string, params?: object) => (await (await fetch(server.url, { method: 'POST',
+    headers: { ...server.headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) })).json());
+  const schema = (await rpc('tools/list')).result.tools[0].inputSchema.properties;
+  assert.ok(schema.action.enum.includes('close')); assert.equal(schema.evidence.maxLength, 2000);
+  const invalid = await rpc('tools/call', { name: 'run_detached', arguments: { action: 'close', id: run.id } });
+  assert.ok(invalid.result.isError); assert.equal(approvals, 0);
+  const response = await rpc('tools/call', { name: 'run_detached', arguments: {
+    action: 'close', id: run.id, evidence: 'Checked the full process table; no remaining descendants or groups.' } });
+  assert.ok(!response.result.isError);
+  const closed = JSON.parse(response.result.content[0].text);
+  assert.equal(closed.status, 'lost'); assert.ok(closed.closed.at); assert.equal(approvals, 1);
 });
