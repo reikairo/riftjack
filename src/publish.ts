@@ -4,13 +4,19 @@ import { realpath, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { PublicError } from './errors.js';
-import { renderPublishReview } from './publish-html.js';
+import { renderPublishReview, renderPublishBatchReview } from './publish-html.js';
 import { confirmationDetails } from './confirmation-format.js';
 import type { Interact } from './interactions.js';
 
 const exec = promisify(execFile);
 const LIMIT = 8 * 1024 * 1024;
 export type PublishInput = { repository: string; remote: string; branch: string };
+export type PublishBatchInput = { repository: string; remote: string; branches: readonly Readonly<{ branch: string; head: string }>[] };
+export type PublicationInput = PublishInput | PublishBatchInput;
+export type PublishBatchReview = Readonly<{
+  repository: string; remote: string; url: string; createdAt: string;
+  branches: readonly PublishReview[]; html: string; sha256: string;
+}>;
 export type PublishReview = Readonly<PublishInput & {
   url: string; base: string | null; reviewBase: string | null;
   baseReference: Readonly<{ ref: string; head: string }> | null; head: string; createdAt: string;
@@ -21,15 +27,32 @@ export type PublishReview = Readonly<PublishInput & {
   workingTreeDirty: boolean; html: string; sha256: string;
 }>;
 
-export function publishInput(value: unknown): PublishInput {
+export function publishInput(value: unknown): PublicationInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new PublicError('Supply repository, remote and branch.');
   const v = value as Record<string, unknown>;
-  if (Object.keys(v).some(k => !['repository', 'remote', 'branch'].includes(k)) ||
+  if (Object.keys(v).some(k => !['repository', 'remote', 'branch', 'branches'].includes(k)) ||
       typeof v.repository !== 'string' || !v.repository || v.repository.length > 4096 || /[\x00-\x1f]/.test(v.repository) ||
-      typeof v.remote !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(v.remote) ||
-      typeof v.branch !== 'string' || !v.branch || v.branch.length > 255 || v.branch.startsWith('-')) {
+      typeof v.remote !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(v.remote)) {
     throw new PublicError('Supply only repository (a directory), remote (a configured name) and branch (a branch name).');
   }
+  const validBranch = (branch: unknown): branch is string => typeof branch === 'string' && !!branch && branch.length <= 255 && !branch.startsWith('-') && !/[\x00-\x20\x7f]/.test(branch);
+  if ('branches' in v) {
+    if ('branch' in v || !Array.isArray(v.branches) || !v.branches.length || v.branches.length > 20) {
+      throw new PublicError('Supply either branch or branches (1–20 exact branch/head pairs), not both.');
+    }
+    const names = new Set<string>();
+    const branches = v.branches.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).some(k => !['branch', 'head'].includes(k)) ||
+          !validBranch(item.branch) || typeof item.head !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(item.head)) {
+        throw new PublicError('Each publication entry requires a branch name and a full lowercase commit SHA in head.');
+      }
+      if (names.has(item.branch)) throw new PublicError('Duplicate destination branch in publication batch.');
+      names.add(item.branch);
+      return Object.freeze({ branch: item.branch, head: item.head });
+    });
+    return { repository: v.repository, remote: v.remote, branches: Object.freeze(branches) };
+  }
+  if (!validBranch(v.branch)) throw new PublicError('Supply a destination branch name.');
   return { repository: v.repository, remote: v.remote, branch: v.branch };
 }
 
@@ -104,21 +127,34 @@ async function publishedBranches(repo: string, url: string, signal: AbortSignal)
   });
 }
 
-export async function preparePublish(input: PublishInput, workspace: string, signal: AbortSignal): Promise<PublishReview> {
-  input = publishInput(input);
+async function publicationContext(input: PublicationInput, workspace: string, signal: AbortSignal) {
   const root = await realpath(workspace), repository = await realpath(resolve(root, input.repository));
   const rel = relative(root, repository);
   if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) throw new PublicError('Repository must be inside this bot’s workspace.');
   if ((await realpath((await git(repository, ['rev-parse', '--show-toplevel'], signal)).trim())) !== repository) throw new PublicError('Choose the repository root directory.');
   if ((await git(repository, ['rev-parse', '--is-shallow-repository'], signal)).trim() !== 'false') throw new PublicError('A complete repository history is required; shallow repositories cannot be reviewed.');
-  await git(repository, ['check-ref-format', 'refs/heads/' + input.branch], signal);
   const url = await destination(repository, input.remote, signal);
-  const head = (await git(repository, ['rev-parse', '--verify', 'HEAD^{commit}'], signal)).trim();
-  const base = await remoteHead(repository, url, 'refs/heads/' + input.branch, signal);
-  if (base === head) throw new PublicError('The destination already contains this HEAD; there is nothing to publish.');
+  const advertisedDefault = await defaultBranch(repository, url, signal);
+  const publishedReferences = Object.freeze(await publishedBranches(repository, url, signal));
+  if (advertisedDefault && !publishedReferences.some(ref => ref.ref === advertisedDefault.ref && ref.head === advertisedDefault.head)) {
+    throw new PublicError('The remote default branch changed while preparing the review. Prepare a new report.');
+  }
+  const publishedTips = [...new Set(publishedReferences.map(ref => ref.head))];
+  // Fetch once for the whole package without changing shared tracking refs.
+  if (publishedTips.length) await git(repository, ['fetch', '--no-tags', '--no-write-fetch-head', '--', url, ...publishedTips], signal);
+  return { repository, url, advertisedDefault, publishedReferences, publishedTips };
+}
+
+type PublicationContext = Awaited<ReturnType<typeof publicationContext>>;
+
+async function prepareBranch(input: PublishInput, context: PublicationContext, head: string, signal: AbortSignal): Promise<PublishReview> {
+  const { repository, url, advertisedDefault, publishedReferences, publishedTips } = context;
+  await git(repository, ['check-ref-format', 'refs/heads/' + input.branch], signal);
+  if ((await git(repository, ['cat-file', '-t', head], signal)).trim() !== 'commit') throw new PublicError('Publication head must be a commit object.');
+  const base = publishedReferences.find(ref => ref.ref === 'refs/heads/' + input.branch)?.head ?? null;
+  if (base === head) throw new PublicError(`The destination ${input.branch} already contains this HEAD; there is nothing to publish. Omit unchanged branches.`);
   let historyReplacement = false;
   if (base) {
-    await git(repository, ['fetch', '--no-tags', '--no-write-fetch-head', '--', url, base], signal);
     // A shared ancestor keeps this a branch update, not replacement by an unrelated repository.
     const ancestors = (await git(repository, ['merge-base', '--all', base, head], signal)).trim().split('\n');
     if (ancestors.length !== 1 || !/^[a-f0-9]{40,64}$/.test(ancestors[0])) {
@@ -127,10 +163,8 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
     historyReplacement = ancestors[0] !== base;
   }
   let reviewBase = base;
-  const advertisedDefault = await defaultBranch(repository, url, signal);
   const baseReference = base && advertisedDefault?.ref === 'refs/heads/' + input.branch ? null : advertisedDefault;
   if (baseReference) {
-    await git(repository, ['fetch', '--no-tags', '--no-write-fetch-head', '--', url, baseReference.head], signal);
     const ancestors = (await git(repository, ['merge-base', '--all', head, baseReference.head], signal)).trim().split('\n');
     if (ancestors.length !== 1 || !/^[a-f0-9]{40,64}$/.test(ancestors[0])) {
       throw new PublicError('A publication review requires a unique common ancestor with the remote default branch.');
@@ -140,12 +174,6 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
   // The PR diff is relative to the published main; push safety and outgoing
   // history are still relative to the exact destination branch tip.
   const historyRange = base ? base + '..' + head : reviewBase ? reviewBase + '..' + head : head;
-  const publishedReferences = Object.freeze(await publishedBranches(repository, url, signal));
-  const publishedTips = [...new Set(publishedReferences.map(ref => ref.head))];
-  // Fetch immutable object IDs without changing shared remote-tracking refs.
-  if (publishedTips.length) {
-    await git(repository, ['fetch', '--no-tags', '--no-write-fetch-head', '--', url, ...publishedTips], signal);
-  }
   const commitList = (await git(repository, ['rev-list', '--max-count=101', '--reverse', historyRange,
     ...(publishedTips.length ? ['--not', ...publishedTips] : [])], signal)).trim();
   const commits = commitList ? commitList.split('\n') : [];
@@ -180,6 +208,56 @@ export async function preparePublish(input: PublishInput, workspace: string, sig
   return Object.freeze({ ...data, html, sha256: createHash('sha256').update(html).digest('hex') });
 }
 
+export function preparePublish(input: PublishInput, workspace: string, signal: AbortSignal): Promise<PublishReview>;
+export function preparePublish(input: PublishBatchInput, workspace: string, signal: AbortSignal): Promise<PublishBatchReview>;
+export function preparePublish(input: PublicationInput, workspace: string, signal: AbortSignal): Promise<PublishReview | PublishBatchReview>;
+export async function preparePublish(input: PublicationInput, workspace: string, signal: AbortSignal): Promise<PublishReview | PublishBatchReview> {
+  input = publishInput(input);
+  const context = await publicationContext(input, workspace, signal);
+  if ('branch' in input) {
+    const head = (await git(context.repository, ['rev-parse', '--verify', 'HEAD^{commit}'], signal)).trim();
+    return prepareBranch(input, context, head, signal);
+  }
+  const branches: PublishReview[] = [];
+  const commits = new Set<string>();
+  let size = 0;
+  for (const entry of input.branches) {
+    const branch = await prepareBranch({ repository: input.repository, remote: input.remote, branch: entry.branch }, context, entry.head, signal);
+    for (const oid of [...branch.commits, ...branch.removedHistory.map(c => c.oid)]) commits.add(oid);
+    if (commits.size > 100) throw new PublicError('Batch review exceeds 100 distinct outgoing and removed commits. Prepare a smaller publication.');
+    size += Buffer.byteLength(branch.html);
+    if (size > LIMIT) throw new PublicError('Complete batch review exceeds 8 MiB of text. No truncated review will be approved.');
+    branches.push(branch);
+  }
+  const data = { repository: context.repository, remote: input.remote, url: context.url, createdAt: new Date().toISOString(), branches: Object.freeze(branches) };
+  const html = renderPublishBatchReview(data);
+  if (Buffer.byteLength(html) > LIMIT) throw new PublicError('Complete batch review exceeds 8 MiB of text. No truncated review will be approved.');
+  return Object.freeze({ ...data, html, sha256: createHash('sha256').update(html).digest('hex') });
+}
+
+export async function pushReviewedBatch(review: PublishBatchReview, signal: AbortSignal, authorize: () => Promise<void> = async () => {}): Promise<void> {
+  if (await destination(review.repository, review.remote, signal) !== review.url) {
+    throw new PublicError('The destination changed after review. Prepare a new report and request confirmation again.');
+  }
+  const current = new Map((await publishedBranches(review.repository, review.url, signal)).map(ref => [ref.ref, ref.head]));
+  for (const branch of review.branches) {
+    if ((current.get('refs/heads/' + branch.branch) ?? null) !== branch.base ||
+        (branch.baseReference && current.get(branch.baseReference.ref) !== branch.baseReference.head) ||
+        branch.publishedReferences.some(ref => current.get(ref.ref) !== ref.head)) {
+      throw new PublicError(`Remote references changed after review (${branch.branch}). Prepare a new report and request confirmation again. No push was made.`);
+    }
+  }
+  await authorize();
+  signal.throwIfAborted();
+  try {
+    await git(review.repository, ['-c', 'push.followTags=false', 'push', '--atomic', '--porcelain', '--no-follow-tags', '--recurse-submodules=no',
+      ...review.branches.map(b => '--force-with-lease=refs/heads/' + b.branch + ':' + (b.base ?? '')),
+      '--', review.url, ...review.branches.map(b => b.head + ':refs/heads/' + b.branch)], signal);
+  } catch (cause) {
+    throw new PublicError('Atomic publication was not confirmed. No non-atomic fallback or automatic retry was attempted. An interrupted push may have completed; check all destination branches before retrying. The server must support atomic push.', { cause });
+  }
+}
+
 export async function pushReviewed(review: PublishReview, signal: AbortSignal, authorize: () => Promise<void> = async () => {}): Promise<void> {
   if ((await git(review.repository, ['rev-parse', '--verify', 'HEAD^{commit}'], signal)).trim() !== review.head ||
       await destination(review.repository, review.remote, signal) !== review.url ||
@@ -203,6 +281,7 @@ export async function pushReviewed(review: PublishReview, signal: AbortSignal, a
 
 export async function requestPublish(input: unknown, workspace: string, reportRoot: string, maxBytes: number, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>): Promise<string> {
   const review = await preparePublish(publishInput(input), workspace, signal);
+  if ('branches' in review) return requestBatchPublication(review, reportRoot, maxBytes, signal, interact, authorize);
   if (Buffer.byteLength(review.html) > maxBytes) throw new PublicError('Complete HTML review exceeds the attachment limit.');
   const directory = await mkdtemp(join(reportRoot, 'publish-review-'));
   try {
@@ -226,5 +305,27 @@ export async function requestPublish(input: unknown, workspace: string, reportRo
     if (!('publish' in decision) || decision.publish !== true) return 'Publication declined. No push was made.';
     await pushReviewed(review, signal, authorize);
     return `Published ${review.head} to ${review.remote}/${review.branch}.`;
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
+async function requestBatchPublication(review: PublishBatchReview, reportRoot: string, maxBytes: number, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>): Promise<string> {
+  if (Buffer.byteLength(review.html) > maxBytes) throw new PublicError('Complete HTML review exceeds the attachment limit.');
+  const directory = await mkdtemp(join(reportRoot, 'publish-review-'));
+  try {
+    const name = 'publish-batch-' + review.sha256.slice(0, 12) + '.html', path = join(directory, name);
+    await writeFile(path, review.html, { flag: 'wx', mode: 0o600 });
+    const decision = await interact({ ...confirmationDetails([
+      { value: `Publish all ${review.branches.length} branches in the attached review as one atomic operation?` },
+      { label: 'Repository', value: review.repository, code: true },
+      { label: 'Destination', value: review.url, code: true },
+      ...review.branches.map(b => ({ label: b.branch, value: `${b.base ?? '[new branch]'} → ${b.head}${b.historyReplacement ? ' (HISTORY REPLACEMENT)' : ''}`, code: true })),
+      { value: 'Review the outgoing and removed history for every branch. Approval covers this entire immutable package. Without approval nothing is pushed. If any remote tip changes, or the server does not support atomic push, the package fails without a partial-push fallback.' },
+      { value: 'Only the listed commit SHAs are sent. Working-tree changes, other branches and tags are excluded. Local branch movement or checkout does not change the approved SHAs.' },
+      { label: 'Report SHA-256', value: review.sha256, code: true },
+    ]), attachments: [{ path, root: directory, name }], approve: { publish: true }, deny: { publish: false } }, signal);
+    signal.throwIfAborted();
+    if (!('publish' in decision) || decision.publish !== true) return 'Publication declined. No push was made.';
+    await pushReviewedBatch(review, signal, authorize);
+    return `Published atomic batch to ${review.remote}:\n` + review.branches.map(b => `${b.branch}: ${b.head}`).join('\n');
   } finally { await rm(directory, { recursive: true, force: true }); }
 }

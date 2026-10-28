@@ -278,7 +278,40 @@ The repository path is relative to that bot's workspace (an absolute path inside
 
 Riftjack resolves the push destination, reads its branch tip and prepares a self-contained HTML attachment. It contains the final diff and **every outgoing commit**, including changes later reverted. File sections collapse, added/deleted lines have colors and line numbers, and the file needs no JavaScript or external resources. Binary contents are marked as unavailable for text review. Uncommitted files, other local branches and unrelated tags are excluded. Git authentication must already work on the host; the connector does not collect credentials.
 
-After the attachment and confirmation text have been delivered, approve with the usual reaction or `!approve ID`, or decline with `!deny ID`. Delivery does not prove the report was opened. Approval applies to the shown commit, destination branch and expected remote tip only. Changed HEAD or destination invalidates the review. An explicit Git lease also prevents a concurrent remote update from being overwritten. Only fast-forward updates and new branches from complete (non-shallow) repositories are supported. For a new branch on an existing remote, the report starts at its unique common ancestor with the remote default branch. The report identifies that published branch, its tip and the review base; local tracking refs and other remotes are not used to omit history. The published branch tip is checked again before pushing. An empty remote still receives a complete-history review. There is no automatic retry after an uncertain push result.
+After the attachment and confirmation text have been delivered, approve with the usual reaction or `!approve ID`, or decline with `!deny ID`. Delivery does not prove the report was opened. Approval applies to the shown commit, destination branch and expected remote tip only. Changed HEAD or destination invalidates the review. An explicit Git lease also prevents a concurrent remote update from being overwritten. New branches, fast-forward updates and explicitly reviewed history replacements from complete (non-shallow) repositories are supported. For a new branch on an existing remote, the report starts at its unique common ancestor with the remote default branch. The report identifies that published branch, its tip and the review base; local tracking refs and other remotes are not used to omit history. The published branch tip is checked again before pushing. An empty remote still receives a complete-history review. There is no automatic retry after an uncertain push result.
+
+### Publishing a package of branches
+
+For a chain of PRs, supply `branches` instead of `branch` to `prepare_publish` or
+`!publish`. Each entry names a destination branch and the **full lowercase commit
+SHA** to publish. All entries use the same repository and configured remote:
+
+```json
+{"repository":"projects/demo","remote":"origin","branches":[{"branch":"feature/base","head":"1111111111111111111111111111111111111111"},{"branch":"feature/next","head":"2222222222222222222222222222222222222222"}]}
+```
+
+Replace the example SHAs with actual commit IDs. No checkout or matching local
+branch is required. The tool captures expected remote tips itself. One HTML report
+shows every branch's old and proposed tips, final diff, outgoing history and
+removed history. One confirmation approves the entire immutable package. Moving
+a local branch or changing the checkout afterwards does not alter the reviewed
+SHAs. Without approval, no branch is published.
+
+Before pushing, Riftjack rechecks the destination and published branch tips.
+It then sends one `git push --atomic` with a separate exact remote-tip lease for
+each destination, including an absence lease for a new branch. A concurrent update
+or server rejection prevents partial publication. If the server does not support
+atomic push, publication fails; there is **no non-atomic fallback**. A transport
+failure may hide a completed push, so inspect all destination branches before
+preparing another review.
+
+A package contains 1–20 distinct branches and at most 100 distinct outgoing and
+removed commits in total. Shared commits count once towards that limit, although
+the report repeats them within each branch's history. The complete HTML must fit
+within 8 MiB and the attachment limit; oversized reports are refused, never
+truncated. Omit unchanged branches. Branch deletion is not supported. The
+report-only CLI accepts the same input and returns `atomic: true` and a `branches`
+array of review metadata; it still never pushes.
 
 A technical interruption or lost tool result does not cancel the authorized task. Before preparing another review, the agent checks the destination and whether the previous request is still active. If the commits are already published, it reports that result without repeating the push. If they are not published and no request remains active, it can prepare a fresh review without another invitation; a new human confirmation is still required. An explicit human decline or cancellation requires renewed permission to prepare another review. If the outcome or cancellation reason cannot be established, the agent reports the blocker and asks for clarification. Expired confirmations are never reused.
 

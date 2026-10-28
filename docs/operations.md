@@ -92,7 +92,7 @@ Grok workers do not receive a startup model turn.
 
 `prepare_publish` detects when the destination tip is not an ancestor of the
 proposed HEAD. For branches with a unique common ancestor, it prepares an explicit
-history-replacement review. The HTML includes the net diff from the old remote tip,
+history-replacement review. The HTML identifies the old remote tip separately from the review base and includes the final diff,
 every outgoing commit, and every old commit that will no longer be reachable from
 that branch. Rewritten commits may preserve those changes with different IDs.
 The confirmation identifies the replacement and the number of removed commits;
@@ -105,3 +105,14 @@ failed push automatically. Outgoing and removed history share the 100-commit and
 8 MiB text limits; unrelated histories are rejected. Uncommitted files and tags
 remain excluded. The report-only CLI exposes `historyReplacement` and
 `removedCommits` alongside its existing metadata and never pushes.
+
+## Atomic publication packages
+
+Use `prepare_publish` with `branches: [{branch, head}, ...]` to review and publish
+up to 20 branches together. The exact commit IDs, remote tips and removed history
+are covered by one report and one approval. The connector rechecks remote tips
+and uses one atomic push with a lease for each branch. An unsupported atomic push
+is an error; no sequential fallback occurs. After an interrupted push, inspect
+every destination before requesting another approval. See
+[Reviewed publication](chat.md#publishing-a-package-of-branches) for the input
+format and limits.

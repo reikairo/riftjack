@@ -98,7 +98,7 @@ function fixture(t: { after(fn: () => void): void }, rewrite = false) {
     git('push', 'origin', 'HEAD:main'); base = git('rev-parse', 'HEAD');
     git('commit', '--amend', '-m', 'Rebased update');
   }
-  return { root, repo, base, head: git('rev-parse', 'HEAD'), remoteHead: () => git('ls-remote', 'origin', 'refs/heads/main').split('\t')[0] };
+  return { root, repo, git, base, head: git('rev-parse', 'HEAD'), remoteHead: () => git('ls-remote', 'origin', 'refs/heads/main').split('\t')[0] };
 }
 
 // Real backend adapters with tiny CLI doubles: exercise MCP discovery/call over HTTP,
@@ -198,4 +198,28 @@ if (args.includes('--print')) {
   assert.equal(connections.length, 2);
   assert.notEqual(connections[0].headers.Authorization, connections[1].headers.Authorization);
   for (const connection of connections) await assert.rejects(post(connection, 'tools/list', 99));
+});
+
+for (const approved of [true, false]) test(`MCP batch waits for one approval and publishes all or none (approve=${approved})`, async t => {
+  const f = fixture(t), ready = deferred(), decide = deferred(); let approvals = 0;
+  const server = await startPublishMcp((input, signal) => requestPublish(input, f.root, f.root, 8 * 1024 * 1024, signal, async request => {
+    approvals++;
+    assert.equal(request.attachments?.length, 1);
+    assert.match(readFileSync(request.attachments![0].path, 'utf8'), /Atomic publication package/);
+    ready.resolve(); await decide.promise;
+    return { publish: approved };
+  }, async () => {}), signal());
+  t.after(() => server.close());
+  const schema = (await (await post(server, 'tools/list', 1)).json()).result.tools[0].inputSchema;
+  assert.equal(schema.properties.branches.maxItems, 20);
+  const batch = { repository: 'repo', remote: 'origin', branches: [{ branch: 'main', head: f.head }, { branch: 'next', head: f.head }] };
+  const pending = call(server, 2, batch);
+  await ready.promise;
+  assert.equal(f.remoteHead(), f.base);
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/next'), '');
+  decide.resolve();
+  const result = (await (await pending).json()).result;
+  assert.ok(!result.isError, JSON.stringify(result)); assert.equal(approvals, 1);
+  assert.equal(f.remoteHead(), approved ? f.head : f.base);
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/next').split('\t')[0], approved ? f.head : '');
 });

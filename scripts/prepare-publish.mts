@@ -14,8 +14,13 @@ try {
   const review = await preparePublish(publishInput(input), values.workspace, AbortSignal.timeout(10 * 60_000));
   const output = resolve(values.output);
   await writeFile(output, review.html, { flag: 'wx', mode: 0o600 });
-  console.log(JSON.stringify({ output, head: review.head, base: review.base, reviewBase: review.reviewBase, baseReference: review.baseReference, remote: review.remote, branch: review.branch,
-    historyReplacement: review.historyReplacement, removedCommits: review.removedHistory.length, commits: review.commits.length, sha256: review.sha256, published: false }));
+  const branchMetadata = (branch: import('../src/publish.js').PublishReview) => ({
+    head: branch.head, base: branch.base, reviewBase: branch.reviewBase, baseReference: branch.baseReference,
+    branch: branch.branch, historyReplacement: branch.historyReplacement,
+    removedCommits: branch.removedHistory.length, commits: branch.commits.length,
+  });
+  console.log(JSON.stringify({ output, remote: review.remote, sha256: review.sha256, published: false,
+    ...('branches' in review ? { atomic: true, branches: review.branches.map(branchMetadata) } : branchMetadata(review)) }));
 } catch (error) {
   console.error(error instanceof PublicError ? error.message : 'Could not create the review. Check paths, output-file availability and Git authentication.');
   process.exitCode = 1;
