@@ -240,6 +240,22 @@ export class BackgroundTasks {
     this.watches = this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).concat(
       this.watches.filter(w => w.state !== 'waiting' && w.state !== 'dispatching' && !w.delivery).slice(-99));
   }
+  // For the restart notice: file watches of one conversation that are still waiting, or whose
+  // notification turn was interrupted. `observed` is read now; the watch itself is not changed.
+  unfinished(key: string, session: string, now = Date.now()) {
+    return this.watches.filter(w => !w.timer && w.key === key && w.session === session && w.workspace === this.workspace &&
+      ['waiting', 'dispatching', 'interrupted'].includes(w.state)).map(w => {
+      let status: unknown, modified: number | undefined;
+      try {
+        const file = this.statusFile(w.file);
+        status = Object.hasOwn(file.value, w.field) ? file.value[w.field] : undefined; modified = file.modified;
+      } catch { /* Missing or invalid now; reported as unreadable. */ }
+      return { id: w.id, label: w.label, state: w.state, status_file: w.file, ...(w.pid !== undefined && { pid: w.pid }),
+        observed: { checked_at: new Date(now).toISOString(), status_file: modified === undefined ? 'unreadable' : 'readable',
+          ...(short(status, 80) && { [w.field]: status }), ...(modified !== undefined && { modified_at: new Date(modified).toISOString() }),
+          ...(w.pid !== undefined && { pid_exists: !processMissing(w.pid) }) } };
+    });
+  }
   summary(key: string, session?: string): string {
     const items = this.watches.filter(w => w.key === key && w.session === session);
     return `\n\n**Background watches:** ${items.filter(w => w.state === 'waiting' && !w.timer).length} waiting; ${items.filter(w => w.state === 'waiting' && w.timer).length} timers pending; ${items.filter(w => w.state === 'interrupted' || w.timer?.lastRun?.state === 'interrupted').length} interrupted (delivery uncertain; inspect before retrying).`;

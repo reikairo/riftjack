@@ -101,6 +101,21 @@ export class DetachedRuns {
     }
     return state;
   }
+  // For the restart notice: runs of one conversation that are still active or were lost. `saved` is
+  // what the run's status file last recorded; `observed` is the outcome of a process check made now.
+  unfinished(key: string, session: string, now = Date.now()) {
+    return this.runs.filter(r => r.target.key === key && r.target.session === session).flatMap(run => {
+      const observed = this.state(run);
+      if (!active.has(observed.status)) return [];
+      let saved: RunStatus | undefined;
+      try { saved = JSON.parse(regular(join(this.dir(run), 'status.json'), 64 * 1024).toString()); } catch { /* Shown as missing. */ }
+      const log = join(this.dir(run), 'output.log');
+      return [{ id: run.id, label: run.label,
+        saved: saved ? { status: saved.status, ...(saved.updated_at && { updated_at: saved.updated_at }) } : 'missing',
+        observed: { checked_at: new Date(now).toISOString(), status: observed.status, ...(observed.reason && { reason: observed.reason }) },
+        ...(existsSync(log) && { log }) }];
+    });
+  }
   pump(valid: (target: BackgroundTarget) => boolean) {
     for (const run of this.runs) {
       if (!valid(run.target)) {

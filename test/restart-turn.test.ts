@@ -114,3 +114,20 @@ test('unlinked bots label the startup prompt as a connector notice', async t => 
   assert.match(f.prompts[0], /^Connector restart notice \(not a human message\):/);
   assert.ok(f.prompts[0].endsWith(RESTART_PROMPT)); assert.deepEqual(f.replies, []);
 });
+
+test('the restart turn lists unfinished work of its own conversation, read when the turn starts', async t => {
+  const asked: [string, string][] = [];
+  let unfinished: string | undefined;
+  const f = fixture(t, { restartContext: (key, session) => { asked.push([key, session]); return unfinished; } });
+  unfinished = 'Unfinished background work of this conversation: run-1';
+  await f.bridge.resumeRestart();
+  assert.deepEqual(asked, [[f.key, 'session']]);
+  assert.equal(f.prompts[0], RESTART_PROMPT + '\nUnfinished background work of this conversation: run-1');
+  // A recovered human message carries the same list after the notice, and nothing is added without work.
+  const g = fixture(t, { restartContext: () => 'Unfinished: run-2' });
+  g.bridge.capture(room, event()); await g.bridge.recoverMessages(); await g.bridge.resumeRestart();
+  assert.ok(g.prompts[0].endsWith(RESTART_PROMPT + '\nUnfinished: run-2'));
+  const h = fixture(t, { restartContext: () => undefined });
+  await h.bridge.resumeRestart();
+  assert.deepEqual(h.prompts, [RESTART_PROMPT]);
+});

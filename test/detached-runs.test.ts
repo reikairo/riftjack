@@ -206,3 +206,23 @@ test('failed closure persistence does not release capacity in memory', async () 
   assert.equal(status.closed, undefined);
   await assert.rejects(manager.action(f.request, target, signal, approve, async () => {}), /already active/);
 });
+test('restart context separates the saved status from a fresh process check, per conversation', async () => {
+  const f = setup(), lost = await f.action(f.request), done = await f.action(f.request);
+  const identity = { pid: 123, ppid: 1, pgid: 123, birth: 'fixture' };
+  save(join(f.directory, lost.id, 'status.json'), { id: lost.id, status: 'running', supervisor: identity, updated_at: '2026-10-28T00:14:03Z' });
+  writeFileSync(join(f.directory, lost.id, 'output.log'), 'building\n');
+  save(join(f.directory, done.id, 'status.json'), { id: done.id, status: 'succeeded', exit_code: 0 });
+  // After a restart the supervisor is gone: the record says running, the check says lost.
+  const restarted = new DetachedRuns(f.directory, f.workspace, f.hooks), now = Date.parse('2026-10-28T00:30:00Z');
+  assert.deepEqual(restarted.unfinished(target.key, target.session, now), [{ id: lost.id, label: 'fixture',
+    saved: { status: 'running', updated_at: '2026-10-28T00:14:03Z' },
+    observed: { checked_at: '2026-10-28T00:30:00.000Z', status: 'lost', reason: 'supervisor_missing_or_pid_reused' },
+    log: join(f.directory, lost.id, 'output.log') }]);
+  // Another conversation, or a reset session of this one, does not see the run.
+  assert.deepEqual(restarted.unfinished('other-key', target.session), []);
+  assert.deepEqual(restarted.unfinished(target.key, 'new-session'), []);
+  // Listing only reads: nothing is notified, stopped or closed.
+  assert.equal(f.notices.length, 0);
+  assert.equal(readdirSync(join(f.directory, lost.id)).includes('stop'), false);
+  assert.equal(restarted.unfinished(target.key, target.session).length, 1);
+});
