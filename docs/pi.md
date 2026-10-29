@@ -52,13 +52,18 @@ or reasoning setting in this adapter.
 - Sessions are stored below `DATA_DIR/pi-sessions/`, separated by conversation
   key. A missing saved session is reported rather than silently replaced.
 - `!reset` starts a new conversation; it does not delete saved files.
-- `!cancel` stops the current subprocess and expires its pending confirmations.
-  Completed edits and external actions are not undone.
+- `!cancel` expires pending confirmations and signals Pi to stop its tools.
+  On POSIX, Riftjack also terminates Pi's private process group and escalates
+  to SIGKILL for remaining group members. Pi cleans up its detached bash
+  groups on SIGTERM. This does not undo completed edits or external actions,
+  and cannot guarantee cleanup of commands that independently detach again.
 - Messages received during a task queue as follow-ups. Live RPC steering is
   deliberately not used until consumption can be tracked across recovery.
 - `!status` shows the configured model and last session report. Pi account quota
   reporting through `!usage` is not implemented.
 - Completion waits for `agent_settled`, not the intermediate `agent_end` event.
+  Only the last assistant message is returned; tool preambles are excluded so
+  exact replies such as `NO_REPLY` remain intact.
   Unexpected process exits are errors; uncertain actions are not auto-replayed
   by the adapter. Connector recovery can redeliver an interrupted task, so inspect
   existing results before repeating external actions.
@@ -67,7 +72,9 @@ or reasoning setting in this adapter.
 
 The connector explicitly loads `pi-extension.mjs`, disables discovered extensions,
 MCP configuration, skills, prompt templates and themes, and waits for its readiness
-handshake before sending the task. Project context files remain available.
+handshake before sending the task. The handshake uses an RPC `setStatus`
+record with a per-launch nonce, followed by verification of the session ID;
+ordinary extension stdout and CLI stderr are not treated as readiness. Project context files remain available.
 The extension selects read/search tools plus, for writable bots, bash/write/edit.
 Every bash, write and edit call asks for confirmation in Matrix, including its
 arguments. `!deny`, cancellation, unavailable interaction, or an oversized request
@@ -89,8 +96,19 @@ Web-fetch and draw.io tools are not connected by this adapter yet.
 
 ## Verification scope
 
-The integration has been type-checked. It has not yet been exercised with a live
-Pi login, model request or end-to-end Matrix conversation. Protocol references:
+The adapter has regression tests for readiness, session validation, final text,
+model failures, approval denial and POSIX descendant cancellation. An optional
+HTTP test uses an installed Pi with an isolated configuration and a localhost
+model fixture. It exercises actual RPC startup, approved and denied bash tools,
+conversation resume, final reply handling and cancellation without external
+provider credentials:
+
+```sh
+RIFTJACK_TEST_PI=/absolute/path/to/pi node --import tsx --test test/http/pi-live.test.ts
+```
+
+This test passed with Pi 1.4.0. An authenticated external model and an end-to-end
+Matrix conversation have not yet been verified. Protocol references:
 
 - [Pi RPC](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md)
 - [Extension UI](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc-extension-ui.md)

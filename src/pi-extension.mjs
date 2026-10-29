@@ -40,10 +40,10 @@ export default async function (pi) {
       });
     }
   }
-  pi.on('session_start', () => {
+  pi.on('session_start', (_event, ctx) => {
     pi.setActiveTools([...['read', 'grep', 'find', 'ls'], ...(config.readOnly || config.denyWrites ? [] : ['bash', 'write', 'edit']), ...trusted]);
+    // RPC owns stdout. Use its supported UI channel only after tool guards and
+    // connections have initialized, before the parent may send a prompt.
+    ctx.ui.setStatus('riftjack_ready', config.nonce);
   });
-  // The parent waits for this marker before sending any user prompt. Extension
-  // loading failures must not silently leave an unguarded agent running.
-  process.stdout.write(JSON.stringify({ type: 'riftjack_ready', nonce: config.nonce }) + '\n');
 }

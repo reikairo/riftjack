@@ -90,16 +90,27 @@ export function createPiBackend(configuration: Config | (() => Config), state: S
         '--extension', fileURLToPath(new URL('./pi-extension.mjs', import.meta.url)), '--append-system-prompt', instructions];
       if (config.piModel) args.push('--model', config.piModel);
       const answer = await new Promise<string>((resolve, reject) => {
-        const child = spawn(config.piPath, args, { cwd: config.workspace, env, stdio: 'pipe' });
+        const child = spawn(config.piPath, args, { cwd: config.workspace, env, stdio: 'pipe', detached: process.platform !== 'win32' });
         let buffer = '', ready = false, initialized = false, completed = false, settled = false, failed: unknown;
         let text = '', modelFailure = false;
         let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
         const closeDialogs = () => { for (const controller of pending) controller.abort(); pending.clear(); };
         const pending = new Set<AbortController>();
         let killTimer: ReturnType<typeof setTimeout> | undefined;
+        let stopping = false;
+        const kill = (signal: NodeJS.Signals) => {
+          if (process.platform !== 'win32' && child.pid) {
+            try { process.kill(-child.pid, signal); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') child.kill(signal); }
+          } else child.kill(signal);
+        };
         const stop = () => {
-          child.kill('SIGTERM');
-          killTimer ??= setTimeout(() => child.kill('SIGKILL'), 2000);
+          if (stopping) return;
+          stopping = true;
+          // Pi's SIGTERM handler also cleans up its detached bash groups.
+          // The private process group covers children inheriting Pi's group.
+          kill('SIGTERM');
+          killTimer = setTimeout(() => kill('SIGKILL'), 2000);
         };
         const fail = (error: unknown) => { failed ??= error; closeDialogs(); stop(); };
         const abort = () => fail(signal.reason || new PublicError('Pi task cancelled.'));
@@ -112,7 +123,7 @@ export function createPiBackend(configuration: Config | (() => Config), state: S
         const consume = (record: any) => {
           if (completed || failed) return;
           if (!record || typeof record !== 'object') throw new PublicError('Invalid Pi RPC record.');
-          if (record.type === 'riftjack_ready' && record.nonce === nonce && !ready) {
+          if (record.type === 'extension_ui_request' && record.method === 'setStatus' && record.statusKey === 'riftjack_ready' && record.statusText === nonce && !ready) {
             ready = true; write({ id: 'state', type: 'get_state' }); return;
           }
           if (record.type === 'response' && record.id === 'state') {
@@ -149,7 +160,9 @@ export function createPiBackend(configuration: Config | (() => Config), state: S
             const message = record.message;
             modelFailure = message.stopReason === 'error' || message.stopReason === 'aborted';
             const parts = (message.content || []).filter((part: any) => part.type === 'text' && typeof part.text === 'string').map((part: any) => part.text);
-            if (parts.length) text += (text ? '\n\n' : '') + parts.join('');
+            // Each assistant message replaces the candidate final answer. Tool
+            // preambles must not leak into NO_REPLY or routing/media markers.
+            text = parts.join('');
             if (text.length > 4 * 1024 * 1024) throw new PublicError('Pi response exceeded the reply limit.');
           }
           if (initialized && record.type === 'agent_settled') {
@@ -172,6 +185,9 @@ export function createPiBackend(configuration: Config | (() => Config), state: S
           }
         });
         child.once('close', code => {
+          // A parent may exit before a SIGTERM-ignoring descendant. Clean its
+          // group before resolving cancellation and clearing the escalation.
+          if (stopping) kill('SIGKILL');
           clearTimeout(startup); clearTimeout(killTimer); clearTimeout(shutdownTimer); signal.removeEventListener('abort', abort);
           for (const controller of pending) controller.abort();
           if (signal.aborted) reject(signal.reason);
