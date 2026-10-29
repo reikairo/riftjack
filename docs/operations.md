@@ -106,6 +106,39 @@ failed push automatically. Outgoing and removed history share the 100-commit and
 remain excluded. The report-only CLI exposes `historyReplacement` and
 `removedCommits` alongside its existing metadata and never pushes.
 
+### Forks rebased onto upstream
+
+A fork’s default branch can lag behind the upstream repository. Supply an explicit
+published review base to avoid including unrelated upstream changes:
+
+```json
+{
+  "repository": "projects/demo",
+  "remote": "fork",
+  "branch": "feature",
+  "review_base": { "remote": "upstream", "branch": "main" }
+}
+```
+
+The remote names must be configured in the local repository. Riftjack resolves
+`review_base` using the configured remote’s push URL, reads the exact advertised
+branch tip and fetches it without modifying local tracking refs. A local ref or
+an arbitrary SHA cannot substitute for that published branch. The final diff
+uses the unique common ancestor of the proposed HEAD and the published base;
+commits already reachable from that base are listed as published incoming history
+rather than repeated as new patches. Removed destination commits remain in the
+review even when their changes are preserved after rebase.
+
+The report shows the upstream URL, branch, advertised SHA and actual diff base,
+separately from the destination tip used by the push lease. A changed upstream
+URL or branch tip invalidates approval and requires a new review. The upstream
+branch and the fork’s default branch are never updated by this option. Existing
+review size limits still apply to the actual changes; reports are never truncated.
+
+The same optional `review_base` applies to every branch of an atomic package.
+Without it, the destination’s advertised default branch remains the review base.
+The report-only CLI includes `upstreamReference` in its metadata.
+
 ## Atomic publication packages
 
 Use `prepare_publish` with `branches: [{branch, head}, ...]` to review and publish

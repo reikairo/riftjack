@@ -300,6 +300,13 @@ Riftjack resolves the push destination, reads its branch tip and prepares a self
 
 After the attachment and confirmation text have been delivered, approve with the usual reaction or `!approve ID`, or decline with `!deny ID`. Delivery does not prove the report was opened. Approval applies to the shown commit, destination branch and expected remote tip only. Changed HEAD or destination invalidates the review. An explicit Git lease also prevents a concurrent remote update from being overwritten. New branches, fast-forward updates and explicitly reviewed history replacements from complete (non-shallow) repositories are supported. For a new branch on an existing remote, the report starts at its unique common ancestor with the remote default branch. The report identifies that published branch, its tip and the review base; local tracking refs and other remotes are not used to omit history. The published branch tip is checked again before pushing. An empty remote still receives a complete-history review. There is no automatic retry after an uncertain push result.
 
+For a feature branch rebased onto upstream while the fork’s main is behind, add
+`"review_base": {"remote": "upstream", "branch": "main"}` to the tool request.
+The review then shows the feature changes against that published upstream base,
+plus both the new and replaced feature commits. It also shows the upstream URL
+and SHA; changes to that reference require a fresh review. This option does not
+update either main branch. See [Forks rebased onto upstream](operations.md#forks-rebased-onto-upstream).
+
 ### Publishing a package of branches
 
 For a chain of PRs, supply `branches` instead of `branch` to `prepare_publish` or

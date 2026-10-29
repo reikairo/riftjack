@@ -139,3 +139,21 @@ test('report-only CLI returns all immutable heads without publishing', async t =
   assert.deepEqual(result.branches.map((b: { head: string }) => b.head), [f.first, f.second]);
   assert.equal(f.tip('lower'), f.base); assert.equal(f.tip('upper'), null);
 });
+
+for (const changed of [false, true]) test(`atomic package with explicit upstream ${changed ? 'refuses a moved base' : 'publishes all branches'}`, async t => {
+  const f = setup(t), upstream = join(f.root, 'upstream.git');
+  f.git('init', '--bare', '-b', 'main', upstream);
+  f.git('remote', 'add', 'upstream', upstream);
+  f.git('push', 'upstream', f.base + ':refs/heads/main');
+  const r = await preparePublish({ ...f.input, review_base: { remote: 'upstream', branch: 'main' } }, f.root, signal());
+  for (const branch of r.branches) assert.equal(branch.upstreamReference?.head, f.base);
+  assert.ok(r.html.includes(upstream));
+  if (changed) {
+    f.git('push', 'upstream', f.first + ':main');
+    await assert.rejects(pushReviewedBatch(r, signal()), /changed after review/);
+    assert.equal(f.tip('lower'), f.base); assert.equal(f.tip('upper'), null);
+  } else {
+    await pushReviewedBatch(r, signal());
+    assert.equal(f.tip('lower'), f.first); assert.equal(f.tip('upper'), f.second);
+  }
+});

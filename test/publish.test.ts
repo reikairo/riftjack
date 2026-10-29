@@ -314,3 +314,90 @@ test('a published reference changing after review requires fresh approval', asyn
   await assert.rejects(pushReviewed(r, signal()), /Published reference changed/);
   assert.equal(f.remoteHead(), f.base);
 });
+
+function forkRebase(t: { after(fn: () => void): void }, large = false) {
+  const f = setup(t);
+  f.git('--git-dir=' + f.remote, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+  f.git('push', 'origin', 'HEAD:feature');
+  const upstream = join(f.root, 'upstream.git');
+  f.git('init', '--bare', '-b', 'main', upstream);
+  f.git('remote', 'add', 'upstream', upstream);
+  f.git('checkout', '-b', 'fresh-base', f.base);
+  writeFileSync(join(f.repo, 'upstream-only.txt'), large ? 'public upstream payload\n'.repeat(400_000) : 'public upstream payload\n');
+  f.git('add', '.'); f.git('commit', '-m', 'Upstream advances');
+  let parent = f.git('rev-parse', 'HEAD');
+  if (large) {
+    const tree = f.git('rev-parse', 'HEAD^{tree}');
+    for (let i = 0; i < 101; i++) parent = f.git('commit-tree', tree, '-p', parent, '-m', 'Published upstream ' + i);
+    f.git('reset', '--hard', parent);
+  }
+  f.git('push', 'upstream', 'HEAD:main');
+  f.git('cherry-pick', f.head);
+  const head = f.git('rev-parse', 'HEAD');
+  // A forged tracking ref must not let an unpublished commit disappear.
+  f.git('update-ref', 'refs/remotes/upstream/main', head);
+  const input = { ...f.input, branch: 'feature', review_base: { remote: 'upstream', branch: 'main' } };
+  const tip = () => f.git('ls-remote', 'origin', 'refs/heads/feature').split('\t')[0];
+  return { ...f, input, upstream, parent, rebased: head, tip };
+}
+
+test('explicit upstream excludes over 8 MiB and 100 published commits while retaining both PR histories', async t => {
+  const f = forkRebase(t, true);
+  const r = await preparePublish(f.input, f.root, signal());
+  assert.equal(r.reviewBase, f.parent);
+  assert.equal(r.base, f.head); assert.equal(r.historyReplacement, true);
+  assert.deepEqual(r.upstreamReference, { remote: 'upstream', url: f.upstream, ref: 'refs/heads/main', head: f.parent });
+  assert.deepEqual(r.commits, [f.rebased]);
+  assert.equal(r.publishedHistory.length, 102);
+  assert.deepEqual(r.removedHistory.map(c => c.oid), [f.head]);
+  assert.doesNotMatch(r.html, /public upstream payload/);
+  assert.match(r.patch, /alert/);
+  assert.ok(r.html.includes(f.upstream) && r.html.includes(f.parent));
+  assert.equal(f.tip(), f.head);
+});
+
+for (const approved of [false, true]) test(`explicit upstream rebase ${approved ? 'approval' : 'denial'} uses the exact destination lease`, async t => {
+  const f = forkRebase(t);
+  const result = await requestPublish(f.input, f.root, f.root, 1024 ** 2, signal(), async request => {
+    assert.match(request.text, /Published upstream base/);
+    assert.ok(request.text.includes(f.parent));
+    assert.equal(f.tip(), f.head);
+    return approved ? request.approve! : request.deny;
+  }, async () => {});
+  assert.match(result, approved ? /Published/ : /declined/);
+  assert.equal(f.tip(), approved ? f.rebased : f.head);
+  assert.equal(f.remoteHead(), f.base); // The fork's default branch is untouched.
+});
+
+for (const change of ['advance', 'delete', 'remote-url', 'destination'] as const) test(`explicit upstream refuses changed ${change} after review`, async t => {
+  const f = forkRebase(t), r = await preparePublish(f.input, f.root, signal());
+  if (change === 'advance') f.git('push', 'upstream', 'HEAD:main');
+  if (change === 'delete') f.git('--git-dir=' + f.upstream, 'update-ref', '-d', 'refs/heads/main');
+  if (change === 'remote-url') f.git('remote', 'set-url', 'upstream', f.remote);
+  if (change === 'destination') f.git('push', '--force', 'origin', f.parent + ':feature');
+  await assert.rejects(pushReviewed(r, signal()), /changed after review/);
+  assert.equal(f.tip(), change === 'destination' ? f.parent : f.head);
+});
+
+test('explicit upstream rejects unpublished and unrelated bases', async t => {
+  const f = forkRebase(t);
+  await assert.rejects(preparePublish({ ...f.input, review_base: { remote: 'upstream', branch: 'local-only' } }, f.root, signal()), /not published/);
+  const unrelated = f.git('commit-tree', f.git('rev-parse', 'HEAD^{tree}'), '-m', 'Unrelated root');
+  f.git('push', '--force', 'upstream', unrelated + ':main');
+  await assert.rejects(preparePublish(f.input, f.root, signal()), /common ancestor/);
+  assert.equal(f.tip(), f.head);
+});
+
+for (const base of [null, [], { remote: 'upstream' }, { remote: 'upstream', branch: 'main', head: 'a'.repeat(40) }, { remote: '-x', branch: 'main' }]) {
+  test('invalid explicit review base is rejected: ' + JSON.stringify(base), () => {
+    assert.throws(() => publishInput({ repository: '.', remote: 'origin', branch: 'feature', review_base: base }), /review_base/);
+  });
+}
+
+test('explicit upstream does not bypass the limit for new unpublished changes', async t => {
+  const f = forkRebase(t);
+  writeFileSync(join(f.repo, 'large-new-change.txt'), 'unpublished payload\n'.repeat(500_000));
+  f.git('add', '.'); f.git('commit', '-m', 'Oversized new change');
+  await assert.rejects(preparePublish(f.input, f.root, signal()), /exceeds 8 MiB/);
+  assert.equal(f.tip(), f.head);
+});

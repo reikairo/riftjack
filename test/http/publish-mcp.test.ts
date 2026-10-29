@@ -223,3 +223,14 @@ for (const approved of [true, false]) test(`MCP batch waits for one approval and
   assert.equal(f.remoteHead(), approved ? f.head : f.base);
   assert.equal(f.git('ls-remote', 'origin', 'refs/heads/next').split('\t')[0], approved ? f.head : '');
 });
+
+test('publication MCP advertises and preserves the explicit upstream review base', async t => {
+  const args = { ...input, review_base: { remote: 'upstream', branch: 'release' } };
+  const server = await startPublishMcp(async value => { assert.deepEqual(value, args); return 'Reviewed.'; }, signal());
+  t.after(() => server.close());
+  await post(server, 'initialize', 1, { protocolVersion: '2025-06-18' });
+  const list = await (await post(server, 'tools/list', 2)).json();
+  assert.equal(list.result.tools[0].inputSchema.properties.review_base.additionalProperties, false);
+  const result = await (await call(server, 3, args)).json();
+  assert.equal(result.result.content[0].text, 'Reviewed.');
+});

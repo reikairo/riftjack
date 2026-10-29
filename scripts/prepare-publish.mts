@@ -15,7 +15,7 @@ try {
   const output = resolve(values.output);
   await writeFile(output, review.html, { flag: 'wx', mode: 0o600 });
   const branchMetadata = (branch: import('../src/publish.js').PublishReview) => ({
-    head: branch.head, base: branch.base, reviewBase: branch.reviewBase, baseReference: branch.baseReference,
+    head: branch.head, base: branch.base, reviewBase: branch.reviewBase, baseReference: branch.baseReference, upstreamReference: branch.upstreamReference,
     branch: branch.branch, historyReplacement: branch.historyReplacement,
     removedCommits: branch.removedHistory.length, commits: branch.commits.length,
   });
