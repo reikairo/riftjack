@@ -1,4 +1,5 @@
 import type { BackgroundAction } from './background-tasks.js';
+import type { RunJournal } from './run-journal.js';
 import type { CompactionPhase } from './compaction-notices.js';
 import { taskTyping, type TypingMeasurement } from './task-typing.js';
 import { roomMessageDelivery, type MessageRequest, type RoomMessageTool } from './room-messages.js';
@@ -63,6 +64,7 @@ type Options = {
   tasks?: (room: string, event: MatrixEvent, key: string, options: { history: boolean; page: number }) => string;
   detached?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   requestConfirmation?: (input: unknown, signal: AbortSignal, interact: Interact) => Promise<string>;
+  journal?: RunJournal;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   github?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
@@ -371,7 +373,7 @@ export class Bridge {
         : current.controller.signal.aborted ? 'Cancelling' : current.running ? 'Running' : 'Preparing or delivering';
       const queued = current?.key === key ? `\nQueued follow-ups: ${current.followups.length}. Pending updates: ${current.buffered}.` : '';
       await this.reply(room, event, o.status(backendKey) + `\n\n**Task:** ${task}${queued}`
-        + (o.linkedSession ? `\nMessages queued across linked rooms: ${o.state.queued(o.botId)}.` : ''), true);
+        + (o.linkedSession ? `\nMessages queued across linked rooms: ${o.state.queued(o.botId)}.` : '') + (o.journal?.summary(key) ?? ''), true);
       return;
     }
     // Reads the account's limits without a model request, so it is allowed while a task runs.
@@ -440,6 +442,8 @@ export class Bridge {
     current.typing = o.typing ? taskTyping((typing, timeout, signal) => o.typing!(room, typing, timeout, signal),
       async () => await o.isPrivateRoom(room, current.sender) && o.isAuthorized(current.sender), o.report, controller.signal, measurement => o.typingMeasurement?.(room, measurement)) : undefined;
     let timedOut = false;
+    let runId: string | undefined;
+    let runStage: 'preparing' | 'running' | 'delivering' = 'preparing';
     const timeout = setTimeout(() => {
       if (controller.signal.aborted) return;
       timedOut = true;
@@ -447,6 +451,7 @@ export class Bridge {
     }, o.timeoutMs);
     try {
       try { await o.turnStarted?.(); } catch (error) { o.report(error); }
+      runId = o.journal?.begin(key, event.event_id);
       background?.admitted();
       if (verb === 'publish') await reply('Preparing the complete publication review…');
       const attachments: IncomingAttachment[] = [];
@@ -462,6 +467,8 @@ export class Bridge {
         }
         controller.signal.throwIfAborted();
         await this.authorize(room, current);
+        runStage = 'running';
+        if (runId) o.journal!.update(runId, runStage);
         current.running = true;
         const requestEvent = next.event;
         const turnLifetime = new AbortController();
@@ -579,6 +586,8 @@ export class Bridge {
         finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();
+        runStage = 'delivering';
+        if (runId) o.journal!.update(runId, runStage);
         const command = next.prompt.startsWith('!'), responseEvent = next.event;
         const files = typeof result === 'string' ? [] : result.attachments;
         const mention = command ? undefined : o.mentions?.(room, typeof result === 'string' ? result : result.text);
@@ -619,9 +628,19 @@ export class Bridge {
             await o.turnCompleted(lastMessage.room, lastMessage.eventId, current.sender);
           } catch (error) { o.report(error); } // A cosmetic failure must not replay the turn.
         }
+        if (runId) o.journal!.update(runId, runStage, 'completed');
+        runId = undefined;
         next = current.followups.shift();
+        if (next) {
+          runStage = 'preparing';
+          runId = o.journal?.begin(key, next.event.event_id!);
+        }
       }
     } catch (error) {
+      if (runId) {
+        try { o.journal!.update(runId, runStage, controller.signal.aborted ? 'cancelled' : 'failed'); }
+        catch (journalError) { o.report(journalError); }
+      }
       current.failed = true;
       current.markReady();
       while (current.buffered) await current.steering;

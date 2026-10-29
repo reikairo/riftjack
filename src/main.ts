@@ -9,6 +9,7 @@ import { sendOwnerDiagnostic } from './owner-diagnostics.js';
 import { withEngineSettings } from './engine-settings.js';
 import { parseBotSettingsRequest, manageBotSettings } from './bot-settings.js';
 import { BackgroundTasks } from './background-tasks.js';
+import { RunJournal } from './run-journal.js';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { InstanceBusyError, lockInstance } from './instance-lock.js';
 import { createHash, randomBytes } from 'node:crypto';
@@ -210,6 +211,7 @@ async function main() {
     }) : undefined;
     const github = background ? new GitHubSubscriptions(join(dir, 'github-subscriptions.json'), githubPolicy, background,
       githubPolicy ? githubReader(githubPolicy) : undefined) : undefined;
+    const journal = account.kind === 'codex' || account.kind === 'claude' ? new RunJournal(join(dir, 'run-journal.json')) : undefined;
     const storage = new SimpleFsStorageProvider(join(dir, 'matrix.json'));
     const crypto = new RustSdkCryptoStorageProvider(join(dir, 'crypto'), StoreType.Sqlite);
     if (account.kind === 'grok' && !config.workerPort) throw new PublicError('Set WORKER_PORT to enable the Grok worker connection.');
@@ -312,6 +314,7 @@ async function main() {
       client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
       console.log(account.userId + ' worker token file: ' + tokenFile);
     } else bridge = new Bridge({
+      journal,
       botId: me.user_id, isAuthorized: authorized, kind: account.kind, isPrivateRoom: privateRoom, reactionTarget,
       owner: access.owner, isStopping: () => stopping || restart.pending, restart: (reply, target, scope) => restart.request(reply, target, scope),
       steer: backend.steer,

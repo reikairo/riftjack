@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { BackgroundTasks, type BackgroundTarget } from '../src/background-tasks.js';
 import { Bridge, sessionKey, type MatrixEvent } from '../src/bridge.js';
 import { State } from '../src/state.js';
+import { RunJournal } from '../src/run-journal.js';
 
 const event: MatrixEvent = { type: 'm.room.message', sender: '@alice:test', content: { msgtype: 'm.text', body: 'Check' } };
 const target: BackgroundTarget = { room: '!room:test', sender: '@alice:test', key: sessionKey('!room:test', event), session: 'session-1' };
@@ -151,11 +152,11 @@ test('a real process exit after admission preserves the notification for restart
 });
 
 test('a failed human follow-up does not replay an already completed notification', async t => {
-  const f = setup(t);
+  const f = setup(t), journal = new RunJournal(join(f.root, 'journal.json'));
   f.queue.action({ action: 'remind', label: 'Check', message: 'Check', deliver: 'agent', delay_minutes: 1 }, target, new AbortController().signal);
   let entered!: () => void, release!: () => void, turns = 0;
   const started = new Promise<void>(r => { entered = r; }), wait = new Promise<void>(r => { release = r; });
-  const bridge = new Bridge({ botId: '@bot:test', kind: 'codex', since: 0, timeoutMs: 10_000, state: f.state,
+  const bridge = new Bridge({ botId: '@bot:test', kind: 'codex', since: 0, timeoutMs: 10_000, state: f.state, journal,
     isAuthorized: () => true, isPrivateRoom: async () => true, report: () => {}, reply: async () => {}, steer: async () => false,
     run: async () => {
       if (++turns === 1) { entered(); await wait; return 'Finished'; }
@@ -168,6 +169,9 @@ test('a failed human follow-up does not replay an already completed notification
   await bridge.handle(target.room, { ...event, event_id: '$followup', origin_server_ts: Date.now(), content: { msgtype: 'm.text', body: 'Another task' } });
   release(); await pumping;
   assert.equal(turns, 2);
+  const entries = JSON.parse(readFileSync(join(f.root, 'journal.json'), 'utf8')).entries;
+  assert.deepEqual(entries.map((e: any) => e.outcome), ['completed', 'failed']);
+  assert.equal(entries[1].event, '$followup');
   assert.equal(f.saved().state, 'delivered');
   await new BackgroundTasks(f.file, f.root).pump(f.options, Date.now() + 120_000);
   assert.equal(f.prompts.length, 0);
