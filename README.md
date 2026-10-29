@@ -8,6 +8,8 @@ For a remote host without a model, the [command executor](docs/executor.md) acce
 
 Keep a conversation open for each project. Come back with a question, a correction, or the next idea.
 
+[Background watches](docs/background-watches.md) can notify your agent when a JSON or text result is ready, a process exits, or a log has not changed for a chosen period. Combine a result and an inactivity condition in one watch.
+
 ## A conversation with your workspace
 
 Use Element X or another Matrix client. Accept your bot’s encrypted chat invitation and write normally:

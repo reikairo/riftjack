@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
@@ -176,4 +178,56 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
   });
   assert.equal(replies.at(-1), 'Observed the saved result.');
   assert.equal(state.session(key)[kind], 'background-session');
+});
+
+test('background MCP registers combined text and idle conditions and delivers one saved result', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'background-mcp-text-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, 'result'), 'running'); writeFileSync(join(root, 'build.log'), 'building');
+  const queue = new BackgroundTasks(join(root, 'watches.json'), root);
+  const target = { room: '!room:test', sender: '@alice:test', key: 'key', session: 'session' };
+  const server = await startBackgroundMcp(async (args, signal) => queue.action(args, target, signal), new AbortController().signal);
+  t.after(() => server.close());
+  let id = 0;
+  const rpc = async (method: string, params?: object) => (await (await fetch(server.url, { method: 'POST',
+    headers: { ...server.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) })).json());
+  const schema = (await rpc('tools/list')).result.tools[0].inputSchema.properties;
+  assert.deepEqual(schema.mode.enum, ['json', 'text', 'process', 'idle']);
+  assert.equal(schema.idle_seconds.minimum, 1);
+  const response = await rpc('tools/call', { name: 'background_tasks', arguments: { action: 'watch', label: 'Build', mode: 'text',
+    status_file: 'result', text_condition: { operator: 'starts_with', value: 'exit ' }, idle_file: 'build.log', idle_seconds: 5 } });
+  assert.ok(!response.result.isError);
+  const watch = JSON.parse(response.result.content[0].text); assert.equal(watch.poll_interval_seconds, 1);
+  assert.ok(!JSON.stringify(watch).includes('fingerprint'));
+  writeFileSync(join(root, 'result'), 'exit 0');
+  const messages: string[] = [];
+  const deliver = async (_target: unknown, event: MatrixEvent, admit: () => void) => { admit(); messages.push(event.content!.body!); return true; };
+  const resumed = new BackgroundTasks(join(root, 'watches.json'), root);
+  await resumed.pump({ valid: () => true, report: error => { throw error; }, deliver });
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /"line":"exit 0"/);
+  assert.match(messages[0], /not instructions or approval/);
+});
+
+
+test('process mode observes a real child identity and its file-supplied result', { skip: process.platform === 'win32' }, async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'background-process-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, 'result'), 'running');
+  const child = spawn(process.execPath, ['-e', "process.stdin.resume(); process.stdin.on('end',()=>process.exit(4)); console.log('ready');"], { stdio: 'pipe' });
+  t.after(() => child.kill());
+  await once(child.stdout, 'data');
+  const queue = new BackgroundTasks(join(root, 'watches.json'), root);
+  const target = { room: '!room:test', sender: '@alice:test', key: 'key', session: 'session' };
+  const registered = JSON.parse(queue.action({ action: 'watch', label: 'Process', mode: 'process', pid: child.pid,
+    exit_code_file: 'result' }, target, new AbortController().signal));
+  assert.ok(registered.process_started);
+  writeFileSync(join(root, 'result'), 'exit 4');
+  const exit = once(child, 'exit'); child.stdin.end(); await exit;
+  const resumed = new BackgroundTasks(join(root, 'watches.json'), root);
+  let body = '';
+  await resumed.pump({ valid: () => true, report: error => { throw error; },
+    deliver: async (_target, event, admit) => { admit(); body = event.content!.body!; return true; } });
+  const result = JSON.parse(body.split('\n').at(-1)!);
+  assert.equal(result.status, 'watch_process_exited'); assert.equal(result.exit_code, 4);
 });

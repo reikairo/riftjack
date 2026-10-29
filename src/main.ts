@@ -161,7 +161,7 @@ async function main() {
   const githubTimer = setInterval(() => { for (const pump of githubPumps.values()) void pump().catch(diagnostics); }, 2000);
   githubTimer.unref();
   const backgroundPumps = new Map<string, () => Promise<void>>();
-  const backgroundTimer = setInterval(() => { for (const pump of backgroundPumps.values()) void pump().catch(diagnostics); }, 2000);
+  const backgroundTimer = setInterval(() => { for (const pump of backgroundPumps.values()) void pump().catch(diagnostics); }, 1000);
   backgroundTimer.unref();
   const workerTimer = setInterval(() => { for (const worker of workers.values()) void worker.deliver(); }, 2000);
   workerTimer.unref();
