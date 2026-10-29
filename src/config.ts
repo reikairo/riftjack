@@ -31,6 +31,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (codexNetworkAllow.length && sandbox !== 'workspace-write') throw new Error('CODEX_NETWORK_ALLOW currently requires CODEX_SANDBOX=workspace-write.');
   const codexApprovalPolicy = env.CODEX_APPROVAL_POLICY?.trim() || 'on-request';
   if (codexApprovalPolicy !== 'on-request' && codexApprovalPolicy !== 'never') throw new Error('CODEX_APPROVAL_POLICY must be on-request or never.');
+  const piApprovalPolicy = env.PI_APPROVAL_POLICY?.trim() || 'on-request';
+  if (!['on-request', 'never'].includes(piApprovalPolicy)) throw new Error('PI_APPROVAL_POLICY must be on-request or never.');
   const claudeApprovalPolicy = env.CLAUDE_APPROVAL_POLICY?.trim() || 'on-request';
   if (claudeApprovalPolicy !== 'on-request' && claudeApprovalPolicy !== 'never') throw new Error('CLAUDE_APPROVAL_POLICY must be on-request or never.');
   const claudeServiceTier = env.CLAUDE_SERVICE_TIER?.trim() || undefined;
@@ -67,6 +69,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     codexNetworkAllow,
     claudeModel: env.CLAUDE_MODEL?.trim() || undefined,
     claudeServiceTier,
+    piApprovalPolicy: piApprovalPolicy as 'on-request' | 'never',
+    piPath: env.PI_PATH?.trim() || 'pi',
+    piModel: env.PI_MODEL?.trim() || undefined,
     claudePath: env.CLAUDE_PATH?.trim() || 'claude',
     claudeApprovalPolicy: claudeApprovalPolicy as 'on-request' | 'never',
     workspace,

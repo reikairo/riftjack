@@ -37,7 +37,7 @@ function matchesProfileTarget(account: Account, target: string): boolean {
   if (target.startsWith('@') && target.includes(':')) return account.userId === target;
   const local = account.userId.slice(1, account.userId.indexOf(':'));
   const short = target.replace(/^@/, '');
-  const generatedAlias = /^bot_(?:codex|claude|grok|manager)_.+_[a-f0-9]{12}$/.test(local)
+  const generatedAlias = /^bot_(?:codex|claude|pi|grok|manager)_.+_[a-f0-9]{12}$/.test(local)
     ? local.replace(/_[a-f0-9]{12}$/, '') : undefined;
   const nameMatches = !target.startsWith('@') &&
     account.name.trim().normalize('NFC').toLowerCase() === target.normalize('NFC').toLowerCase();

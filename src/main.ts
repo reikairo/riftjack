@@ -1,6 +1,7 @@
 import { DetachedRuns } from './detached-runs.js';
 import { restartContext } from './restart-context.js';
 import { requestConfirmation } from './confirmation-mcp.js';
+import { checkPi } from './pi-backend.js';
 import { matrixTyping } from './matrix-typing.js';
 import { GitHubSubscriptions, githubReader, loadGitHubPolicies } from './github-subscriptions.js';
 import { linkedRoomMessages } from './room-messages.js';
@@ -68,8 +69,8 @@ function diagnostics(error: unknown, bot?: string) {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length > 1 || args.some(arg => !['--check-config', '--check-claude', '--bootstrap-codex', '--bootstrap-claude', '--bootstrap-grok'].includes(arg))) {
-    console.error('Use no arguments to start, or one of: --check-config, --check-claude, --bootstrap-codex, --bootstrap-claude, --bootstrap-grok.');
+  if (args.length > 1 || args.some(arg => !['--check-config', '--check-claude', '--bootstrap-codex', '--bootstrap-claude', '--bootstrap-grok', '--bootstrap-pi'].includes(arg))) {
+    console.error('Use no arguments to start, or one of: --check-config, --check-claude, --bootstrap-codex, --bootstrap-claude, --bootstrap-grok, --bootstrap-pi.');
     process.exitCode = CONFIG_EXIT_CODE;
     return;
   }
@@ -112,19 +113,20 @@ async function main() {
     catch { /* Invalid workspace is reported by startAccount; unrelated bots can still start. */ }
   }
   const access = new Access(join(config.dataDir, 'allowed-users.json'), config.owner);
-  if (process.argv.includes('--bootstrap-codex') || process.argv.includes('--bootstrap-claude') || process.argv.includes('--bootstrap-grok')) {
+  if (process.argv.includes('--bootstrap-codex') || process.argv.includes('--bootstrap-claude') || process.argv.includes('--bootstrap-grok') || process.argv.includes('--bootstrap-pi')) {
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => {
       void (tunnel?.stop() ?? Promise.resolve()).finally(() => process.exit(0));
     });
     tunnel?.start();
     try {
       if (process.argv.includes('--bootstrap-grok') && !config.workerPort) throw new PublicError('Set WORKER_PORT before creating Grok bots.');
-      const kinds = process.argv.includes('--bootstrap-grok') ? ['manager', 'grok'] as const : process.argv.includes('--bootstrap-claude') ? ['manager', 'claude'] as const : ['manager', 'codex'] as const;
+      const kinds = process.argv.includes('--bootstrap-pi') ? ['manager', 'pi'] as const : process.argv.includes('--bootstrap-grok') ? ['manager', 'grok'] as const : process.argv.includes('--bootstrap-claude') ? ['manager', 'claude'] as const : ['manager', 'codex'] as const;
+      if (process.argv.includes('--bootstrap-pi')) await checkPi(config, AbortSignal.timeout(15000));
       if (process.argv.includes('--bootstrap-claude')) await checkClaude(config);
       for (const kind of kinds) {
         if (accounts.list().some(a => a.kind === kind)) continue;
         await tunnel?.waitUntilReady();
-        const account = await provision(config, kind, kind === 'manager' ? 'Bot Manager' : kind === 'claude' ? 'Claude' : kind === 'grok' ? 'Grok' : 'Codex');
+        const account = await provision(config, kind, kind === 'pi' ? 'Pi' : kind === 'manager' ? 'Bot Manager' : kind === 'claude' ? 'Claude' : kind === 'grok' ? 'Grok' : 'Codex');
         accounts.add(account);
         console.log('Created ' + kind + ': ' + account.userId);
       }
@@ -132,7 +134,7 @@ async function main() {
     } finally { await tunnel?.stop(); }
     return;
   }
-  if (!accounts.list().length) throw new PublicError('No bot accounts configured. Run bootstrap:codex, bootstrap:claude or bootstrap:grok first (see README).');
+  if (!accounts.list().length) throw new PublicError('No bot accounts configured. Run bootstrap:codex, bootstrap:claude, bootstrap:pi or bootstrap:grok first (see README).');
 
   LogService.setLevel(LogLevel.WARN);
   LogService.setLogger({
@@ -202,7 +204,7 @@ async function main() {
     const backend = createBackend(currentConfig, state);
     const dir = join(config.dataDir, 'bots', createHash('sha256').update(account.userId).digest('hex'));
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const background = account.kind === 'codex' || account.kind === 'claude' ? new BackgroundTasks(join(dir, 'background-tasks.json'), botConfig.workspace) : undefined;
+    const background = account.kind === 'codex' || account.kind === 'claude' || account.kind === 'pi' ? new BackgroundTasks(join(dir, 'background-tasks.json'), botConfig.workspace) : undefined;
     // Also reject owner configuration placed inside a separately assigned bot workspace.
     loadGitHubPolicies(config.githubSubscriptionsFile, botConfig.workspace);
     const githubPolicy = githubPolicies[account.userId];
@@ -215,7 +217,7 @@ async function main() {
     const storage = new SimpleFsStorageProvider(join(dir, 'matrix.json'));
     const crypto = new RustSdkCryptoStorageProvider(join(dir, 'crypto'), StoreType.Sqlite);
     if (account.kind === 'grok' && !config.workerPort) throw new PublicError('Set WORKER_PORT to enable the Grok worker connection.');
-    const recoverMessages = account.kind === 'codex' || account.kind === 'claude';
+    const recoverMessages = account.kind === 'codex' || account.kind === 'claude' || account.kind === 'pi';
     const client = account.kind === 'grok' ? new WorkerMatrixClient(config.homeserver, account.accessToken, storage, crypto)
       : recoverMessages ? new MessageMatrixClient(config.homeserver, account.accessToken, storage, crypto)
       : new RateLimitedMatrixClient(config.homeserver, account.accessToken, storage, crypto);
@@ -332,7 +334,7 @@ async function main() {
           stopping: () => stopping,
           send: (target, content) => client.sendMessage(target, content),
         }),
-      queuedUpdateMessage: account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
+      queuedUpdateMessage: account.kind === 'pi' ? 'Your update is queued for Pi after the current task.' : account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
       since, recoverMessages, timeoutMs: config.timeoutMs, state, report: error => diagnostics(error, account.userId),
       typing: matrixTyping({ homeserver: config.homeserver, userId: account.userId, accessToken: account.accessToken }),
       typingMeasurement: (room, measurement) => console.log(JSON.stringify({ time: new Date().toISOString(),
@@ -371,26 +373,26 @@ async function main() {
           thread: relation?.rel_type === 'm.thread' ? relation.event_id : undefined }, signal, interact, authorize);
       } : undefined,
       requestConfirmation: (account.kind === 'codex' || account.kind === 'claude') ? requestConfirmation : undefined,
-      publish: (account.kind === 'codex' || account.kind === 'claude') && botConfig.sandbox !== 'read-only'
+      publish: (account.kind === 'codex' || account.kind === 'claude' || account.kind === 'pi') && botConfig.sandbox !== 'read-only'
         ? (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize) : undefined,
       github: github ? async (input, { room, event, key }, signal) => {
-        const session = state.session(key)[account.kind as 'codex' | 'claude'];
+        const session = state.session(key)[account.kind as 'codex' | 'claude' | 'pi'];
         if (!session) throw new PublicError('The agent session is not ready for a GitHub subscription.');
         const relation = event.content?.['m.relates_to'];
         return github.action(input, { room, sender: event.sender!, key, session,
           thread: relation?.rel_type === 'm.thread' ? relation.event_id : undefined }, signal);
       } : undefined,
       background: background ? async (input, { room, event, key }, signal) => {
-        const session = state.session(key)[account.kind as 'codex' | 'claude'];
+        const session = state.session(key)[account.kind as 'codex' | 'claude' | 'pi'];
         if (!session) throw new PublicError('The agent session is not ready for a background watch.');
         const relation = event.content?.['m.relates_to'];
         return background.action(input, { room, sender: event.sender!, key, session,
           thread: relation?.rel_type === 'm.thread' ? relation.event_id : undefined }, signal);
       } : undefined,
-      status: account.kind === 'codex' || account.kind === 'claude'
-        ? key => botStatus(account.kind as 'codex' | 'claude', currentConfig(), state.session(key)) + (background?.summary(key, state.session(key)[account.kind as 'codex' | 'claude']) || '') : undefined,
+      status: account.kind === 'codex' || account.kind === 'claude' || account.kind === 'pi'
+        ? key => botStatus(account.kind as 'codex' | 'claude' | 'pi', currentConfig(), state.session(key)) + (background?.summary(key, state.session(key)[account.kind as 'codex' | 'claude' | 'pi']) || '') : undefined,
       tasks: background ? (room, event, key, options) => background.overview({ room, sender: event.sender!, key,
-        session: state.session(key)[account.kind as 'codex' | 'claude'],
+        session: state.session(key)[account.kind as 'codex' | 'claude' | 'pi'],
         thread: event.content?.['m.relates_to']?.rel_type === 'm.thread' ? event.content['m.relates_to'].event_id : undefined }, options) : undefined,
       usage: account.kind === 'claude' ? async signal => formatClaudeUsage(await claudeUsage(botConfig, signal))
         : account.kind === 'codex' ? signal => codexUsage(botConfig, signal) : undefined,
@@ -453,6 +455,7 @@ async function main() {
           if (workspace === null) return 'Bot creation cancelled. You can retry with a different folder.';
           signal.throwIfAborted();
           const requestedConfig = configForWorkspace(config, workspace);
+          if (request.kind === 'pi') await checkPi(requestedConfig, signal);
           if (request.kind === 'claude') await checkClaude(requestedConfig, signal);
           await tunnel?.waitUntilReady(signal);
           const created = await provision(config, request.kind, request.name, signal);
@@ -560,16 +563,16 @@ async function main() {
       const codingBridge = bridge;
       if (github) githubPumps.set(account.userId, async () => {
         if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
-        await github.pump(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
+        await github.pump(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude' | 'pi'] === target.session,
           githubLifetime.signal);
       });
       backgroundPumps.set(account.userId, async () => {
         if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
         await codingBridge.drainQueued();
-        github?.reconcile(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session);
+        github?.reconcile(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude' | 'pi'] === target.session);
         detached?.pump(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session);
         await background.pump({
-          valid: target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session,
+          valid: target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude' | 'pi'] === target.session,
           deliver: (target, event, admitted, ready, completed) => codingBridge.resumeBackground(target.room, event, target.session, admitted, ready, completed),
           // A room timer is the bot's own message: no turn, mentions or human origin.
           post: async (target, text, admitted, ready) => {
@@ -621,7 +624,7 @@ async function main() {
         if (home) {
           const key = sessionKey(home, { sender, content: linkedAgent?.thread
             ? { 'm.relates_to': { rel_type: 'm.thread', event_id: linkedAgent.thread } } : undefined });
-          const session = state.session(key)[account.kind as 'codex' | 'claude'];
+          const session = state.session(key)[account.kind as 'codex' | 'claude' | 'pi'];
           if (session && (!linkedAgent || session === linkedAgent.session)) {
             bridge.scheduleRestart(startupId, home, sender, session, linkedAgent?.thread);
           }

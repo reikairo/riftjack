@@ -1,6 +1,6 @@
-export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
+export function botHelp(kind: 'codex' | 'claude' | 'pi' | 'grok'): string {
   if (kind === 'grok') return 'Send messages and attachments to the external Grok worker. Use !status to see queued work and replies, !cancel to cancel queued work or !reset to start a new worker conversation. Use Bot Manager for !restart.';
-  const name = kind === 'codex' ? 'Codex' : 'Claude';
+  const name = kind === 'pi' ? 'Pi' : kind === 'codex' ? 'Codex' : 'Claude';
   return [
     `## ${name} · Help`,
     'Send a task as a normal message, without a command or bot mention.',
@@ -10,7 +10,9 @@ export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
     '### Basic commands',
     '- `!help` — show help.\n- `!status` — show task state, connector settings and the last CLI session report; works during a task.\n- `!reset` — start a new conversation in this chat or thread while the bot is idle. Files remain.\n- `!cancel` — stop the task and its queue. Completed changes remain.',
     '### Updates during work',
-    kind === 'codex'
+    kind === 'pi'
+      ? 'Messages during a Pi task are queued as follow-ups; cancel explicitly to interrupt it.'
+      : kind === 'codex'
       ? 'Send another message **in the same chat or thread** to update the active task (steering).'
       : 'Send another message **in the same chat or thread** to update the running task when Claude supports message replay; otherwise it is queued as a follow-up. An in-flight tool call is not interrupted.',
     '> Also check empty input.',
@@ -21,8 +23,8 @@ export function botHelp(kind: 'codex' | 'claude' | 'grok'): string {
     '- `!approve` or ✅ — approve an action.\n- `!deny` or ❌ — decline.\n- `!answer blue` — answer a question; replace “blue” with your answer.',
     'Reply in the same chat or thread. If several requests are pending, include the ID from the message: `!approve ID` or `!answer ID your answer`. Replace `ID` with the identifier, without brackets.',
     'A plain “yes” does not approve an action. The first answer is final; removing a reaction does not undo it. For forms, use the format shown by the bot.',
-    '### Usage limits · owner only',
-    `- \`!usage\` — ${kind === 'codex' ? 'Codex quota, weekly limit, reset date and available additional resets' : 'Claude quota and time until reset'}. Also works during a task.`,
+    ...(kind === 'pi' ? [] : ['### Usage limits · owner only',
+    `- \`!usage\` — ${kind === 'codex' ? 'Codex quota, weekly limit, reset date and available additional resets' : 'Claude quota and time until reset'}. Also works during a task.`]),
     ...(kind === 'codex' ? [
       '### Plugins · owner only',
       '- `!plugin install github` — install a plugin; replace `github` with its name.',

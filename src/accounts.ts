@@ -16,7 +16,7 @@ export class Accounts {
     this.accounts = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : [];
     if (!Array.isArray(this.accounts) || this.accounts.some(a =>
       !/^@[^\s:]+:[^\s]+$/.test(a.userId) || typeof a.accessToken !== 'string' || !a.accessToken ||
-      typeof a.name !== 'string' || !['codex', 'claude', 'grok', 'manager'].includes(a.kind) ||
+      typeof a.name !== 'string' || !['codex', 'claude', 'pi', 'grok', 'manager'].includes(a.kind) ||
       (a.workspace !== undefined && (typeof a.workspace !== 'string' || !a.workspace || /[\0\r\n]/.test(a.workspace))))) throw new Error('Invalid accounts.json: expected valid bot accounts and optional workspace paths.');
     for (const account of this.accounts) if (account.engineSettings !== undefined) validateEngineSettings(account.engineSettings, account.kind);
     if (new Set(this.accounts.map(a => a.userId)).size !== this.accounts.length) throw new Error('Duplicate bot accounts in accounts.json');
@@ -49,7 +49,7 @@ export class Accounts {
 }
 
 export async function provision(config: Config, kind: Mode, name: string, signal?: AbortSignal, fetcher: typeof fetch = fetch): Promise<Account> {
-  if (kind !== 'codex' && kind !== 'claude' && kind !== 'grok' && kind !== 'manager') throw new PublicError('Only Codex, Claude, Grok and manager bots are supported.');
+  if (kind !== 'codex' && kind !== 'claude' && kind !== 'pi' && kind !== 'grok' && kind !== 'manager') throw new PublicError('Only Codex, Claude, Pi, Grok and manager bots are supported.');
   if (!config.registrationSecret && !config.adminToken) throw new PublicError('Account creation is not configured. Set SYNAPSE_ADMIN_TOKEN or SYNAPSE_REGISTRATION_SHARED_SECRET in the connector .env.');
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 24) || kind;
   const username = `bot_${kind}_${slug}_${randomBytes(6).toString('hex')}`;
@@ -135,7 +135,7 @@ export async function provision(config: Config, kind: Mode, name: string, signal
   return { userId: login.user_id, accessToken: login.access_token, kind, name };
 }
 
-export type ManagerRequest = { action: 'list' } | { action: 'create'; kind: 'codex' | 'claude' | 'grok'; name: string; workspace?: string };
+export type ManagerRequest = { action: 'list' } | { action: 'create'; kind: 'codex' | 'claude' | 'pi' | 'grok'; name: string; workspace?: string };
 export function parseManagerRequest(text: string): ManagerRequest | null {
   const input = text.trim();
   // Keep quoted paths intact; otherwise the last spaced "in" separates the path.
@@ -151,8 +151,8 @@ export function parseManagerRequest(text: string): ManagerRequest | null {
   }
   const clean = (directory ? directory[1] : input).trim().replace(/[.!?]+$/, '');
   if (/^(?:please\s+)?(?:list(?:\s+(?:my|the|all))?\s+bots|show(?:\s+me)?(?:\s+(?:my|the|all))?\s+bots|list)$/i.test(clean)) return directory ? null : { action: 'list' };
-  const match = /^(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:create|make|add)\s+(?:(?:me|a|an|another|new|one|more)\s+)*(codex|claude(?:\s+code)?|grok)(?:\s+bot)?(?:\s+(?:named|called)\s+([a-z0-9][a-z0-9 _-]{0,47}))?$/i.exec(clean);
+  const match = /^(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:create|make|add)\s+(?:(?:me|a|an|another|new|one|more)\s+)*(codex|claude(?:\s+code)?|pi(?:\s+code)?|grok)(?:\s+bot)?(?:\s+(?:named|called)\s+([a-z0-9][a-z0-9 _-]{0,47}))?$/i.exec(clean);
   if (!match) return null;
-  const kind = match[1].toLowerCase() === 'codex' ? 'codex' : match[1].toLowerCase() === 'grok' ? 'grok' : 'claude';
-  return { action: 'create', kind, name: match[2]?.trim() || (kind === 'codex' ? 'Codex' : kind === 'grok' ? 'Grok' : 'Claude'), ...(workspace === undefined ? {} : { workspace }) };
+  const kind = /^pi(?:\s+code)?$/i.test(match[1]) ? 'pi' : match[1].toLowerCase() === 'codex' ? 'codex' : match[1].toLowerCase() === 'grok' ? 'grok' : 'claude';
+  return { action: 'create', kind, name: match[2]?.trim() || (kind === 'pi' ? 'Pi' : kind === 'codex' ? 'Codex' : kind === 'grok' ? 'Grok' : 'Claude'), ...(workspace === undefined ? {} : { workspace }) };
 }

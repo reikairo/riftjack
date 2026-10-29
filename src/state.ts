@@ -4,7 +4,7 @@ import type { EngineReport } from './bot-status.js';
 import type { CheckpointState } from './context-checkpoints.js';
 import { AGENT_TRIGGER, NOTICE, type MatrixEvent } from './bridge.js';
 
-export type Session = { codex?: string; codexInstructionsHash?: string; claude?: string; grok?: string; codexReport?: EngineReport; claudeReport?: EngineReport; codexCheckpoint?: CheckpointState; claudeCheckpoint?: CheckpointState };
+export type Session = { codex?: string; codexInstructionsHash?: string; pi?: string; piReport?: EngineReport; claude?: string; grok?: string; codexReport?: EngineReport; claudeReport?: EngineReport; codexCheckpoint?: CheckpointState; claudeCheckpoint?: CheckpointState };
 export type Pending = { room: string; event: MatrixEvent; feedback: boolean };
 type Recoverable = Pending & { attempted: boolean };
 type TurnReactionState = { room: string; eventId: string };

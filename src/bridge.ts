@@ -34,8 +34,9 @@ export type MatrixEvent = {
 };
 // replyTo: an event of the same room the reply answers (sent as a Matrix reply).
 export type Mentions = { text: string; mentions: string[]; replyTo?: string; error?: string };
-export type Mode = 'codex' | 'claude' | 'grok' | 'manager';
+export type Mode = 'codex' | 'claude' | 'pi' | 'grok' | 'manager';
 export type BackendHooks = { detached?: BackgroundAction; confirmation?: BackgroundAction; github?: BackgroundAction; background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool };
+
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
 type Options = {
@@ -136,7 +137,7 @@ export class Bridge {
   // One notice per bot startup, only for an existing conversation. No private
   // task files are read to decide whether to start a turn.
   scheduleRestart(id: string, room: string, sender: string, session: string, thread?: string): void {
-    if (this.options.kind !== 'codex' && this.options.kind !== 'claude') return;
+    if (this.options.kind !== 'codex' && this.options.kind !== 'claude' && this.options.kind !== 'pi') return;
     const event: MatrixEvent = { type: 'm.room.message', event_id: `restart:${id}:${this.options.botId}`,
       sender, origin_server_ts: Date.now(), content: { msgtype: 'm.text', body: RESTART_PROMPT, [NOTICE]: 'restart',
         ...(thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: thread } }) } };
@@ -146,7 +147,7 @@ export class Bridge {
   async resumeRestart(): Promise<void> {
     const notice = this.restartNotice, o = this.options;
     if (!notice || this.busy || this.stopped || o.isStopping?.()) return;
-    if (!o.isAuthorized(notice.event.sender!) || o.state.session(notice.key)[o.kind as 'codex' | 'claude'] !== notice.session) {
+    if (!o.isAuthorized(notice.event.sender!) || o.state.session(notice.key)[o.kind as 'codex' | 'claude' | 'pi'] !== notice.session) {
       this.restartNotice = undefined; return;
     }
     await this.resumeBackground(notice.room, notice.event, notice.session, () => {}, () => this.restartNotice === notice);
@@ -251,7 +252,7 @@ export class Bridge {
     let prompt = body?.trim() || (media ? 'An attachment was sent. Describe what you can inspect, or ask what to do with it.' : '');
     if (!prompt || !(await o.isPrivateRoom(room, event.sender)) || !o.isAuthorized(event.sender)) return;
     if (background) {
-      if (this.active || this.stopped || o.isStopping?.() || (o.kind !== 'codex' && o.kind !== 'claude') ||
+      if (this.active || this.stopped || o.isStopping?.() || (o.kind !== 'codex' && o.kind !== 'claude' && o.kind !== 'pi') ||
         o.state.session(o.linkedSession?.(room, event) ?? sessionKey(room, event))[o.kind] !== background.session || background.ready?.() === false) return;
     } else if (!fromQueue) {
       if (!o.state.claim(JSON.stringify([o.botId, event.event_id]))) return;
@@ -407,13 +408,13 @@ export class Bridge {
         // Peer mentions are delivered as their own turn after the current one.
         if (o.state.enqueue(o.botId, { room, event, feedback })) void this.drainQueued().catch(o.report);
         else o.report(new PublicError('A peer mention was dropped because the linked-room queue is full.'));
-      } else if ((o.linkedSession || o.recoverMessages) && (verb === 'codex' || verb === 'claude') &&
+      } else if ((o.linkedSession || o.recoverMessages) && (verb === 'codex' || verb === 'claude' || verb === 'pi') &&
           (!this.active || (this.active.key !== key && (o.recoverMessages || this.active.backendKey === backendKey)))) {
         if (o.recoverMessages) this.retained.add(event.event_id);
         const accepted = o.state.enqueue(o.botId, { room, event, feedback });
         await reply(accepted ? 'Queued for this agent after its current conversation.' : (o.recoverMessages ? 'The live queue is full. Your message is saved for recovery after restart.' : 'The linked-room queue is full. Please resend after the agent finishes.'));
         void this.drainQueued().catch(o.report);
-      } else if ((verb === 'codex' || verb === 'claude') && this.active?.key === key && !this.active.publication && o.steer) {
+      } else if ((verb === 'codex' || verb === 'claude' || verb === 'pi') && this.active?.key === key && !this.active.publication && o.steer) {
         await this.steer(this.active, room, event, prompt, feedback);
       } else {
         if (o.recoverMessages) this.retained.add(event.event_id);
@@ -569,7 +570,7 @@ export class Bridge {
         }
         const restart = this.restartNotice;
         if (verb !== 'publish' && !next.prompt.startsWith('!') && restart?.key === backendKey &&
-            o.state.session(backendKey)[o.kind as 'codex' | 'claude'] === restart.session) {
+            o.state.session(backendKey)[o.kind as 'codex' | 'claude' | 'pi'] === restart.session) {
           if (next.event.content?.[NOTICE] !== 'restart') modelPrompt += '\n\nConnector restart notice:\n' + RESTART_PROMPT;
           const unfinished = o.restartContext?.(room, requestEvent, backendKey, restart.session);
           if (unfinished) modelPrompt += '\n' + unfinished;

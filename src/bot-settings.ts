@@ -33,7 +33,7 @@ export function manageBotSettings(request: SettingsRequest, options: {
     options.accounts.setEngineSettings(bot.userId, settings);
   }
   const config = withEngineSettings(options.config, { ...bot, engineSettings: settings });
-  const fields: [keyof EngineSettings, string | undefined][] = bot.kind === 'codex'
+  const fields: [keyof EngineSettings, string | undefined][] = bot.kind === 'pi' ? [['model', config.piModel]] : bot.kind === 'codex'
     ? [['model', config.codexModel], ['reasoning', config.codexReasoningEffort], ['tier', config.codexServiceTier]]
     : [['model', config.claudeModel], ['tier', config.claudeServiceTier]];
   return `### Settings for ${markdownText(bot.name)}\n\n` + fields.map(([key, value]) =>

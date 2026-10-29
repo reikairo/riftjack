@@ -2,7 +2,7 @@
 
 **A shell for coding agents in Matrix.**
 
-Give your agents an address you can message. Riftjack connects Codex and Claude Code on your computer to encrypted Matrix conversations. Send a task, share a file, follow the work, and answer approval requests from your phone or desktop. These agents work in your local project directories. [Grok and other external workers](docs/grok.md) can also receive tasks and send replies through Riftjack, using a durable inbox instead of their own Matrix client.
+Give your agents an address you can message. Riftjack connects Codex, Claude Code and [Pi Coding Agent](docs/pi.md) on your computer to encrypted Matrix conversations. Send a task, share a file, follow the work, and answer approval requests from your phone or desktop. These agents work in your local project directories. [Grok and other external workers](docs/grok.md) can also receive tasks and send replies through Riftjack, using a durable inbox instead of their own Matrix client.
 
 For a remote host without a model, the [command executor](docs/executor.md) accepts explicitly addressed jobs from an encrypted shared room and reports live output, status and logs. It needs no model account or inbound network port.
 
@@ -27,6 +27,7 @@ A separate **Bot Manager** creates bots, selects their workspaces, and controls 
 ```text
 create a Codex bot called Builder in "~/Projects/my-game"
 create a Claude bot called Reviewer in "~/Projects/my-game"
+create a Pi bot called Builder in "~/Projects/my-game"
 list bots
 ```
 

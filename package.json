@@ -12,6 +12,7 @@
     "bootstrap:codex": "node scripts/run.mjs main --bootstrap-codex",
     "check:config": "node scripts/run.mjs main --check-config",
     "check:claude": "node scripts/run.mjs main --check-claude",
+    "bootstrap:pi": "node scripts/run.mjs main --bootstrap-pi",
     "bootstrap:claude": "node scripts/run.mjs main --bootstrap-claude",
     "check": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts test/*.test.mjs",

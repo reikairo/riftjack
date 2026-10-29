@@ -3,11 +3,11 @@ import { PublicError } from './errors.js';
 
 export type EngineSettings = { model?: string; reasoning?: string; tier?: string };
 export function validateEngineSettings(value: unknown, kind: string): asserts value is EngineSettings {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || !['codex', 'claude'].includes(kind)) {
-    throw new PublicError('Model settings are supported only for Codex and Claude bots.');
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !['codex', 'claude', 'pi'].includes(kind)) {
+    throw new PublicError('Model settings are supported for Codex, Claude and Pi bots. Pi supports model selection only.');
   }
   for (const [key, entry] of Object.entries(value)) {
-    if (!['model', 'tier', ...(kind === 'codex' ? ['reasoning'] : [])].includes(key) ||
+    if (!(kind === 'pi' ? ['model'] : ['model', 'tier', ...(kind === 'codex' ? ['reasoning'] : [])]).includes(key) ||
         typeof entry !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(entry)) {
       throw new PublicError('Invalid model setting. Use model or tier identifiers; reasoning settings are supported only for Codex bots.');
     }
@@ -25,5 +25,6 @@ export function withEngineSettings(config: Config, account: { kind: string; engi
     codexServiceTier: settings.tier ?? config.codexServiceTier };
   if (account.kind === 'claude') return { ...config, claudeModel: settings.model ?? config.claudeModel,
     claudeServiceTier: settings.tier ?? config.claudeServiceTier };
+  if (account.kind === 'pi') return { ...config, piModel: settings.model ?? config.piModel };
   return { ...config };
 }

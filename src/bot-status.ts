@@ -25,7 +25,17 @@ function display(value: string | undefined, fallback: string): string {
   return (value || fallback).replace(/[\\`*_{}\[\]()<>#+.!|~-]/g, '\\$&');
 }
 
-export function botStatus(kind: 'codex' | 'claude', config: Config, session: Session): string {
+export function botStatus(kind: 'codex' | 'claude' | 'pi', config: Config, session: Session): string {
+  if (kind === 'pi') return [
+    '**Pi status**',
+    `- Workspace: ${display(config.workspace, 'unknown')}`,
+    `- Configured model: ${display(config.piModel, 'CLI default')}`,
+    `- Last reported model: ${display(session.piReport?.model, 'not reported')}`,
+    `- Reported at: ${display(session.piReport?.reportedAt, 'not reported')}`,
+    `- Shell/file writes: ${config.sandbox === 'read-only' || config.piApprovalPolicy === 'never' ? 'disabled' : 'Matrix confirmation per call'}`,
+    '- Pi does not supply an OS sandbox.',
+    `- Session: ${display(session.pi, 'not started')}`,
+  ].join('\n');
   const codex = kind === 'codex';
   const report = codex ? session.codexReport : session.claudeReport;
   const row = (label: string, value?: string, fallback = 'unknown (not reported)') => `- ${label}: ${display(value, fallback)}`;
