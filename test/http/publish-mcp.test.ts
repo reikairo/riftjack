@@ -1,3 +1,4 @@
+import { PublicationJobs } from '../../src/publication-jobs.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
@@ -233,4 +234,37 @@ test('publication MCP advertises and preserves the explicit upstream review base
   assert.equal(list.result.tools[0].inputSchema.properties.review_base.additionalProperties, false);
   const result = await (await call(server, 3, args)).json();
   assert.equal(result.result.content[0].text, 'Reviewed.');
+});
+
+
+for (const decision of ['approve', 'deny', 'changed'] as const) test(`connector-owned publication after MCP teardown: ${decision}`, { timeout: 15000 }, async t => {
+  const f = fixture(t), shown = deferred(), completed = deferred();
+  const target = { room: '!room:test', sender: '@alice:test', key: 'key', session: 'session' };
+  let result = '';
+  const jobs = new PublicationJobs(join(f.root, 'publications.json'), {
+    timeoutMs: 10000, valid: () => true, authorize: async () => {},
+    execute: (input, signal, interact, authorize) => requestPublish(input, f.root, f.root, 1024 * 1024, signal, interact, authorize),
+    send: async (_target, request, _text, controls) => {
+      assert.equal(request.attachments?.length, 1);
+      assert.match(readFileSync(request.attachments![0].path, 'utf8'), /Update/);
+      controls.bind('$review'); shown.resolve();
+    },
+    notify: (_id, _target, message) => { result = message; completed.resolve(); }, report: () => {},
+  });
+  const turn = new AbortController();
+  const server = await startPublishMcp((input, signal) => jobs.start(input, target, signal), turn.signal);
+  t.after(async () => { jobs.stop(); await server.close(); });
+  const receipt = await (await call(server, 3, { repository: f.repo, remote: 'origin', branch: 'main' })).json();
+  assert.equal(JSON.parse(receipt.result.content[0].text).status, 'preparing');
+  turn.abort(); await server.close(); await shown.promise;
+  assert.equal(f.remoteHead(), f.base);
+  if (decision === 'changed') {
+    f.git('commit', '--allow-empty', '-m', 'Concurrent update');
+    f.git('push', 'origin', 'main');
+  }
+  const before = f.remoteHead();
+  await jobs.answer(target, decision === 'deny' ? '!deny' : '!approve');
+  await completed.promise;
+  if (decision === 'approve') { assert.equal(f.remoteHead(), f.head); assert.match(result, /succeeded/); }
+  else { assert.equal(f.remoteHead(), before); assert.match(result, decision === 'deny' ? /declined/ : /failed/); }
 });

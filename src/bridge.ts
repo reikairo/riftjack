@@ -1,3 +1,5 @@
+import type { PublicationJobs } from './publication-jobs.js';
+import type { BackgroundTarget } from './background-tasks.js';
 import type { BackgroundAction } from './background-tasks.js';
 import type { RunJournal } from './run-journal.js';
 import type { CompactionPhase } from './compaction-notices.js';
@@ -66,6 +68,7 @@ type Options = {
   detached?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   requestConfirmation?: (input: unknown, signal: AbortSignal, interact: Interact) => Promise<string>;
   journal?: RunJournal;
+  publications?: PublicationJobs;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   github?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
@@ -128,8 +131,9 @@ export class Bridge {
   }
   get pendingTurns(): boolean { return !!this.active?.followups.length || this.options.state.queued(this.options.botId) > 0; }
   get busy(): boolean { return !!this.active || this.draining || (!!(this.options.linkedSession || this.options.recoverMessages) && this.options.state.queued(this.options.botId) > 0); }
-  stop() { this.avatarUploads.clear(); this.stopped = true; this.active?.controller.abort(); }
+  stop() { this.options.publications?.stop(); this.avatarUploads.clear(); this.stopped = true; this.active?.controller.abort(); }
   revoke(sender: string) {
+    this.options.publications?.revoke(sender);
     for (const [key, upload] of this.avatarUploads) if (upload.sender === sender) this.avatarUploads.delete(key);
     if (this.restartNotice?.event.sender === sender) this.restartNotice = undefined;
     if (this.active?.sender === sender) this.active.controller.abort();
@@ -313,6 +317,15 @@ export class Bridge {
     }
     if (!media && /^!(approve|deny|answer)(?:\s|$)/.test(prompt)) {
       const current = this.active;
+      const target = this.publicationTarget(room, event, backendKey);
+      if (target && o.publications) {
+        const local = current?.key === key && current.sender === event.sender ? current.interactions.size : 0;
+        if (local + o.publications.count(target) > 1 && !/^!(?:approve|deny|answer)\s+[a-f0-9]{12}(?:\s|$)/.test(prompt)) {
+          await reply('More than one confirmation is pending. Specify the ID from the request you want to answer.'); return;
+        }
+        const answer = await o.publications.answer(target, prompt);
+        if (answer !== undefined) { await reply(answer); return; }
+      }
       if (!current || current.key !== key || current.sender !== event.sender) { await reply('No pending confirmation in this conversation.'); return; }
       await this.authorize(room, current);
       await reply(current.interactions.answer(prompt));
@@ -372,9 +385,11 @@ export class Bridge {
       const current = this.active;
       const task = !current ? 'Idle' : current.key !== key ? 'Busy in another conversation'
         : current.controller.signal.aborted ? 'Cancelling' : current.running ? 'Running' : 'Preparing or delivering';
+      const publicationTarget = this.publicationTarget(room, event, backendKey);
+      const publicationStatus = publicationTarget ? o.publications?.summary(publicationTarget) ?? '' : '';
       const queued = current?.key === key ? `\nQueued follow-ups: ${current.followups.length}. Pending updates: ${current.buffered}.` : '';
       await this.reply(room, event, o.status(backendKey) + `\n\n**Task:** ${task}${queued}`
-        + (o.linkedSession ? `\nMessages queued across linked rooms: ${o.state.queued(o.botId)}.` : '') + (o.journal?.summary(key) ?? ''), true);
+        + (o.linkedSession ? `\nMessages queued across linked rooms: ${o.state.queued(o.botId)}.` : '') + (o.journal?.summary(key) ?? '') + publicationStatus, true);
       return;
     }
     // Reads the account's limits without a model request, so it is allowed while a task runs.
@@ -386,6 +401,8 @@ export class Bridge {
       return;
     }
     if (verb === 'cancel') {
+      const target = this.publicationTarget(room, event, backendKey);
+      const cancelledPublication = target ? o.publications?.cancel(target) : false;
       if (this.restartNotice?.key === key) this.restartNotice = undefined;
       const relation = event.content?.['m.relates_to'];
       const thread = relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null;
@@ -395,7 +412,7 @@ export class Bridge {
         this.active.cancelled = true;
         this.active.controller.abort();
         await reply('Cancellation requested. Changes already made are retained.');
-      } else await reply(removed || saved ? `Cancelled ${Math.max(removed, saved)} unfinished message(s) in this conversation.` : 'No active task in your conversation.');
+      } else await reply(cancelledPublication ? 'Publication cancellation requested. A push already started may have completed; check the destination.' : removed || saved ? `Cancelled ${Math.max(removed, saved)} unfinished message(s) in this conversation.` : 'No active task in your conversation.');
       return;
     }
     if (!prompt || prompt.length > 16_000) { await this.reply(room, event, 'Supply a prompt of 1–16,000 characters.\n' + help(o.kind), true); return; }
@@ -428,6 +445,8 @@ export class Bridge {
       const relation = event.content?.['m.relates_to'];
       if (o.recoverMessages) o.state.cancelMessages(o.botId, room, event.sender,
         relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null);
+      const target = this.publicationTarget(room, event, backendKey);
+      if (target) o.publications?.cancel(target);
       o.state.reset(key); await reply('Your conversation state has been reset.'); return;
     }
     const controller = new AbortController();
@@ -490,7 +509,13 @@ export class Bridge {
             if (o.confirmation) await this.deliver(room, () => o.confirmation!(room, requestEvent, text, controls, markdown));
             else await this.reply(room, requestEvent, text);
           });
-        const publish: PublishAction | undefined = o.publish ? async (input, callSignal) => {
+        const publish: PublishAction | undefined = o.publish || o.publications ? async (input, callSignal) => {
+          if (o.publications) {
+            const target = this.publicationTarget(room, requestEvent, backendKey);
+            if (!target) throw new PublicError('The agent session is not ready for publication.');
+            turnLifetime.signal.throwIfAborted(); controller.signal.throwIfAborted();
+            return o.publications.start(input, target, AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]));
+          }
           if (current.publication) throw new PublicError('A publication review is already pending.');
           const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
           signal.throwIfAborted();
@@ -578,7 +603,10 @@ export class Bridge {
           // checks or admission. A backend failure gets no immediate retry.
           this.restartNotice = undefined;
         }
-        const task = verb === 'publish' ? o.publish!(publication, controller.signal, interact, () => this.authorize(room, current))
+        const manualTarget = verb === 'publish' ? this.publicationTarget(room, requestEvent, backendKey) : undefined;
+        const task = verb === 'publish' ? (o.publications && manualTarget
+          ? o.publications.start(publication, manualTarget, controller.signal)
+          : o.publish!(publication, controller.signal, interact, () => this.authorize(room, current)))
           : o.run(verb as Mode, modelPrompt,
             backendKey, controller.signal, event.sender, next.attachments, interact, publish, hooks);
         current.markReady();
@@ -680,6 +708,17 @@ export class Bridge {
       if (feedback) await this.handleMessage(room, feedback, true);
       return;
     }
+    if (!this.stopped && !o.isStopping?.() && event.sender && o.isAuthorized(event.sender) && event.event_id &&
+      Number.isFinite(event.origin_server_ts) && event.origin_server_ts! >= o.since && relation?.rel_type === 'm.annotation' &&
+      relation.event_id && ['✅', '❌', '✅\uFE0F', '❌\uFE0F'].includes(relation.key || '') && o.publications) {
+      const answer = await o.publications.react(room, event.sender, relation.event_id, relation.key!,
+        () => o.state.claim(JSON.stringify([o.botId, event.event_id])));
+      if (answer) {
+        const responseEvent: MatrixEvent = { sender: answer.target.sender, content: answer.target.thread
+          ? { 'm.relates_to': { rel_type: 'm.thread', event_id: answer.target.thread } } : {} };
+        await this.reply(room, responseEvent, answer.text); return;
+      }
+    }
     if (this.stopped || o.isStopping?.() || !current || current.failed || current.room !== room || current.sender !== event.sender ||
       !event.event_id || !Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < o.since ||
       relation?.rel_type !== 'm.annotation' || !relation.event_id || !['✅', '❌', '🔖', '✅\uFE0F', '❌\uFE0F', '🔖\uFE0F'].includes(relation.key || '') ||
@@ -690,6 +729,15 @@ export class Bridge {
     if (this.active !== current || !o.state.claim(JSON.stringify([o.botId, event.event_id]))) return;
     const answer = current.interactions.react(relation.event_id, relation.key!);
     if (answer) await this.reply(room, current.event, answer);
+  }
+
+  private publicationTarget(room: string, event: MatrixEvent, key: string): BackgroundTarget | undefined {
+    const kind = this.options.kind;
+    if (!event.sender || !['codex', 'claude', 'pi'].includes(kind)) return;
+    const session = this.options.state.session(key)[kind as 'codex' | 'claude' | 'pi'];
+    if (!session) return;
+    const relation = event.content?.['m.relates_to'];
+    return { room, sender: event.sender, key, session, thread: relation?.rel_type === 'm.thread' ? relation.event_id : undefined };
   }
 
   private async authorize(room: string, active: Active): Promise<void> {

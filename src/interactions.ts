@@ -22,6 +22,7 @@ export type ReactionControls = { keys: string[]; bind: (eventId: string) => void
 export class Interactions {
   private pending = new Map<string, { request: Interaction; delivered: boolean; eventId?: string; finish: (result: object) => void; cancel: () => void }>();
   get size(): number { return this.pending.size; }
+  hasRequest(id: string): boolean { return this.pending.has(id); }
 
   async ask(request: Interaction, signal: AbortSignal, send: (text: string, controls: ReactionControls, markdown: string) => Promise<void>): Promise<object> {
     signal.throwIfAborted();

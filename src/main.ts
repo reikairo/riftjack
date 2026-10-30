@@ -1,3 +1,4 @@
+import { PublicationJobs } from './publication-jobs.js';
 import { DetachedRuns } from './detached-runs.js';
 import { restartContext } from './restart-context.js';
 import { requestConfirmation } from './confirmation-mcp.js';
@@ -254,6 +255,32 @@ async function main() {
         ? { rel_type: 'm.thread', event_id: relation.event_id }
         : undefined;
     };
+    const publications = background && botConfig.sandbox !== 'read-only' ? new PublicationJobs(join(dir, 'publications.json'), {
+      timeoutMs: config.timeoutMs,
+      valid: target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude' | 'pi'] === target.session,
+      authorize: async target => {
+        if (stopping || !(await privateRoom(target.room, target.sender)) || !authorized(target.sender)) throw new PublicError('Publication stopped because access, membership or connector state changed.');
+      },
+      execute: (input, signal, interact, authorize) => requestPublish(input, botConfig.workspace, botConfig.dataDir, botConfig.maxMediaBytes, signal, interact, authorize),
+      send: async (target, request, text, controls, markdown, signal) => {
+        const relation = target.thread ? { rel_type: 'm.thread', event_id: target.thread } : undefined;
+        const authorize = async () => {
+          signal.throwIfAborted();
+          if (stopping || !authorized(target.sender) || state.session(target.key)[account.kind as 'codex' | 'claude' | 'pi'] !== target.session ||
+            !(await privateRoom(target.room, target.sender))) throw new PublicError('Publication confirmation is no longer authorized.');
+          signal.throwIfAborted();
+        };
+        if (request.attachments?.length) await media.send(target.room, request.attachments, relation, signal, authorize);
+        await sendConfirmation(text, controls, {
+          authorize,
+          sendMessage: content => client.sendMessage(target.room, { ...content, [SERVICE]: 'confirmation', 'm.relates_to': relation }),
+          sendReaction: (eventId, key) => client.sendRawEvent(target.room, 'm.reaction', { 'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key } }),
+          report: diagnostics,
+        }, markdown);
+      },
+      notify: (id, target, message) => background.notify(id, target, message, { group: id, progress: false }, 'Publication result'),
+      report: error => diagnostics(error, account.userId),
+    }) : undefined;
     const turnReaction = new TurnReaction(state, account.userId, {
       send: (room, eventId) => client.sendRawEvent(room, 'm.reaction', {
         'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key: '🟦' },
@@ -316,7 +343,7 @@ async function main() {
       client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
       console.log(account.userId + ' worker token file: ' + tokenFile);
     } else bridge = new Bridge({
-      journal,
+      journal, publications,
       botId: me.user_id, isAuthorized: authorized, kind: account.kind, isPrivateRoom: privateRoom, reactionTarget,
       owner: access.owner, isStopping: () => stopping || restart.pending, restart: (reply, target, scope) => restart.request(reply, target, scope),
       steer: backend.steer,
@@ -569,6 +596,7 @@ async function main() {
       backgroundPumps.set(account.userId, async () => {
         if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
         await codingBridge.drainQueued();
+        publications?.pump();
         github?.reconcile(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude' | 'pi'] === target.session);
         detached?.pump(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session);
         await background.pump({
