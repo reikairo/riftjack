@@ -127,7 +127,7 @@ export class BackgroundTasks {
     // Keep only the latest pending progress for a job; its completion supersedes
     // progress too. Never replace a notification whose model turn already began.
     const pending = this.watches.filter(w => w.notification?.group === notification.group && w.notification.progress &&
-      w.key === target.key && w.session === target.session && w.state === 'waiting' && !w.delivery);
+      this.visible(w, target) && w.state === 'waiting' && !w.delivery);
     const count = this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length;
     if (count - pending.length >= 100) throw new Error('Completion notification queue full.');
     // Commit admission to disk before changing deduplication or superseding progress.
@@ -147,16 +147,19 @@ export class BackgroundTasks {
   cancelNotifications(group: string, target: BackgroundTarget): void {
     let changed = false;
     for (const w of this.watches) {
-      if (w.notification?.group !== group || w.key !== target.key || w.session !== target.session ||
-          w.room !== target.room || w.sender !== target.sender || w.thread !== target.thread || w.state === 'cancelled' || w.state === 'delivered') continue;
+      if (w.notification?.group !== group || !this.visible(w, target) || w.state === 'cancelled' || w.state === 'delivered') continue;
       w.state = 'cancelled'; delete w.delivery; changed = true;
     }
     if (changed) this.save();
   }
+  private visible(w: Watch, target: Omit<BackgroundTarget, 'session'> & { session?: string }): boolean {
+    return w.key === target.key && w.session === target.session && w.room === target.room &&
+      w.sender === target.sender && w.thread === target.thread && w.workspace === this.workspace;
+  }
   action(input: unknown, target: BackgroundTarget, signal: AbortSignal): string {
     signal.throwIfAborted();
     if (!record(input)) throw new PublicError('Supply a background task action.');
-    const visible = (w: Watch) => w.key === target.key && w.session === target.session;
+    const visible = (w: Watch) => this.visible(w, target);
     if (input.action === 'list' && Object.keys(input).length === 1) return JSON.stringify(this.watches.filter(w => visible(w) && current(w)).map(describe));
     if (input.action === 'history') {
       const limit = input.limit === undefined ? 20 : input.limit, offset = input.offset === undefined ? 0 : input.offset;
@@ -228,7 +231,7 @@ export class BackgroundTasks {
       let conditions: WatchConditions;
       try { conditions = prepareConditions(input, this.workspace, Date.now(), this.processProbe); }
       catch (cause) { throw new PublicError('Cannot register these watch conditions.', { cause }); }
-      const duplicate = this.watches.find(w => visible(w) && w.room === target.room && w.sender === target.sender && w.thread === target.thread &&
+      const duplicate = this.watches.find(w => visible(w) &&
         !w.timer && (w.state === 'waiting' || !!w.delivery) && w.conditions && conditionKey(w.conditions) === conditionKey(conditions));
       if (duplicate) return JSON.stringify({ ...describe(duplicate), alreadyWatching: true });
       if (this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length >= 100) throw new PublicError('Too many active background watches. Cancel an unused watch first.');
@@ -279,8 +282,7 @@ export class BackgroundTasks {
   // notification turn was interrupted. `observed` is read now; the watch itself is not changed.
   // Like overview(), the room, sender and thread must match: linked rooms share a key and session.
   unfinished(target: BackgroundTarget, now = Date.now()) {
-    return this.watches.filter(w => !w.timer && w.key === target.key && w.session === target.session && w.room === target.room &&
-      w.sender === target.sender && w.thread === target.thread && w.workspace === this.workspace &&
+    return this.watches.filter(w => !w.timer && this.visible(w, target) &&
       ['waiting', 'dispatching', 'interrupted'].includes(w.state)).map(w => {
       if (w.conditions) {
         const conditions = structuredClone(w.conditions);
@@ -307,8 +309,7 @@ export class BackgroundTasks {
   // Unlike a linked session's aggregate counts, a human-facing list must not
   // expose registrations from another room, sender or delivery thread.
   overview(target: Omit<BackgroundTarget, 'session'> & { session?: string }, options = { history: false, page: 1 }): string {
-    const items = this.watches.filter(w => w.key === target.key && w.session === target.session &&
-      w.room === target.room && w.sender === target.sender && w.thread === target.thread && w.workspace === this.workspace &&
+    const items = this.watches.filter(w => this.visible(w, target) &&
       (options.history ? !current(w) : current(w)));
     if (!items.length) return options.history ? 'No retained background task history in this conversation.'
       : 'No active background watches or reminders in this conversation. Use !tasks history for retained history.';

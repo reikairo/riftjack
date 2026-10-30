@@ -88,3 +88,23 @@ test('busy model delivery does not block other observations or room reminders', 
   assert.doesNotMatch(delivered[0], /previous notification turn/, 'unadmitted observations are not interrupted turns');
   assert.equal(posts, 1);
 });
+
+
+for (const change of [{ room: '!other:test' }, { sender: '@other:test' }, { thread: '$other' }]) {
+  test(`linked conversation tools isolate ${Object.keys(change)[0]}`, t => {
+    const root = fixture(t), queue = new BackgroundTasks(join(root, 'background.json'), root);
+    const input = { action: 'remind', label: 'Reminder', message: 'Private body', deliver: 'agent', delay_minutes: 5 };
+    const created = JSON.parse(queue.action(input, target, signal()));
+    const other = { ...target, ...change };
+    assert.equal(JSON.parse(queue.action({ action: 'list' }, other, signal())).length, 0);
+    assert.throws(() => queue.action({ action: 'cancel', id: created.id }, other, signal()));
+    assert.throws(() => queue.action({ ...input, action: 'update', id: created.id }, other, signal()));
+    queue.action({ action: 'cancel', id: created.id }, target, signal());
+    assert.equal(JSON.parse(queue.action({ action: 'history' }, other, signal())).total, 0);
+    writeFileSync(join(root, 'status.json'), '{"status":"running"}');
+    const watch = { action: 'watch', label: 'Build', status_file: 'status.json', field: 'status', terminal: ['done'] };
+    const first = JSON.parse(queue.action(watch, target, signal()));
+    const second = JSON.parse(queue.action(watch, other, signal()));
+    assert.notEqual(first.id, second.id, 'duplicate registration never reuses another conversation');
+  });
+}
