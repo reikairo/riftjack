@@ -507,3 +507,38 @@ test('a modified launch snapshot cannot become a rollback target', t => {
   p.history.discard(candidate);
   assert.deepEqual(p.snapshots('pending-'), []);
 });
+
+
+test('rollback restores scripts with source and detects script-only changes', t => {
+  const p = project(t, 'source v1');
+  mkdirSync(join(p.root, 'scripts'));
+  const script = join(p.root, 'scripts', 'helper.mjs');
+  writeFileSync(script, 'helper v1');
+  p.history.promote(p.history.capture());
+  const hash = p.history.hash();
+  writeFileSync(script, 'helper v2');
+  assert.notEqual(p.history.hash(), hash);
+  assert.ok(p.history.rollback());
+  assert.equal(readFileSync(script, 'utf8'), 'helper v1');
+  writeFileSync(script, 'helper v3');
+  writeFileSync(join(p.root, 'src', 'child.cjs'), 'source v3');
+  assert.ok(p.history.rollback());
+  assert.equal(readFileSync(script, 'utf8'), 'helper v1');
+  assert.equal(readFileSync(join(p.root, 'src', 'child.cjs'), 'utf8'), 'source v1');
+});
+
+test('rollback rejects incomplete snapshots and incompatible installed dependencies before modifying code', t => {
+  const p = project(t, 'source v1');
+  writeFileSync(join(p.root, 'package-lock.json'), 'lock v1');
+  p.history.promote(p.history.capture());
+  const good = p.history.latest()!;
+  writeFileSync(join(p.root, 'src', 'child.cjs'), 'source v2');
+  writeFileSync(join(good.path, 'src', 'child.cjs'), 'corrupt');
+  assert.throws(() => p.history.rollback(), /snapshot/);
+  assert.equal(readFileSync(join(p.root, 'src', 'child.cjs'), 'utf8'), 'source v2');
+  writeFileSync(join(good.path, 'src', 'child.cjs'), 'source v1');
+  mkdirSync(join(p.root, 'node_modules'));
+  writeFileSync(join(p.root, 'package-lock.json'), 'lock v2');
+  assert.throws(() => p.history.rollback(), /dependency installation/);
+  assert.equal(readFileSync(join(p.root, 'src', 'child.cjs'), 'utf8'), 'source v2');
+});

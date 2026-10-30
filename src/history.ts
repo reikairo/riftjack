@@ -3,7 +3,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, re
 import { join } from 'node:path';
 
 // Code that a restarted connector loads. node_modules, .env and data/ are deliberately excluded.
-export const CODE_FILES = ['src', 'package.json', 'package-lock.json', 'tsconfig.json'];
+export const CODE_FILES = ['src', 'scripts', 'package.json', 'package-lock.json', 'tsconfig.json'];
 
 export type Snapshot = { name: string; path: string; hash: string };
 
@@ -35,8 +35,8 @@ export class CodeHistory {
     if (!existsSync(this.dir)) return [];
     return readdirSync(this.dir).filter(name => name.startsWith(prefix)).sort().flatMap(name => {
       try {
-        const { hash } = JSON.parse(readFileSync(join(this.dir, name, 'manifest.json'), 'utf8'));
-        return typeof hash === 'string' ? [{ name, path: join(this.dir, name), hash }] : [];
+        const { hash, files } = JSON.parse(readFileSync(join(this.dir, name, 'manifest.json'), 'utf8'));
+        return typeof hash === 'string' && JSON.stringify(files) === JSON.stringify(this.files) ? [{ name, path: join(this.dir, name), hash }] : [];
       } catch { return []; }
     });
   }
@@ -58,7 +58,7 @@ export class CodeHistory {
         if (existsSync(join(this.root, file))) cpSync(join(this.root, file), join(path, file), { recursive: true });
       }
       if (this.hash(path) !== hash || this.hash() !== hash) throw new Error('Code changed while capturing the launch snapshot.');
-      writeFileSync(join(path, 'manifest.json'), JSON.stringify({ hash, createdAt: new Date().toISOString() }));
+      writeFileSync(join(path, 'manifest.json'), JSON.stringify({ hash, files: this.files, createdAt: new Date().toISOString() }));
       return { name, path, hash };
     } catch (error) { rmSync(path, { recursive: true, force: true }); throw error; }
   }
@@ -80,9 +80,16 @@ export class CodeHistory {
     const good = this.latest();
     const hash = this.hash();
     if (!good || good.hash === hash) return;
+    if (this.hash(good.path) !== good.hash) throw new Error('Rollback snapshot is incomplete or changed; no files were restored.');
+    // Installed dependencies are not part of a source snapshot. Do not knowingly
+    // restore source requiring a different installation into a running environment.
+    const lock = (base: string) => existsSync(join(base, 'package-lock.json')) ? readFileSync(join(base, 'package-lock.json'), 'utf8') : '';
+    if (existsSync(join(this.root, 'node_modules')) && lock(this.root) !== lock(good.path)) {
+      throw new Error('Rollback requires a different dependency installation. Restore the version and run npm ci before starting.');
+    }
     const failed = join(this.dir, 'failed-' + stamp());
     mkdirSync(failed, { recursive: true, mode: 0o700 });
-    writeFileSync(join(failed, 'manifest.json'), JSON.stringify({ hash, createdAt: new Date().toISOString(), restored: good.name }));
+    writeFileSync(join(failed, 'manifest.json'), JSON.stringify({ hash, files: this.files, createdAt: new Date().toISOString(), restored: good.name }));
     for (const file of this.files) {
       if (existsSync(join(this.root, file))) renameSync(join(this.root, file), join(failed, file));
     }
