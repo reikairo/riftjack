@@ -50,8 +50,19 @@ A prepared detached launch is still **not running**. The agent must invoke its
 saved `launch_argv` through the ordinary command tool and sandbox approval before
 `launch_by`. Dependencies and cwd remain live; selected script snapshots are
 captured before review. No connector background job executes the launch. If the
-result is delivered after the five-minute launch window, inspect status instead
-of running an expired command.
+result or the ordinary command approval is delayed, the launch remains valid for
+**24 hours after the run approval**, until the exact saved `launch_by`. This is
+separate from the deadline for answering the initial question and from the
+command's maximum runtime. The confirmation states this validity period. Reading
+status, retrying delivery and restarting the connector do not extend it. Previously
+prepared runs retain their original deadlines; an expired run requires a new
+approval and is never revived automatically. `stop` revokes an unlaunched run;
+session reset and access revocation also revoke it when observed by the connector.
+
+Once the launcher claims a run, a missing supervisor is reported as lost after
+at most five minutes, independently of the longer approval validity. Lost-run
+closure still requires expiry of that startup window and inspection of recorded
+processes and groups. This does not prove unobserved descendants have stopped.
 
 ## Delivery receipts
 

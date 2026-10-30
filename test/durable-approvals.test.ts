@@ -11,11 +11,11 @@ import { State } from '../src/state.js';
 const target = { room: '!home:test', sender: '@alice:test', key: 'key', session: 'session', thread: '$thread' };
 const signal = () => new AbortController().signal;
 async function until(check: () => boolean) { for (let i = 0; i < 400; i++) { if (check()) return; await new Promise(r => setTimeout(r, 5)); } assert.fail('Condition not reached'); }
-function fixture(t: { after(fn: () => void): void }) {
+function fixture(t: { after(fn: () => void): void }, timeoutMs = 10000) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'durable-approvals-')));
   const notices: string[] = [], requests: string[] = [], errors: unknown[] = [];
   const options: Pick<ApprovalJobOptions, 'timeoutMs' | 'valid' | 'authorize' | 'send' | 'notify' | 'report'> = {
-    timeoutMs: 10000, valid: () => true, authorize: async () => {},
+    timeoutMs, valid: () => true, authorize: async () => {},
     send: async (_target, _request, text, controls) => { controls.bind('$review-' + requests.length); requests.push(text); },
     notify: (_id, _target, text) => { notices.push(text); }, report: error => { errors.push(error); },
   };
@@ -81,6 +81,31 @@ test('late launch approval prepares a saved launch with captured script bytes an
   const status = JSON.parse(await f.runs.action({ action: 'status', id: result.id }, target, signal(), async () => ({}), async () => {}));
   assert.equal(status.status, 'prepared');
   assert.equal(existsSync(join(result.launch_argv[2], 'claimed')), false);
+});
+
+test('hour-long approval and delivery waits preserve a fixed launch deadline across restart', async t => {
+  const hour = 60 * 60_000, f = fixture(t, 24 * hour);
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  const receipt = JSON.parse(await f.launches.start({ action: 'start', label: 'Delayed build', cwd: f.dir,
+    argv: [process.execPath, '-e', 'process.exit(0)'] }, target, signal()));
+  await until(() => f.requests.length === 1);
+  assert.match(f.requests[0], /24 hours after this approval/);
+  now += hour; // The human answers the first question an hour later.
+  await f.launches.answer(target, '!approve'); await until(() => f.notices.length === 1);
+  const saved = JSON.parse(f.launches.status(target, receipt.operation_id));
+  const run = JSON.parse(saved.result), deadline = now + 24 * hour;
+  assert.equal(Date.parse(run.launch_by), deadline);
+  now += 90 * 60_000; // Result delivery or the ordinary tool's permission can wait too.
+  const recovered = new DetachedRuns(join(f.dir, 'runs'), f.dir, { notify() {}, processTable: () => [] });
+  const status = async () => JSON.parse(await recovered.action({ action: 'status', id: run.id }, target, signal(), async () => ({}), async () => {}));
+  assert.equal((await status()).status, 'prepared');
+  assert.equal(existsSync(join(run.launch_argv[2], 'claimed')), false);
+  assert.equal(JSON.parse(f.launches.status(target, receipt.operation_id)).result, saved.result);
+  assert.equal(JSON.parse(readFileSync(join(run.launch_argv[2], 'command.json'), 'utf8')).launch_by, deadline);
+  now = deadline + 1;
+  assert.equal((await status()).reason, 'launch_expired');
+  // Status reads and reconstructed managers never renew an expired approval.
+  assert.equal((await status()).reason, 'launch_expired');
 });
 
 test('bridge routes delayed question decisions and retrieves the saved decision in a later turn', async t => {

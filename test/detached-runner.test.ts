@@ -72,6 +72,32 @@ test('changed specification is refused without executing the command', async t =
   assert.throws(f.launch, /specification changed/);
   assert.equal(existsSync(join(f.workspace, 'executed')), false);
 });
+test('ordinary command approval can wait over an hour without losing the single-use launch', async t => {
+  if (!canObserve()) return t.skip('OS process table denied; process tests need one-time approval.');
+  const prepared = Date.now() - 90 * 60_000;
+  const clock = t.mock.method(Date, 'now', () => prepared);
+  const f = await fixture('require("node:fs").appendFileSync("executed", "once\\n")');
+  clock.mock.restore();
+  t.after(f.stop);
+  f.launch();
+  await until(() => f.status()?.status === 'succeeded');
+  assert.equal(readFileSync(join(f.workspace, 'executed'), 'utf8'), 'once\n');
+  assert.throws(f.launch); // An already claimed launch cannot run twice.
+});
+test('expired and explicitly stopped launches never execute after a long wait', async t => {
+  const prepared = Date.now() - 25 * 60 * 60_000;
+  const clock = t.mock.method(Date, 'now', () => prepared);
+  const expired = await fixture('require("node:fs").writeFileSync("executed", "yes")');
+  clock.mock.restore();
+  assert.throws(expired.launch, /expired or stopped/);
+  assert.equal(existsSync(join(expired.dir, 'claimed')), false);
+  assert.equal(existsSync(join(expired.workspace, 'executed')), false);
+  const stopped = await fixture('require("node:fs").writeFileSync("executed", "yes")');
+  writeFileSync(join(stopped.dir, 'stop'), '');
+  assert.throws(stopped.launch, /expired or stopped/);
+  assert.equal(existsSync(join(stopped.dir, 'claimed')), false);
+  assert.equal(existsSync(join(stopped.workspace, 'executed')), false);
+});
 test('unavailable process observation fails closed before executing the command', async t => {
   if (canObserve()) return t.skip('This case exercises the restricted process-table environment.');
   const f = await fixture('require("node:fs").writeFileSync("executed", "yes")');

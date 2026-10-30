@@ -27,6 +27,6 @@ export function createRunApprovalJobs(path: string, approvalOptions: Common, det
       execute: (input, signal, interact, authorize, target) => detached.action(input, target, signal, interact, authorize),
       outcome: result => JSON.parse(result).closed ? 'closed' : JSON.parse(result).status,
       receipt: 'The connector owns this approval request. Wait for its background result. Use action=approval_status with id=operation_id to retrieve it. No command has been launched.',
-      guidance: 'Inspect action=approval_status for the full saved result. A prepared launch must be executed once through the ordinary command tool and its sandbox approval, before launch_by. Check run status before any uncertain launch; do not automatically repeat a launch. A decline is not approval.',
+      guidance: 'Inspect action=approval_status for the full saved result. A prepared launch must be executed once through the ordinary command tool and its sandbox approval, before launch_by (24 hours after approval for newly prepared runs). Reading status does not extend that deadline. Check run status before any uncertain launch; do not automatically repeat a launch. A decline is not approval.',
     });
 }

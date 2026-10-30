@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DetachedRuns } from '../src/detached-runs.js';
@@ -101,6 +101,20 @@ test('deadlines, stale heartbeat and process-table errors never claim successful
   assert.equal((await read()).reason, 'heartbeat_stale');
   f.hooks.processTable = () => { throw new Error('EPERM'); };
   assert.equal((await read()).reason, 'process_observation_unavailable');
+});
+test('a claimed launch still becomes lost after five minutes and can be inspected and closed', async () => {
+  const f = setup(), run = await f.action(f.request);
+  const claim = join(f.directory, run.id, 'claimed');
+  writeFileSync(claim, '');
+  assert.equal((await f.action({ action: 'status', id: run.id })).status, 'starting');
+  save(join(f.directory, run.id, 'status.json'), { id: run.id, status: 'lost', reason: 'supervisor_failed' });
+  await assert.rejects(f.action({ action: 'close', id: run.id, evidence: 'Checked processes.' }), /startup window/);
+  const earlier = new Date(Date.now() - 6 * 60_000); utimesSync(claim, earlier, earlier);
+  save(join(f.directory, run.id, 'status.json'), { id: run.id, status: 'prepared' });
+  const status = await f.action({ action: 'status', id: run.id });
+  assert.equal(status.status, 'lost'); assert.equal(status.reason, 'launch_not_observed');
+  const closed = await f.action({ action: 'close', id: run.id, evidence: 'Checked processes and groups; none remain.' });
+  assert.ok(closed.closed); assert.equal(closed.status, 'lost');
 });
 test('log control bytes cannot prevent durable completion notification', async () => {
   const f = setup(), run = await f.action(f.request);

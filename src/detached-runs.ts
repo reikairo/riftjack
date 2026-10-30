@@ -13,6 +13,10 @@ const text = (v: unknown, max: number): v is string => typeof v === 'string' && 
 const active = new Set(['prepared', 'starting', 'running', 'stopping', 'lost']);
 const terminal = new Set(['succeeded', 'failed', 'stopped', 'lost']);
 const idPattern = /^[a-f0-9-]{36}$/;
+// Both result delivery and the ordinary command tool's approval may wait for
+// the human. Keep that wait separate from detecting a missing supervisor.
+const launchWindowMs = 24 * 60 * 60_000;
+const startupWindowMs = 5 * 60_000;
 export type Run = { id: string; target: BackgroundTarget; label: string; created: number; launchBy: number;
   sha256: string; notified?: string; cancelled?: boolean;
   closed?: { at: string; evidence: string; reason?: string } };
@@ -79,6 +83,10 @@ export class DetachedRuns {
     return visibleTo(run, target) ? run : undefined;
   }
   private dir(run: Run) { return join(this.directory, run.id); }
+  private observationDeadline(run: Run) {
+    const claim = join(this.dir(run), 'claimed');
+    return existsSync(claim) ? Math.min(run.launchBy, statSync(claim).mtimeMs + startupWindowMs) : run.launchBy;
+  }
   private state(run: Run): RunStatus {
     const path = join(this.dir(run), 'status.json');
     let status: RunStatus;
@@ -92,7 +100,7 @@ export class DetachedRuns {
       return Date.now() > run.launchBy ? { id: run.id, status: 'stopped', reason: 'launch_expired' } : status;
     }
     if (!status.supervisor) {
-      return Date.now() > run.launchBy ? { id: run.id, status: 'lost', reason: 'launch_not_observed' } : { ...status, status: 'starting' };
+      return Date.now() > this.observationDeadline(run) ? { id: run.id, status: 'lost', reason: 'launch_not_observed' } : { ...status, status: 'starting' };
     }
     try {
       const current = (this.hooks.processTable ?? processes)().find(p => p.pid === status.supervisor!.pid);
@@ -108,7 +116,7 @@ export class DetachedRuns {
   private checkClosable(run: Run) {
     const state = this.state(run);
     if (state.status !== 'lost') throw new PublicError('Only a lost run can be closed after inspection.');
-    if (Date.now() <= run.launchBy) throw new PublicError('Wait until the five-minute launch window expires before closing this run.');
+    if (Date.now() <= this.observationDeadline(run)) throw new PublicError('Wait until the launch window or the claimed supervisor startup window expires before closing this run.');
     let table: ProcessIdentity[];
     try { table = (this.hooks.processTable ?? processes)(); }
     catch (cause) { throw new PublicError('Cannot verify processes before closing the run.', { cause }); }
@@ -244,6 +252,7 @@ export class DetachedRuns {
       const result = await interact({ ...confirmationDetails([
         { label: 'Detached command', value: JSON.stringify(input.argv) }, { label: 'Working directory', value: cwd },
         { label: 'Environment overrides', value: JSON.stringify(env) }, { label: 'Maximum runtime', value: `${timeout} seconds` },
+        { label: 'Launch validity', value: '24 hours after this approval. Waiting for result delivery or ordinary command approval uses this time; it does not renew the deadline.' },
         { label: 'Script snapshots', value: JSON.stringify(snapshots.map(s => ({ argument: s.index, file: s.original, sha256: digest(s.bytes) }))) },
         { value: 'This process is intended to survive this turn and connector restarts. Approval prepares one launch; execute the returned argv through the ordinary command tool with its existing sandbox and approval checks. Dependencies and the working directory are not frozen. Logs retain at most 1 MiB. No saved permission is created.' },
       ]), approve: approved, deny: declined }, signal);
@@ -261,7 +270,7 @@ export class DetachedRuns {
       });
       const runner = readFileSync(fileURLToPath(new URL('../scripts/detached-runner.mjs', import.meta.url)));
       const launcher = join(directory, 'launcher.mjs'); writeFileSync(launcher, runner, { flag: 'wx', mode: 0o600 });
-      const created = Date.now(), launchBy = created + 5 * 60_000;
+      const created = Date.now(), launchBy = created + launchWindowMs;
       const spec = JSON.stringify({ id, argv, cwd, env, timeout_seconds: timeout, snapshots: copied,
         max_log_bytes: 1024 * 1024, launch_by: launchBy, launcher_sha256: digest(runner) });
       writeFileSync(join(directory, 'command.json'), spec, { flag: 'wx', mode: 0o600 });
