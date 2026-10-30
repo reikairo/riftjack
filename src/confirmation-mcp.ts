@@ -6,7 +6,7 @@ import { startToolMcp, type ToolAction } from './tool-mcp.js';
 
 export const CONFIRMATION_SERVER = 'riftjack_confirmation';
 export const CONFIRMATION_TOOL = 'mcp__riftjack_confirmation__request_confirmation';
-export const confirmationInstructions = '\nWhen explicit human consent for a concrete proposal is needed, use request_confirmation instead of asking for a typed yes. Do not ask again for work already authorized. State the exact scope and relevant consequences in question/details. Only status=approved is consent for that proposal; declined means human refusal, expired means no answer in time, and cancellation or delivery failure is not refusal. The tool only collects a decision: it executes nothing, grants no sandbox permissions, and does not replace command approvals or prepare_publish. Pending requests expire when the turn or connector ends; never reuse them after restart.';
+export const confirmationInstructions = '\nWhen explicit human consent for a concrete proposal is needed, use request_confirmation instead of asking for a typed yes. Do not ask again for work already authorized. State the exact scope and relevant consequences in question/details. Only status=approved is consent for that proposal; declined means human refusal, expired means no answer in time, and cancellation or delivery failure is not refusal. The tool only collects a decision: it executes nothing, grants no sandbox permissions, and does not replace command approvals or prepare_publish. The tool returns a request_id with status preparing. The connector owns the question independently of the model turn and delivers its saved decision in a background turn. Use action=status with id=request_id for the exact proposal and result, or omit id to list recent questions. A preparing receipt is not consent. Connector restart expires unanswered questions; never replay an expired approval.';
 
 export function confirmationInput(input: unknown) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PublicError('Expected a confirmation request.');
@@ -34,7 +34,7 @@ export async function requestConfirmation(input: unknown, signal: AbortSignal, i
     const decision = await interact({ ...confirmationDetails([
       { label: 'Proposal', value: request.question },
       ...(request.details ? [{ label: 'Details', value: request.details }] : []),
-      { label: 'Response window', value: `${request.timeout_seconds} seconds, or until this turn ends.` },
+      { label: 'Response window', value: `${request.timeout_seconds} seconds. Ending the model turn does not cancel this question.` },
       { value: 'This records your decision only. It does not execute commands or replace publication and command approvals.' },
     ]), approve: approved, deny: declined }, combined);
     // Interactions removes unanswered requests on expiry. A decision already
@@ -53,15 +53,17 @@ export async function requestConfirmation(input: unknown, signal: AbortSignal, i
 
 export function startConfirmationMcp(action: ToolAction, signal: AbortSignal) {
   return startToolMcp({ name: 'request_confirmation',
-    description: 'Ask the human to approve or decline a concrete proposal using Matrix reactions. Returns approved, declined, or expired with the exact proposal. Executes nothing and does not replace sandbox or publication approvals. Cancellation and delivery failure are errors, never human refusals. Pending requests do not survive the turn or a connector restart.',
-    inputSchema: { type: 'object', additionalProperties: false, required: ['question'], properties: {
+    description: 'Ask the human to approve or decline a concrete proposal using Matrix reactions. Returns a request_id immediately; the saved decision arrives in a background turn. action=status retrieves the full proposal and result. Executes nothing and does not replace sandbox or publication approvals. Cancellation and delivery failure are errors, never human refusals. Pending questions survive the model turn but expire on connector restart.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {
+      action: { type: 'string', enum: ['status'], description: 'Retrieve a saved decision by id, or list recent requests when id is omitted.' },
+      id: { type: 'string' },
       question: { type: 'string', minLength: 1, maxLength: 4000, description: 'Concrete proposal to approve.' },
       details: { type: 'string', maxLength: 12000, description: 'Exact scope and consequences, shown as literal text.' },
       timeout_seconds: { type: 'integer', minimum: 1, maximum: 3600, default: 600 },
     } }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   }, action, signal, {
     server: CONFIRMATION_SERVER,
-    cancelled: 'Confirmation cancelled or interrupted. This is not a human refusal or approval. Do not treat this request as consent.',
+    cancelled: 'Confirmation tool call interrupted. An admitted question may still be pending. Inspect action=status before asking again. This is not a human refusal or approval. This response itself establishes no consent.',
     failed: 'Confirmation could not be completed. This is not a human refusal or approval. No consent is established by this result.',
   }, { maxQueued: 9, maxRequestBytes: 128 * 1024 });
 }

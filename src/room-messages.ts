@@ -1,8 +1,9 @@
+import type { ScopedReceipts } from './delivery-receipts.js';
 import { PublicError } from './errors.js';
 import { mentionContent } from './message-format.js';
 import { PEER_CREDIT, type ConversationLinks } from './conversation-links.js';
 import { GRANT, type MatrixEvent } from './bridge.js';
-import { attachmentDelivery } from './attachment-delivery.js';
+import { attachmentDelivery, attachmentFingerprint } from './attachment-delivery.js';
 import { isMedia, outgoingAttachments, type IncomingAttachment, type OutgoingAttachment } from './media.js';
 
 // Use explicit recipients in groups; mention=true selects the sole peer in a pair room.
@@ -91,15 +92,19 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
   };
 }
 
-// One instance per backend turn. Cache failures too: an uncertain send must never
-// be repeated automatically. This is deliberately not a persistent outbox.
-export function roomMessageDelivery(send: MessageAction): RoomMessageTool {
+// Cache failures too: an uncertain send must never be repeated automatically.
+// A configured receipt store extends this protection across turns and restarts.
+export function roomMessageDelivery(send: MessageAction, receipts?: () => ScopedReceipts | Promise<ScopedReceipts>, maxBytes = 512 * 1024 * 1024): RoomMessageTool {
   const attempts = new Map<string, { content: string; result: Promise<string> }>();
   return async (input, signal, outbox) => {
     signal.throwIfAborted();
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PublicError('Expected a room message request.');
     const r = input as Record<string, unknown>;
     if (r.action === 'list' && Object.keys(r).length === 1) return send({ action: 'list' }, signal);
+    if (r.action === 'status' && Object.keys(r).every(k => ['action', 'id'].includes(k))) {
+      if (!receipts) throw new PublicError('Persistent delivery receipts are not configured.');
+      return (await receipts()).read(r.id as string | undefined);
+    }
     const roomValid = typeof r.room === 'string' && /^![^\s:]+:[^\s]+$/.test(r.room);
     if (r.action === 'receive_attachment') {
       if (!roomValid || Object.keys(r).some(k => !['action', 'room', 'event_id'].includes(k)) ||
@@ -132,15 +137,23 @@ export function roomMessageDelivery(send: MessageAction): RoomMessageTool {
       ...(r.mentions !== undefined && { mentions: [...r.mentions as string[]] }) };
     return attempt(r.id, request, signal);
   };
-  function attempt(id: string, request: MessageRequest, signal: AbortSignal) {
-    const content = JSON.stringify(request);
+  async function attempt(id: string, request: MessageRequest, signal: AbortSignal) {
+    const content = request.action === 'send_files' && receipts
+      ? JSON.stringify({ action: request.action, room: request.room, files: await attachmentFingerprint(outgoingAttachments({ files: request.files }, request.outbox), maxBytes) })
+      : JSON.stringify(request);
+    signal.throwIfAborted();
+    const store = await receipts?.();
+    signal.throwIfAborted();
     const previous = attempts.get(id);
     if (previous) {
       if (previous.content !== content) throw new PublicError('This message id was already used with different content.');
       return previous.result;
     }
     if (attempts.size >= 32) throw new PublicError('Room message limit reached for this turn.');
-    const result = Promise.resolve().then(() => { signal.throwIfAborted(); return send(request, signal); });
+    const result = Promise.resolve().then(() => {
+      signal.throwIfAborted();
+      return store ? store.run(id, content, () => send(request, signal)) : send(request, signal);
+    });
     attempts.set(id, { content, result });
     return result;
   }

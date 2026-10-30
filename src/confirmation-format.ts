@@ -4,7 +4,7 @@ type Detail = { label?: string; value: string; code?: boolean | 'command'; space
 
 // Compose both presentations from the same values. Tool input is literal text,
 // never Markdown: fences keep even embedded Markdown literal until rendering.
-// The confirmation renderer displays command fences as wrapping inline code.
+// The confirmation renderer displays all literal field fences as wrapping inline code.
 export function confirmationDetails(details: Detail[]): { text: string; markdown: string } {
   const separator = (index: number, formatted: boolean): string => {
     if (!index) return '';
@@ -21,7 +21,7 @@ export function confirmationDetails(details: Detail[]): { text: string; markdown
       const title = separator(index, true) + (label ? `**${markdownText(label)}:**\n` : '');
       if (!code) return title + markdownText(value);
       const fence = '`'.repeat(Math.max(2, ...(value.match(/`+/g) || []).map(run => run.length)) + 1);
-      return `${title}\n${fence}${code === 'command' ? 'riftjack-command' : 'text'}\n${value}\n${fence}`;
+      return `${title}\n${fence}${code === 'command' ? 'riftjack-command' : 'riftjack-value'}\n${value}\n${fence}`;
     }).join(''),
   };
 }

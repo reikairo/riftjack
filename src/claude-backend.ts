@@ -309,7 +309,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
           await progress;
           callSignal.throwIfAborted();
           return hooks.sendAttachments!(files, callSignal);
-        });
+        }, hooks.deliveryReceipts);
         media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
       }
       await runClaude(config, claudeArguments(config, savedSession, interactive,

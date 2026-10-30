@@ -1,17 +1,18 @@
+import { deliveryId, type ScopedReceipts } from './delivery-receipts.js';
 import { basename, relative } from 'node:path';
 import { PublicError, errorMessage } from './errors.js';
-import { outgoingAttachments, safeName, validateOutgoing, type BackendReply, type OutgoingAttachment } from './media.js';
+import { outgoingAttachments, hashOutgoing, safeName, validateOutgoing, type BackendReply, type OutgoingAttachment } from './media.js';
 
 export type SendAttachments = (files: OutgoingAttachment[], signal: AbortSignal) => Promise<void>;
 type Receipt = { path: string; name: string; status: 'sent' | 'uncertain' | 'not_sent'; error?: string };
 
-// Turn-local receipts prevent retries (including final manifests) from duplicating
-// messages when a response is lost. This is not a cross-turn delivery ledger.
-export function attachmentDelivery(root: string, maxBytes: number, send: SendAttachments) {
+// Turn-local attempts suppress final-manifest repeats. When configured, the
+// durable receipt store also prevents replay across turns and restarts.
+export function attachmentDelivery(root: string, maxBytes: number, send: SendAttachments, receipts?: () => ScopedReceipts | Promise<ScopedReceipts>) {
   const attempted = new Map<string, Receipt>();
+  const fingerprints = new Map<string, string>();
   let busy = false;
-  return {
-    async action(input: unknown, signal: AbortSignal): Promise<string> {
+  const deliver = async (input: unknown, signal: AbortSignal): Promise<string> => {
       signal.throwIfAborted();
       if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => k !== 'files')) {
         throw new PublicError('Supply only files; the destination is the current conversation.');
@@ -48,9 +49,42 @@ export function attachmentDelivery(root: string, maxBytes: number, send: SendAtt
         }
         return JSON.stringify({ files: receipts });
       } finally { busy = false; }
+  };
+  return {
+    async action(input: unknown, signal: AbortSignal): Promise<string> {
+      signal.throwIfAborted();
+      const store = await receipts?.();
+      if (!store) return deliver(input, signal);
+      const request = input as { action?: string; id?: string; files?: unknown } | undefined;
+      if (request?.action === 'status' && Object.keys(request).every(k => ['action', 'id'].includes(k))) return store.read(request.id);
+      if (!request || !deliveryId(request.id) || Object.keys(request).some(k => !['id', 'files'].includes(k))) throw new PublicError('Supply id and files, or action=status with optional id to inspect retained deliveries.');
+      const files = outgoingAttachments({ files: request.files }, root);
+      if (!files.length || (request.files as object[]).some(file => Object.keys(file).some(k => !['path', 'name'].includes(k)))) throw new PublicError('Supply files with path and optional name.');
+      const fingerprint = await attachmentFingerprint(files, maxBytes);
+      signal.throwIfAborted();
+      const contents = JSON.parse(fingerprint) as object[];
+      for (const [i, file] of files.entries()) if (fingerprints.has(file.path) && fingerprints.get(file.path) !== JSON.stringify(contents[i])) throw new PublicError('An attempted attachment changed during this turn. Use a new path and delivery id.');
+      const result = await store.run(request.id, fingerprint, () => deliver({ files: request.files }, signal));
+      // A previous turn may have sent these files. Suppress final-manifest repeats too.
+      const saved = JSON.parse(result);
+      for (const [i, file] of files.entries()) {
+        if (saved.files?.[i]?.status === 'not_sent') continue;
+        fingerprints.set(file.path, JSON.stringify(contents[i]));
+        if (!attempted.has(file.path)) attempted.set(file.path, { path: relative(root, file.path), name: safeName(file.name || basename(file.path)), status: 'uncertain' });
+      }
+      return result;
     },
     final(reply: string | BackendReply): string | BackendReply {
       return typeof reply === 'string' ? reply : { ...reply, attachments: reply.attachments.filter(file => !attempted.has(file.path)) };
     },
   };
+}
+
+export async function attachmentFingerprint(files: OutgoingAttachment[], maxBytes: number): Promise<string> {
+  const entries = [];
+  for (const file of files) {
+    const sha256 = await hashOutgoing(file, maxBytes);
+    entries.push({ path: relative(file.root, file.path), name: safeName(file.name || basename(file.path)), sha256 });
+  }
+  return JSON.stringify(entries);
 }

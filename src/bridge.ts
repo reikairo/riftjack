@@ -1,3 +1,7 @@
+import { relative } from 'node:path';
+import { createHash } from 'node:crypto';
+import { DeliveryReceipts, type ScopedReceipts } from './delivery-receipts.js';
+import type { ApprovalJobs } from './approval-jobs.js';
 import type { PublicationJobs } from './publication-jobs.js';
 import type { BackgroundTarget } from './background-tasks.js';
 import type { BackgroundAction } from './background-tasks.js';
@@ -5,7 +9,7 @@ import type { RunJournal } from './run-journal.js';
 import type { CompactionPhase } from './compaction-notices.js';
 import { taskTyping, type TypingMeasurement } from './task-typing.js';
 import { roomMessageDelivery, type MessageRequest, type RoomMessageTool } from './room-messages.js';
-import type { SendAttachments } from './attachment-delivery.js';
+import { attachmentDelivery, type SendAttachments } from './attachment-delivery.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
 import { errorMessage } from './errors.js';
@@ -37,7 +41,7 @@ export type MatrixEvent = {
 // replyTo: an event of the same room the reply answers (sent as a Matrix reply).
 export type Mentions = { text: string; mentions: string[]; replyTo?: string; error?: string };
 export type Mode = 'codex' | 'claude' | 'pi' | 'grok' | 'manager';
-export type BackendHooks = { detached?: BackgroundAction; confirmation?: BackgroundAction; github?: BackgroundAction; background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool };
+export type BackendHooks = { deliveryReceipts?: () => Promise<ScopedReceipts>; detached?: BackgroundAction; confirmation?: BackgroundAction; github?: BackgroundAction; background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool };
 
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
@@ -62,13 +66,17 @@ type Options = {
   transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
   reactionTarget?: ReactionReader;
   resolveManagerAvatar?: (prompt: string, sender: string) => string | false;
+  maxMediaBytes?: number;
   sendAttachments?: (room: string, event: MatrixEvent, files: OutgoingAttachment[], signal: AbortSignal, sent?: (eventId: string) => void) => Promise<void>;
   status?: (key: string) => string;
   tasks?: (room: string, event: MatrixEvent, key: string, options: { history: boolean; page: number }) => string;
   detached?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   requestConfirmation?: (input: unknown, signal: AbortSignal, interact: Interact) => Promise<string>;
   journal?: RunJournal;
+  receipts?: DeliveryReceipts;
   publications?: PublicationJobs;
+  confirmationJobs?: ApprovalJobs;
+  detachedJobs?: ApprovalJobs;
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   github?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
@@ -131,9 +139,9 @@ export class Bridge {
   }
   get pendingTurns(): boolean { return !!this.active?.followups.length || this.options.state.queued(this.options.botId) > 0; }
   get busy(): boolean { return !!this.active || this.draining || (!!(this.options.linkedSession || this.options.recoverMessages) && this.options.state.queued(this.options.botId) > 0); }
-  stop() { this.options.publications?.stop(); this.avatarUploads.clear(); this.stopped = true; this.active?.controller.abort(); }
+  stop() { for (const jobs of this.approvalJobs()) jobs.stop(); this.avatarUploads.clear(); this.stopped = true; this.active?.controller.abort(); }
   revoke(sender: string) {
-    this.options.publications?.revoke(sender);
+    for (const jobs of this.approvalJobs()) jobs.revoke(sender);
     for (const [key, upload] of this.avatarUploads) if (upload.sender === sender) this.avatarUploads.delete(key);
     if (this.restartNotice?.event.sender === sender) this.restartNotice = undefined;
     if (this.active?.sender === sender) this.active.controller.abort();
@@ -318,13 +326,15 @@ export class Bridge {
     if (!media && /^!(approve|deny|answer)(?:\s|$)/.test(prompt)) {
       const current = this.active;
       const target = this.publicationTarget(room, event, backendKey);
-      if (target && o.publications) {
+      if (target && this.approvalJobs().length) {
         const local = current?.key === key && current.sender === event.sender ? current.interactions.size : 0;
-        if (local + o.publications.count(target) > 1 && !/^!(?:approve|deny|answer)\s+[a-f0-9]{12}(?:\s|$)/.test(prompt)) {
+        if (local + this.approvalJobs().reduce((n, jobs) => n + jobs.count(target), 0) > 1 && !/^!(?:approve|deny|answer)\s+[a-f0-9]{12}(?:\s|$)/.test(prompt)) {
           await reply('More than one confirmation is pending. Specify the ID from the request you want to answer.'); return;
         }
-        const answer = await o.publications.answer(target, prompt);
-        if (answer !== undefined) { await reply(answer); return; }
+        for (const jobs of this.approvalJobs()) {
+          const answer = await jobs.answer(target, prompt);
+          if (answer !== undefined) { await reply(answer); return; }
+        }
       }
       if (!current || current.key !== key || current.sender !== event.sender) { await reply('No pending confirmation in this conversation.'); return; }
       await this.authorize(room, current);
@@ -386,7 +396,7 @@ export class Bridge {
       const task = !current ? 'Idle' : current.key !== key ? 'Busy in another conversation'
         : current.controller.signal.aborted ? 'Cancelling' : current.running ? 'Running' : 'Preparing or delivering';
       const publicationTarget = this.publicationTarget(room, event, backendKey);
-      const publicationStatus = publicationTarget ? o.publications?.summary(publicationTarget) ?? '' : '';
+      const publicationStatus = publicationTarget ? this.approvalJobs().map(jobs => jobs.summary(publicationTarget)).join('') : '';
       const queued = current?.key === key ? `\nQueued follow-ups: ${current.followups.length}. Pending updates: ${current.buffered}.` : '';
       await this.reply(room, event, o.status(backendKey) + `\n\n**Task:** ${task}${queued}`
         + (o.linkedSession ? `\nMessages queued across linked rooms: ${o.state.queued(o.botId)}.` : '') + (o.journal?.summary(key) ?? '') + publicationStatus, true);
@@ -402,7 +412,7 @@ export class Bridge {
     }
     if (verb === 'cancel') {
       const target = this.publicationTarget(room, event, backendKey);
-      const cancelledPublication = target ? o.publications?.cancel(target) : false;
+      const cancelledPublication = target ? this.approvalJobs().map(jobs => jobs.cancel(target)).some(Boolean) : false;
       if (this.restartNotice?.key === key) this.restartNotice = undefined;
       const relation = event.content?.['m.relates_to'];
       const thread = relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null;
@@ -412,7 +422,7 @@ export class Bridge {
         this.active.cancelled = true;
         this.active.controller.abort();
         await reply('Cancellation requested. Changes already made are retained.');
-      } else await reply(cancelledPublication ? 'Publication cancellation requested. A push already started may have completed; check the destination.' : removed || saved ? `Cancelled ${Math.max(removed, saved)} unfinished message(s) in this conversation.` : 'No active task in your conversation.');
+      } else await reply(cancelledPublication ? 'Operation cancellation requested. Effects already started may have completed; inspect their saved results.' : removed || saved ? `Cancelled ${Math.max(removed, saved)} unfinished message(s) in this conversation.` : 'No active task in your conversation.');
       return;
     }
     if (!prompt || prompt.length > 16_000) { await this.reply(room, event, 'Supply a prompt of 1–16,000 characters.\n' + help(o.kind), true); return; }
@@ -446,7 +456,7 @@ export class Bridge {
       if (o.recoverMessages) o.state.cancelMessages(o.botId, room, event.sender,
         relation?.rel_type === 'm.thread' ? relation.event_id ?? null : null);
       const target = this.publicationTarget(room, event, backendKey);
-      if (target) o.publications?.cancel(target);
+      if (target) for (const jobs of this.approvalJobs()) jobs.cancel(target);
       o.state.reset(key); await reply('Your conversation state has been reset.'); return;
     }
     const controller = new AbortController();
@@ -527,21 +537,50 @@ export class Bridge {
           }
           finally { current.publication = false; }
         } : undefined;
+        const receipts = o.receipts ? async (kind: 'attachments' | 'rooms') => {
+          turnLifetime.signal.throwIfAborted();
+          await this.authorize(room, current);
+          turnLifetime.signal.throwIfAborted();
+          const target = this.publicationTarget(room, requestEvent, backendKey);
+          if (!target) throw new PublicError('The agent session is not ready for persistent delivery.');
+          return o.receipts!.scoped(target, kind);
+        } : undefined;
         const messages = o.roomMessages && roomMessageDelivery((request, signal) =>
-          o.roomMessages!(request, { room, event: requestEvent, key: backendKey, sent }, signal));
+          o.roomMessages!(request, { room, event: requestEvent, key: backendKey, sent }, signal), receipts ? () => receipts('rooms') : undefined, o.maxMediaBytes);
         const hooks: BackendHooks = {
+          deliveryReceipts: receipts ? () => receipts('attachments') : undefined,
           detached: o.detached ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
             signal.throwIfAborted();
             await this.authorize(room, current);
             signal.throwIfAborted();
+            const request = input as { action?: string; id?: string } | undefined;
+            if (o.detachedJobs && ['start', 'close', 'approval_status'].includes(request?.action ?? '')) {
+              const target = this.publicationTarget(room, requestEvent, backendKey);
+              if (!target) throw new PublicError('The agent session is not ready.');
+              if (request?.action === 'approval_status') {
+                if (Object.keys(request).some(k => !['action', 'id'].includes(k))) throw new PublicError('Use only action and optional id.');
+                return o.detachedJobs.status(target, request.id);
+              }
+              return o.detachedJobs.start(input, target, signal);
+            }
             return o.detached!(input, { room, event: requestEvent, key: backendKey }, signal, interact, () => this.authorize(room, current));
           } : undefined,
-          confirmation: o.requestConfirmation ? async (input, callSignal) => {
+          confirmation: o.requestConfirmation || o.confirmationJobs ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
             signal.throwIfAborted();
             await this.authorize(room, current);
             signal.throwIfAborted();
+            if (o.confirmationJobs) {
+              const target = this.publicationTarget(room, requestEvent, backendKey);
+              if (!target) throw new PublicError('The agent session is not ready.');
+              const request = input as { action?: string; id?: string } | undefined;
+              if (request?.action === 'status') {
+                if (Object.keys(request).some(k => !['action', 'id'].includes(k))) throw new PublicError('Use only action and optional id.');
+                return o.confirmationJobs.status(target, request.id);
+              }
+              return o.confirmationJobs.start(input, target, signal);
+            }
             return o.requestConfirmation!(input, signal, interact);
           } : undefined,
           compaction: o.compaction ? async phase => {
@@ -625,7 +664,17 @@ export class Bridge {
         const sendFiles = async () => {
           if (!files.length) return;
           if (!o.sendAttachments) throw new PublicError('Attachment sending is not configured.');
-          await this.deliver(room, () => o.sendAttachments!(room, responseEvent, files, controller.signal, sentHere));
+          const send = (batch: OutgoingAttachment[], signal: AbortSignal) => this.deliver(room, () => o.sendAttachments!(room, responseEvent, batch, signal, sentHere));
+          const target = this.publicationTarget(room, responseEvent, backendKey);
+          if (o.receipts && target && responseEvent.event_id) {
+            const id = 'final-' + createHash('sha256').update(responseEvent.event_id).digest('hex');
+            const delivery = attachmentDelivery(files[0].root, o.maxMediaBytes ?? 512 * 1024 * 1024, send, async () => {
+              await this.authorize(room, current);
+              return o.receipts!.scoped(target, 'attachments');
+            });
+            const receipt = JSON.parse(await delivery.action({ id, files: files.map(file => ({ path: relative(files[0].root, file.path), ...(file.name && { name: file.name }) })) }, controller.signal));
+            if (!receipt.files?.every((file: {status: string}) => file.status === 'sent')) throw new PublicError(`Final attachment delivery ${id} is incomplete or uncertain. Inspect its saved receipt before retrying.`);
+          } else await send(files, controller.signal);
         };
         // A peer-started turn, or any turn in a shared room, may decline to
         // answer: the text is dropped, attachments are still sent. Commands
@@ -710,13 +759,15 @@ export class Bridge {
     }
     if (!this.stopped && !o.isStopping?.() && event.sender && o.isAuthorized(event.sender) && event.event_id &&
       Number.isFinite(event.origin_server_ts) && event.origin_server_ts! >= o.since && relation?.rel_type === 'm.annotation' &&
-      relation.event_id && ['✅', '❌', '✅\uFE0F', '❌\uFE0F'].includes(relation.key || '') && o.publications) {
-      const answer = await o.publications.react(room, event.sender, relation.event_id, relation.key!,
+      relation.event_id && ['✅', '❌', '✅\uFE0F', '❌\uFE0F'].includes(relation.key || '') && this.approvalJobs().length) {
+      for (const jobs of this.approvalJobs()) {
+      const answer = await jobs.react(room, event.sender, relation.event_id, relation.key!,
         () => o.state.claim(JSON.stringify([o.botId, event.event_id])));
       if (answer) {
         const responseEvent: MatrixEvent = { sender: answer.target.sender, content: answer.target.thread
           ? { 'm.relates_to': { rel_type: 'm.thread', event_id: answer.target.thread } } : {} };
         await this.reply(room, responseEvent, answer.text); return;
+      }
       }
     }
     if (this.stopped || o.isStopping?.() || !current || current.failed || current.room !== room || current.sender !== event.sender ||
@@ -730,6 +781,8 @@ export class Bridge {
     const answer = current.interactions.react(relation.event_id, relation.key!);
     if (answer) await this.reply(room, current.event, answer);
   }
+
+  private approvalJobs(): ApprovalJobs[] { return [this.options.publications, this.options.confirmationJobs, this.options.detachedJobs].filter((j): j is ApprovalJobs => !!j); }
 
   private publicationTarget(room: string, event: MatrixEvent, key: string): BackgroundTarget | undefined {
     const kind = this.options.kind;

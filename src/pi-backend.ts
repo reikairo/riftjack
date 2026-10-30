@@ -73,7 +73,7 @@ export function createPiBackend(configuration: Config | (() => Config), state: S
         await add(PUBLISH_SERVER, startPublishMcp(publish, turnSignal));
       }
       if (hooks?.sendAttachments) {
-        delivery = attachmentDelivery(outbox, config.maxMediaBytes, hooks.sendAttachments);
+        delivery = attachmentDelivery(outbox, config.maxMediaBytes, hooks.sendAttachments, hooks.deliveryReceipts);
         await add(ATTACHMENT_SERVER, startAttachmentMcp(delivery.action, turnSignal));
       }
       instructions += mediaInstructions(outbox, config.maxMediaBytes, !!hooks?.sendAttachments);

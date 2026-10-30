@@ -43,7 +43,7 @@ test('command approvals render literal input, headings and compact controls in M
     assert.match(html, /<h3>Confirmation <code>[a-f0-9]{12}<\/code><\/h3>/);
     assert.match(html, /<strong>Command:<\/strong>/);
     assert.match(html, /<p><code>echo/);
-    assert.doesNotMatch(html, /<pre><code class="language-riftjack-command">/);
+    assert.doesNotMatch(html, /<pre>/);
     assert.doesNotMatch(html, /<script>|<img|<a |<strong>text|<strong>literal/);
     assert.ok(plain.includes(command));
     assert.ok(plain.includes(cwd));
@@ -194,7 +194,7 @@ test('wrapped commands preserve long arguments, blank lines and whitespace acros
   for (const part of parts) assert.ok(Buffer.byteLength(JSON.stringify(part)) <= 36_000);
 });
 
-test('only designated confirmation commands wrap; other code and ordinary replies retain blocks', async () => {
+test('all literal confirmation fields wrap; ordinary replies retain code blocks', async () => {
   const command = 'echo "a  b"\n\n  echo done';
   const details = confirmationDetails([
     { label: 'Command', value: command, code: 'command' },
@@ -202,8 +202,26 @@ test('only designated confirmation commands wrap; other code and ordinary replie
   ]);
   const { html, plain } = await deliver({ ...details, approve: {}, deny: {} });
   assert.match(html, /<p><code>echo &quot;a  b&quot;<br><br>  echo done<\/code><\/p>/);
-  assert.match(html, /<pre><code class="language-text">- old\n\+ new/);
+  assert.match(html, /<p><code>- old<br>\+ new<\/code><\/p>/);
+  assert.doesNotMatch(html, /<pre>/);
   assert.ok(plain.includes(command));
   const ordinary = replyContent(details.markdown, true, false).map(p => p.formatted_body).join('');
   assert.match(ordinary, /<pre><code class="language-riftjack-command">/);
+});
+
+
+test('publication paths, destinations and complete hashes remain literal without scrollable blocks', async () => {
+  const values = [
+    ['Working directory', '/projects/' + 'long-directory/'.repeat(30) + '<workspace>&`'],
+    ['Repository', '/projects/' + 'repository/'.repeat(30)],
+    ['Destination', 'git@example.com:team/project.git refs/heads/' + 'branch-'.repeat(40)],
+    ['Publish HEAD', '0123456789abcdef'.repeat(3)],
+    ['Report SHA-256', 'abcdef0123456789'.repeat(4)],
+    ['Permissions', '{"paths":["<literal>&`"],"network":false}'],
+  ];
+  const details = confirmationDetails(values.map(([label, value]) => ({ label, value, code: true })));
+  const { html, plain } = await deliver({ ...details, approve: { exact: values }, deny: {} });
+  assert.doesNotMatch(html, /<pre>|<literal>|<workspace>/);
+  for (const [, value] of values) assert.ok(plain.includes(value));
+  assert.match(html, /&lt;workspace&gt;&amp;`/);
 });

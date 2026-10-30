@@ -30,23 +30,60 @@ Tests cover delayed approval after MCP closure with a real local Git remote,
 background resumption, scope isolation, restart, cancellation and delivery retry.
 This does not constitute a live Matrix restart test.
 
-## Other tool paths
+## Proposal and run approvals
 
-The following source audit identifies follow-up work. It does not change the
-listed tools' behavior.
+`request_confirmation` and the `start`/`close` actions of `run_detached` use the
+same connector-owned [approval job](../src/approval-jobs.ts) lifecycle. They return
+an operation receipt immediately and deliver a saved result in a background turn.
+The stores are independent of model turns. `!cancel`, reset, revoked access and
+the operation deadline cancel them; unanswered confirmations expire on connector
+restart. A completed decision remains queryable without asking the human again.
 
-| Path | What survives the turn | Remaining limitation or next step |
-| --- | --- | --- |
-| [`request_confirmation`](../src/confirmation-mcp.ts) | No pending question or decision survives. The tool explicitly expires it at turn completion. | A model that finishes while waiting cannot receive a later decision. A connector-owned question with a saved decision notification would address this; a later answer must not revive an expired executable approval. |
-| [`run_detached`](../src/detached-runs.ts), approval stage | The pending confirmation is turn-bound. The run is only saved after approval. | This has the same gap before admission. A durable request could notify the agent that a launch is prepared. The agent must still execute the returned command through the normal sandbox; the connector must not silently launch it. |
-| `run_detached`, after preparation or launch | Saved run records, independent supervision and durable completion notifications survive the model turn. | A prepared but unlaunched run expires. A lost supervisor requires process inspection, not automatic relaunch. |
-| [`send_attachments`](../src/attachment-delivery.ts) and [`room_messages`](../src/room-messages.ts) | An external message may already have been sent, but attempt receipts are kept in a turn-local map. | A disconnect can lose the receipt while retaining the effect. Persistent scoped delivery receipts could distinguish sent, not sent and uncertain across turns. Automatically retrying uncertain sends can create duplicates. |
-| [`background_tasks`](../src/background-tasks.ts) | Saved watches and timers, notification attempts and restart recovery survive admission. | Losing the registration response does not cancel the saved watch. Inspect the list before registering a duplicate. |
-| [`executor-queue`](../src/executor-queue.ts) | Saved execution states and completion notifications survive submission. | Uncertain execution must be inspected; it is not a license to replay the command. |
-| [`github_subscriptions`](../src/github-subscriptions.ts) | Saved subscriptions and their notification path survive registration. | A lost registration receipt can be resolved by listing subscriptions. |
-| Backend shell and sandbox approvals | Approval belongs to the current backend request. | This boundary is intentional. A new turn must not execute an old approved command merely because the previous request disappeared. |
-| Read-only tools | Their connection and pending response are turn-bound. | Cancellation may waste work, but does not create an approved external mutation. They do not all need durable jobs. |
+Use `request_confirmation` with `action=status` and the request ID, or
+`run_detached` with `action=approval_status` and the operation ID, to retrieve full
+results. Both accept an omitted ID to list the twenty most recent records in the
+same room, sender, thread, conversation and session. Long notification previews
+are marked truncated and refer to these queries. Saved approval histories are
+bounded, like publication histories; they are not unlimited audit archives.
 
-The most direct follow-up is durable general questions, followed by the approval
-stage of detached runs. Message-delivery receipts are a separate problem: preserve
-evidence of an external effect before considering retries.
+A prepared detached launch is still **not running**. The agent must invoke its
+saved `launch_argv` through the ordinary command tool and sandbox approval before
+`launch_by`. Dependencies and cwd remain live; selected script snapshots are
+captured before review. No connector background job executes the launch. If the
+result is delivered after the five-minute launch window, inspect status instead
+of running an expired command.
+
+## Delivery receipts
+
+[`DeliveryReceipts`](../src/delivery-receipts.ts) stores scoped IDs and content
+fingerprints before invoking message/file transports. Success is saved after the
+transport acknowledgement. A crash or lost response can leave `uncertain`; it
+never causes replay. An identical repeated ID returns the saved receipt, while
+changed text, destination or file content is rejected. File fingerprints cover
+relative paths, display names and byte hashes, not a transient outbox root.
+
+`send_attachments` accepts `id` with `files`. It and `room_messages` expose
+`action=status` with an optional ID. Queries recheck authorization and privacy;
+receipts are also isolated by tool, bot, source room, sender, thread, key and
+session. Final-manifest attachments use the same ledger and stable event-derived
+IDs. Normal sends do not start additional model turns. The ledger retains at most
+1,000 receipts per bot without silently evicting deduplication IDs; an operator
+must archive history before admitting more sends. An archive does not authorize
+replaying uncertain sends or reusing old IDs.
+
+## Boundaries retained intentionally
+
+| Path | Recovery behavior |
+| --- | --- |
+| `run_detached`, after preparation or launch | Saved run records, independent supervision and durable completion notifications survive. A prepared launch expires; a lost supervisor requires process inspection, not relaunch. |
+| [`background_tasks`](../src/background-tasks.ts) | Watches, timers, notification attempts and restart recovery survive admission. Inspect the list after a lost registration response. |
+| [`executor-queue`](../src/executor-queue.ts) | Saved states and completion notifications survive submission. Uncertain execution is not replayed. |
+| [`github_subscriptions`](../src/github-subscriptions.ts) | Saved subscriptions and notifications survive registration. Inspect the list before duplicating registration. |
+| Backend shell and sandbox approvals | Approval belongs to the current backend request. A new turn must not execute an old approved command merely because the previous request disappeared. |
+| Read-only tools | Cancellation may waste work but does not create an approved external mutation. They remain turn-bound. |
+
+Regression tests exercise delayed decisions after HTTP closure, full proposal
+retrieval, restart expiry, prepared launches without execution, lost send results,
+scope isolation, changed file content and receipt retrieval through a new MCP
+connection. This is not a claim of exactly-once effects or a live Matrix restart
+test.

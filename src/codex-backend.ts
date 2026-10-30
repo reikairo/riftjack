@@ -105,7 +105,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
           await progress;
           callSignal.throwIfAborted();
           return hooks.sendAttachments!(files, callSignal);
-        });
+        }, hooks.deliveryReceipts);
         media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
       }
       signal.throwIfAborted();

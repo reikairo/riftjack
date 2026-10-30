@@ -210,7 +210,7 @@ Riftjack gives every built-in Codex and Claude agent instructions to assess pers
 
 The saved prefix permits future matching commands to run outside the sandbox without prompting; it is not just permission to open local ports. Prefixes are not restricted to the displayed working directory and can affect other sessions or bots using the same Codex configuration. Codex manages persistence and applies its remaining policy restrictions; Riftjack does not edit rule files itself. Rules normally live under `~/.codex/rules/`; inspect or remove the saved entry there to revoke it, then restart the affected Codex processes. See [Codex rules](https://developers.openai.com/codex/rules/). The Matrix acknowledgement only confirms that the decision was sent, not that Codex saved the rule or the command succeeded.
 
-Answers become actionable only after the complete request has been delivered. Early commands are rejected and must be sent again; they are never queued as consent. Answers are accepted only from the original authorized sender in the same bot, room and Matrix thread. Reply quotations from Matrix clients are stripped before parsing commands. Attachment captions, edited events, notices and duplicate events cannot act as answers. Access and encrypted DM membership are rechecked before delivery and acceptance. Ordinary tool-confirmation IDs expire on cancellation, task timeout, turn completion, server withdrawal, disconnect or restart; publication operations instead survive model turn completion and MCP disconnect, as described below. For ordinary confirmations, late/duplicate answers never start another model turn. The total task timeout defaults to 24 hours (`TASK_TIMEOUT_SECONDS=86400`, configurable from 1 to 86400 seconds) and includes time spent waiting for confirmation, with at most ten pending requests. Timeout and cancellation messages identify which condition stopped the task. Full request details must fit in 40,000 characters; an oversized request is declined rather than approved from a truncated preview. Missing command/diff details disable approval.
+Answers become actionable only after the complete request has been delivered. Early commands are rejected and must be sent again; they are never queued as consent. Answers are accepted only from the original authorized sender in the same bot, room and Matrix thread. Reply quotations from Matrix clients are stripped before parsing commands. Attachment captions, edited events, notices and duplicate events cannot act as answers. Access and encrypted DM membership are rechecked before delivery and acceptance. Ordinary tool-confirmation IDs expire on cancellation, task timeout, turn completion, server withdrawal, disconnect or restart; connector-owned publication, proposal and detached-run approval operations instead survive model turn completion and MCP disconnect, as described below. For ordinary confirmations, late/duplicate answers never start another model turn. The total task timeout defaults to 24 hours (`TASK_TIMEOUT_SECONDS=86400`, configurable from 1 to 86400 seconds) and includes time spent waiting for confirmation, with at most ten pending requests. Timeout and cancellation messages identify which condition stopped the task. Full request details must fit in 40,000 characters; an oversized request is declined rather than approved from a truncated preview. Missing command/diff details disable approval.
 
 MCP URL requests provide a link to complete in a browser; approving one acknowledges the step but is not proof of authentication. Secret questions, user-verification challenges, nonstandard OpenAI forms and unknown request types are not approved. Claude tool-permission requests use a separate adapter; see [Claude Code](claude.md#permissions).
 
@@ -252,7 +252,7 @@ on Matrix retaining accessible history and the bot retaining decryption keys. Ta
 
 Coding bots also forward user-facing progress messages while a task runs. Codex sends completed `commentary` messages; Claude sends assistant text preceding tool use or a later assistant response. Thinking blocks and tool internals are not forwarded, and the final response is sent separately.
 
-Coding bots render Markdown replies as sanitized Matrix HTML (`format: org.matrix.custom.html` and `formatted_body`), with a readable plain-text fallback. Element X can display emphasis, links, lists and code blocks without showing Markdown delimiters. Tables use monospace blocks. Long replies retain balanced formatting across chunks. Raw HTML is displayed literally, and Markdown images become links; file delivery still uses encrypted attachments. Manager replies also use native formatting: bot lists have bold names and code-formatted IDs and folders; help has headings and commands; profile and access updates highlight their outcome. User-supplied names and paths remain literal. Confirmations use headings and highlighted field labels. Commands use inline code so long lines can wrap within the message instead of opening a horizontally scrolling block. Explicit command line breaks and the complete literal plain-text fallback are retained. Paths and changes remain in code blocks. Their short footer lists reactions and commands; IDs are optional when exactly one request is pending. Long confirmation details are split without truncation, and both commands and reactions become actionable only after the entire request is delivered. Operational errors and most coding-bot command responses stay plain text; help, status and usage use formatted replies.
+Coding bots render Markdown replies as sanitized Matrix HTML (`format: org.matrix.custom.html` and `formatted_body`), with a readable plain-text fallback. Element X can display emphasis, links, lists and code blocks without showing Markdown delimiters. Tables use monospace blocks. Long replies retain balanced formatting across chunks. Raw HTML is displayed literally, and Markdown images become links; file delivery still uses encrypted attachments. Manager replies also use native formatting: bot lists have bold names and code-formatted IDs and folders; help has headings and commands; profile and access updates highlight their outcome. User-supplied names and paths remain literal. Confirmations use headings and highlighted field labels. Literal fields, including commands, working directories, repository destinations, commit hashes, permissions and changes, use inline code so long lines can wrap within the message instead of opening separate horizontally scrolling blocks. Explicit line breaks and the complete literal plain-text fallback are retained. Ordinary code blocks outside confirmations are unchanged. Their short footer lists reactions and commands; IDs are optional when exactly one request is pending. Long confirmation details are split without truncation, and both commands and reactions become actionable only after the entire request is delivered. Operational errors and most coding-bot command responses stay plain text; help, status and usage use formatted replies.
 
 ## Bot status
 
@@ -281,6 +281,27 @@ belong to the current run; separately executed follow-ups get their own entries.
 This is a bounded operational record, not a durable tool-call audit or an
 exactly-once guarantee for external actions. Invalid journal state stops bot
 startup rather than silently discarding recovery evidence.
+
+## Saved proposal decisions
+
+`request_confirmation` records a concrete proposal for approval or decline. It
+returns a `request_id` and `preparing` immediately; that receipt is not consent.
+The connector owns the question independently of the submitting turn and sends
+the saved result in a background turn. Only `approved` establishes consent for
+the exact proposal. It does not execute anything, grant sandbox permissions or
+replace publication approval.
+
+Use `{"action":"status","id":"<request_id>"}` to retrieve the full proposal and
+result, including details too long for the background notification. Omitting `id`
+lists the twenty most recent records of this conversation and session. The response
+window is 1–3600 seconds (default 600), measured from admission. Explicit cancel,
+reset or revocation stops the question; connector restart expires unanswered
+questions without replaying an action. Completed decisions remain inspectable.
+An expired or interrupted question is neither consent nor a human refusal.
+
+`!status` shows recent approval operations even when the bot is idle. When more
+than one confirmation is pending, specify the confirmation ID from its message;
+an operation ID identifies saved results and is not a confirmation ID.
 
 ## Reviewed publication
 
@@ -384,11 +405,27 @@ Coding bots accept encrypted Matrix image, file, and audio attachments, includin
 
 Ask a coding bot naturally to send an image, document, or audio file, for example “Send me the report as a PDF” or “Send the WAV file you created.” Each turn provides the agent with a separate outbox and instructions for explicitly attaching its results. The connector sends pictures as `m.image`, supported audio formats (MP3, WAV, OGG/Opus, M4A, AAC, FLAC, WEBA) as `m.audio`, and other formats as `m.file`. SVG is delivered as a file. Ordinary Markdown links and paths in a response do not upload files.
 
-Codex and Claude can send files as soon as they are ready, then continue working. For example, ask for three images and have each delivered as it is generated. The `send_attachments` MCP tool takes `{"files":[{"path":"preview.png","name":"preview.png"}]}` with paths relative to the conversation's outbox; the display name is optional. It always delivers to the room and thread that started the current turn, including in linked conversations. It cannot select another recipient. No extra confirmation is required for this connector tool.
+Codex and Claude can send files as soon as they are ready, then continue working. For example, ask for three images and have each delivered as it is generated. The `send_attachments` MCP tool takes `{"id":"preview-1","files":[{"path":"preview.png","name":"preview.png"}]}` with paths relative to the conversation's outbox; the display name is optional. It always delivers to the room and thread that started the current turn, including in linked conversations. It cannot select another recipient. No extra confirmation is required for this connector tool.
 
-The tool returns a status for each file: `sent` means the Matrix send completed, `uncertain` means delivery was attempted but not confirmed, and `not_sent` means the batch stopped before that file was attempted. These statuses do not indicate whether the person has read or downloaded the file. A repeated path returns its previous status without another upload in the same turn, even if its contents or display name changed. Files already attempted by the tool are also excluded from the final reply's attachment manifest. Use a new filename for a new version. After an uncertain result, inspect the conversation before requesting another delivery; a new turn has no record of the previous turn's receipts.
+The tool returns a status for each file: `sent` means the Matrix send completed, `uncertain` means delivery was attempted but not confirmed, and `not_sent` means the batch stopped before that file was attempted. These statuses do not indicate whether the person has read or downloaded the file. An unchanged repeated path returns its previous status without another upload in the same turn. Changed bytes or display names under an attempted path are rejected; use a new path and delivery ID for a new version. Files already attempted by the tool are also excluded from the final reply's attachment manifest. Use a new filename for a new version. Receipts persist across turns and restarts. `{"action":"status","id":"preview-1"}` retrieves a receipt; omitting `id` lists the twenty most recent records. Reusing an ID with identical file content returns its saved result; different content is rejected. After an uncertain result, inspect the conversation before requesting another delivery. A new ID is not permission to repeat an uncertain send.
 
-The tool uses a private, authenticated local connection for each turn, closes when the turn ends, and rechecks access and room privacy during delivery. Both engines also retain the final-response attachment manifest for files not yet sent. Tool setup does not change global CLI configuration.
+The tool uses a private, authenticated local connection for each turn, closes when the turn ends, and rechecks access and room privacy during delivery. Both engines also retain the final-response attachment manifest for files not yet sent. Final-manifest sends also retain receipts, using an ID derived from the originating event; they appear in the same status history. Tool setup does not change global CLI configuration.
+
+Linked-room `room_messages` sends use the same persistent receipt model with their
+existing explicit IDs. `action=status` reads a receipt or the recent history.
+File fingerprints include relative paths, display names and bytes, so recreating
+the same file in a later outbox does not send it twice. Receipt access is isolated
+by bot, source room, sender, Matrix thread, conversation key, session and tool;
+access and room privacy are checked before reading receipts. Resetting a session
+does not authorize replaying its effects.
+
+The connector saves uncertainty before entering the transport and records success
+only after its acknowledgement. A crash between those steps retains uncertainty,
+never an instruction to resend. Normal sends do not generate extra agent turns;
+inspect saved receipts after a lost response. Each bot retains up to 1,000 receipts
+without automatically evicting IDs. At the limit, new sends are refused until the
+operator archives the history. Archiving removes deduplication for those IDs, so
+inspect uncertain effects first and do not reuse archived IDs.
 
 File contents are encrypted before upload. The filename, MIME type, size, and decryption key are delivered inside the encrypted room message. Incoming attachments must also use file encryption and pass integrity verification. Attachments preserve Matrix threads without quoting the incoming message. Access and room membership are checked again before delivery; cancellation stops pending downloads and prevents delivery after an upload completes.
 

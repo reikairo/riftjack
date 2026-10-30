@@ -153,7 +153,12 @@ environment overrides, and a timeout (up to seven days). The human confirms that
 the task may outlive the turn and connector. Never put secrets in arguments or
 environment overrides: the review and saved command contain their literal values.
 
-The tool returns **prepared**, not running. The agent invokes the returned
+`start` and `close` return an **operation_id** while a connector-owned confirmation
+waits independently of the model turn. Its saved result arrives in a background
+turn. `approval_status` with `id=operation_id` retrieves the full result; omit the
+ID to list recent operations. Connector restart expires unanswered approvals
+without replaying them. After an approved start, the result is **prepared**, not
+running. The agent invokes the returned
 `launch_argv` once through its normal command tool within five minutes. This keeps
 the command tool's sandbox and approval checks; the MCP server does not execute
 arbitrary commands on the connector host. The launch may still need the ordinary
