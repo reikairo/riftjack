@@ -127,3 +127,10 @@ to send one diagnostic notice through the background inbox. A full inbox retains
 the pending change for retry; it can prevent delivery of the diagnostic itself.
 The interval is a minimum delay after a poll, not a delivery deadline: API limits,
 large PRs, outages and a busy agent can delay processing.
+
+Polling failures are isolated per PR. A failed PR retains its last complete
+snapshot and backs off independently; other PRs still produce updates. `list`
+includes `per_pr` with each PR's last success, error and next poll. The subscription's
+`last_success` advances only when no PR has an outstanding polling error.
+A review-body edit also counts as a review change; notifications contain links,
+not the review text. Initial registration still requires a complete baseline.

@@ -456,3 +456,40 @@ for (const [status, hint] of [[401, /Authentication was rejected/], [403, /Acces
     });
   });
 }
+
+test('one failing PR retains its baseline while another updates, including across restart', async t => {
+  const f = fixture(t); let broken = false, revision = 0;
+  const read: GitHubRead = async (endpoint, s) => {
+    if (/\/pulls\/2$/.test(endpoint)) {
+      if (broken) throw new Error('PR two unavailable');
+      return { ...structuredClone(f.state.pr), head: { sha: String(revision + 1).repeat(40) } };
+    }
+    return f.read(endpoint, s);
+  };
+  let manager = new GitHubSubscriptions(f.path, f.policy, f.queue, read);
+  await manager.action({ ...selection, pull_requests: [1, 2], events: ['pull_request'] }, target, signal());
+  const second = f.stored().snapshot['2:pr'];
+  broken = true; f.state.pr.draft = true;
+  t.mock.timers.tick(61_000); await manager.pump(() => true, signal());
+  assert.equal(f.notices().length, 1);
+  assert.match(f.notices()[0].message, /"pr":1/);
+  assert.deepEqual(f.stored().snapshot['2:pr'], second);
+  assert.ok(f.stored().pr_status['2'].last_error);
+  assert.ok(f.stored().pr_status['1'].last_success);
+  manager = new GitHubSubscriptions(f.path, f.policy, f.queue, read);
+  broken = false; revision++;
+  t.mock.timers.tick(121_000); await manager.pump(() => true, signal());
+  assert.equal(f.notices().length, 2);
+  assert.notDeepEqual(f.stored().snapshot['2:pr'], second);
+  assert.equal(f.stored().last_error, undefined);
+  assert.equal(f.stored().pr_status['2'].failures, 0);
+});
+
+test('editing review text is observable without copying its body into a notification', async t => {
+  const f = fixture(t); await f.subscriptions.action(selection, target, signal());
+  Object.assign(f.state.reviews[0], { body: 'Changed review body, kept private in this test' });
+  t.mock.timers.tick(61_000); await f.subscriptions.pump(() => true, signal());
+  assert.equal(f.notices().length, 1);
+  assert.match(f.notices()[0].message, /"event":"reviews"/);
+  assert.doesNotMatch(f.notices()[0].message, /Changed review body/);
+});

@@ -121,6 +121,7 @@ type Entry = { kind: EventKind; pr: number; sha: string; url: string; value: str
 type Snapshot = Record<string, Entry>;
 type Subscription = BackgroundTarget & { id: string; repository: string; pull_requests: number[]; events: EventKind[];
   interval_seconds: number; state: 'active' | 'cancelled'; next: number; failures: number; last_error?: string; last_success?: string;
+  pr_status?: Record<string, { next: number; failures: number; last_success?: string; last_error?: string }>;
   snapshot: Snapshot; pending?: { id: string; message: string } };
 const same = (a: BackgroundTarget, b: BackgroundTarget) => a.key === b.key && a.session === b.session && a.room === b.room && a.sender === b.sender && a.thread === b.thread;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -136,6 +137,7 @@ export class GitHubSubscriptions {
       !record(s) || !['id', 'room', 'sender', 'key', 'session'].every(k => typeof s[k] === 'string' && s[k].length > 0 && s[k].length <= 4096) ||
       (s.thread !== undefined && typeof s.thread !== 'string') || !this.validSelection(s) ||
       !['active', 'cancelled'].includes(s.state) || !Number.isFinite(s.next) || !Number.isSafeInteger(s.failures) || s.failures < 0 ||
+      (s.pr_status !== undefined && (!record(s.pr_status) || Object.entries(s.pr_status).some(([pr, status]: [string, any]) => !s.pull_requests.includes(Number(pr)) || !record(status) || !Number.isFinite(status.next) || !Number.isSafeInteger(status.failures) || status.failures < 0 || (status.last_error !== undefined && typeof status.last_error !== 'string')))) ||
       !record(s.snapshot) || Object.keys(s.snapshot).length > 25000 || Object.values(s.snapshot).some((e: any) => !record(e) || !events.includes(e.kind) || !Number.isSafeInteger(e.pr) ||
         typeof e.sha !== 'string' || typeof e.url !== 'string' || typeof e.value !== 'string') ||
       (s.pending !== undefined && (!record(s.pending) || typeof s.pending.id !== 'string' || typeof s.pending.message !== 'string' || s.pending.message.length > 4000)))) {
@@ -156,7 +158,8 @@ export class GitHubSubscriptions {
   }
   private describe(s: Subscription) {
     return { id: s.id, repository: s.repository, pull_requests: s.pull_requests, events: s.events, interval_seconds: s.interval_seconds,
-      state: s.state, room: s.room, next_poll: new Date(s.next).toISOString(), last_success: s.last_success, last_error: s.last_error, delivery_pending: !!s.pending };
+      state: s.state, room: s.room, next_poll: new Date(s.next).toISOString(), last_success: s.last_success, last_error: s.last_error, delivery_pending: !!s.pending,
+      per_pr: s.pull_requests.map(pr => ({ pr, ...s.pr_status?.[pr], next_poll: s.pr_status?.[pr] ? new Date(s.pr_status[pr].next).toISOString() : undefined })) };
   }
   async action(input: unknown, target: BackgroundTarget, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted();
@@ -225,7 +228,29 @@ export class GitHubSubscriptions {
     }
     throw new PublicError('GitHub result exceeds the polling limit; narrow the subscription.');
   }
-  private async capture(s: Subscription, signal: AbortSignal): Promise<Snapshot> {
+  private async capture(s: Subscription, signal: AbortSignal, isolated = false): Promise<Snapshot> {
+    if (isolated) {
+      const snapshot: Snapshot = {};
+      s.pr_status ??= {};
+      for (const number of s.pull_requests) {
+        const previous = Object.fromEntries(Object.entries(s.snapshot).filter(([, e]) => e.pr === number));
+        const status = s.pr_status[number] ?? { next: 0, failures: 0 };
+        if (status.next > Date.now()) { Object.assign(snapshot, previous); continue; }
+        try {
+          Object.assign(snapshot, await this.capture({ ...s, pull_requests: [number] }, signal));
+          s.pr_status[number] = { failures: 0, last_success: new Date().toISOString(), next: Date.now() + s.interval_seconds * 1000 };
+        } catch (error) {
+          signal.throwIfAborted();
+          Object.assign(snapshot, previous);
+          status.failures = Math.min(status.failures + 1, 10);
+          status.last_error = errorMessage(error, 'GitHub PR polling failed');
+          status.next = Date.now() + Math.min(3_600_000, s.interval_seconds * 1000 * 2 ** status.failures);
+          s.pr_status[number] = status;
+        }
+      }
+      if (Object.keys(snapshot).length > 25000) throw new PublicError('GitHub snapshot exceeds the limit; narrow the subscription.');
+      return snapshot;
+    }
     const snapshot: Snapshot = {};
     for (const number of s.pull_requests) {
       const root = 'repos/' + s.repository;
@@ -240,7 +265,7 @@ export class GitHubSubscriptions {
       if (s.events.includes('reviews')) {
         for (const r of await this.pages(root + '/pulls/' + number + '/reviews', signal)) {
           if (!Number.isSafeInteger(r.id) || typeof r.state !== 'string') throw new PublicError('Unexpected GitHub review response.');
-          add('review:' + r.id, 'reviews', { id: r.id, state: r.state, commit: r.commit_id, submitted: r.submitted_at }, url + '#pullrequestreview-' + r.id);
+          add('review:' + r.id, 'reviews', { id: r.id, state: r.state, commit: r.commit_id, submitted: r.submitted_at, body_hash: digest(r.body ?? '') }, url + '#pullrequestreview-' + r.id);
         }
       }
       if (s.events.includes('comments')) {
@@ -305,7 +330,7 @@ export class GitHubSubscriptions {
         if (s.next > Date.now()) continue;
         try {
           if (!s.pending) {
-            const snapshot = await this.capture(s, signal);
+            const snapshot = await this.capture(s, signal, true);
             if (s.state !== 'active' || !valid(s) || signal.aborted) continue;
             const changes = Object.entries(snapshot).filter(([key, e]) => {
               // Old subscriptions have no conflict baseline. Announce an existing
@@ -315,8 +340,13 @@ export class GitHubSubscriptions {
             })
               .sort(([a], [b]) => Number(b.endsWith(':conflict')) - Number(a.endsWith(':conflict')))
               .map(([, e]) => e).filter(e => e.kind !== 'checks' || JSON.parse(e.value).status === 'completed');
-            s.snapshot = snapshot; s.failures = 0; delete s.last_error;
-            s.last_success = new Date().toISOString(); s.next = Date.now() + s.interval_seconds * 1000;
+            s.snapshot = snapshot;
+            const statuses = Object.entries(s.pr_status ?? {});
+            const failed = statuses.filter(([, status]) => status.last_error);
+            s.failures = Math.max(0, ...failed.map(([, status]) => status.failures));
+            if (failed.length) s.last_error = failed.map(([pr, status]) => `PR #${pr}: ${status.last_error}`).join('; ').slice(0, 1200);
+            else { delete s.last_error; s.last_success = new Date().toISOString(); }
+            s.next = Math.min(...statuses.map(([, status]) => status.next));
             if (changes.length) {
               // A bounded summary, never repository-supplied instructions or comment bodies.
               const info = { repository: s.repository, pull_requests: s.pull_requests, count: changes.length, changes: changes.slice(0, 5).map(e => {
@@ -329,6 +359,12 @@ export class GitHubSubscriptions {
             }
             // Transactional outbox: save snapshot and pending event before handing it off.
             this.save();
+            for (const [pr, status] of failed) if (status.failures === 3) {
+              this.background.notify('github-pr-error:' + digest([s.id, pr, status.last_success]), s,
+                'GitHub PR polling has failed three times. Other PRs continue independently. Inspect github_subscriptions list; monitoring for this PR is incomplete.\n' +
+                JSON.stringify({ id: s.id, repository: s.repository, pr: Number(pr), error: status.last_error }),
+                { group: group(s), progress: false }, 'GitHub PR polling failed');
+            }
           }
           if (s.pending && valid(s) && s.state === 'active' && !signal.aborted) {
             this.background.notify(s.pending.id, s, s.pending.message, { group: group(s), progress: false }, 'GitHub PR events');
