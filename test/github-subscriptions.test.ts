@@ -485,6 +485,23 @@ test('one failing PR retains its baseline while another updates, including acros
   assert.equal(f.stored().pr_status['2'].failures, 0);
 });
 
+test('partial success gives repeated state transitions distinct notification ids', async t => {
+  const f = fixture(t); let broken = false;
+  const read: GitHubRead = async (endpoint, signal) => {
+    if (/\/pulls\/2$/.test(endpoint)) { if (broken) throw new Error('unavailable'); return structuredClone(f.state.pr); }
+    return f.read(endpoint, signal);
+  };
+  const manager = new GitHubSubscriptions(f.path, f.policy, f.queue, read);
+  await manager.action({ ...selection, pull_requests: [1, 2], events: ['pull_request'] }, target, signal());
+  broken = true;
+  for (const draft of [true, false, true]) {
+    f.state.pr.draft = draft;
+    t.mock.timers.tick(61_000); await manager.pump(() => true, signal());
+  }
+  assert.equal(f.notices().length, 3);
+  assert.equal(new Set(f.notices().map((n: any) => n.id)).size, 3);
+});
+
 test('editing review text is observable without copying its body into a notification', async t => {
   const f = fixture(t); await f.subscriptions.action(selection, target, signal());
   Object.assign(f.state.reviews[0], { body: 'Changed review body, kept private in this test' });
