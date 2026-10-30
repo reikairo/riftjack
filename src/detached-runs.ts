@@ -59,6 +59,25 @@ export class DetachedRuns {
     return path;
   }
   private persist() { save(join(this.directory, 'index.json'), { version: 1, runs: this.runs }); }
+  private archiveCompleted() {
+    if (this.runs.length < 80) return;
+    const completed = this.runs.filter(r => {
+      const state = this.state(r);
+      return !!r.closed || (terminal.has(state.status) && state.status !== 'lost' && r.notified === state.status);
+    }).slice(0, this.runs.length - 60);
+    for (const run of completed) save(join(this.dir(run), 'archived-run.json'), run);
+    const previous = this.runs;
+    this.runs = previous.filter(r => !completed.includes(r));
+    try { this.persist(); } catch (error) { this.runs = previous; throw error; }
+  }
+  private archived(id: unknown, target: BackgroundTarget): Run | undefined {
+    if (typeof id !== 'string' || !idPattern.test(id)) return;
+    const path = join(this.directory, id, 'archived-run.json');
+    if (!existsSync(path)) return;
+    const run = JSON.parse(regular(path, 32 * 1024).toString()) as Run;
+    if (run.id !== id || !object(run.target) || !text(run.label, 160)) throw new Error('Invalid archived run metadata.');
+    return visibleTo(run, target) ? run : undefined;
+  }
   private dir(run: Run) { return join(this.directory, run.id); }
   private state(run: Run): RunStatus {
     const path = join(this.dir(run), 'status.json');
@@ -187,7 +206,7 @@ export class DetachedRuns {
     }
     if (input.action === 'status' || input.action === 'stop') {
       if (Object.keys(input).some(k => !['action', 'id'].includes(k))) throw new PublicError('Use only action and id.');
-      const run = this.runs.find(r => r.id === input.id && visible(r));
+      const run = this.runs.find(r => r.id === input.id && visible(r)) ?? (input.action === 'status' ? this.archived(input.id, target) : undefined);
       if (!run) throw new PublicError('Run not found in this conversation.');
       if (input.action === 'stop') {
         await authorize(); signal.throwIfAborted();
@@ -213,7 +232,8 @@ export class DetachedRuns {
       const path = this.inside(realpathSync(resolve(cwd, (input.argv as string[])[i])));
       return { index: i, original: path, bytes: regular(path, 1024 * 1024) };
     });
-    if (this.runs.length >= 100) throw new PublicError('Run history limit reached (100). Archive finished runs before adding more.');
+    this.archiveCompleted();
+    if (this.runs.length >= 100) throw new PublicError('Run index limit reached (100). Inspect unfinished, unreported or uncertain runs before adding more.');
     if (this.pending + this.runs.filter(r => {
       const state = this.state(r);
       return active.has(state.status) && !(r.closed && state.status === 'lost');

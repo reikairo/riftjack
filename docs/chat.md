@@ -422,10 +422,12 @@ does not authorize replaying its effects.
 The connector saves uncertainty before entering the transport and records success
 only after its acknowledgement. A crash between those steps retains uncertainty,
 never an instruction to resend. Normal sends do not generate extra agent turns;
-inspect saved receipts after a lost response. Each bot retains up to 1,000 receipts
-without automatically evicting IDs. At the limit, new sends are refused until the
-operator archives the history. Archiving removes deduplication for those IDs, so
-inspect uncertain effects first and do not reuse archived IDs.
+inspect saved receipts after a lost response. Completed receipts automatically
+move out of the working index at 800 records. Archived receipts retain their
+fingerprints and remain available through `action=status` with the original ID;
+reusing an ID never sends again. Pending and uncertain receipts remain indexed.
+If 1,000 such records accumulate, new sends are refused until investigated.
+See [operation lifetimes](operation-lifetimes.md#delivery-receipts).
 
 File contents are encrypted before upload. The filename, MIME type, size, and decryption key are delivered inside the encrypted room message. Incoming attachments must also use file encryption and pass integrity verification. Attachments preserve Matrix threads without quoting the incoming message. Access and room membership are checked again before delivery; cancellation stops pending downloads and prevents delivery after an upload completes.
 

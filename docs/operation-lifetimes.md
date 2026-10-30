@@ -66,10 +66,22 @@ relative paths, display names and byte hashes, not a transient outbox root.
 `action=status` with an optional ID. Queries recheck authorization and privacy;
 receipts are also isolated by tool, bot, source room, sender, thread, key and
 session. Final-manifest attachments use the same ledger and stable event-derived
-IDs. Normal sends do not start additional model turns. The ledger retains at most
-1,000 receipts per bot without silently evicting deduplication IDs; an operator
-must archive history before admitting more sends. An archive does not authorize
-replaying uncertain sends or reusing old IDs.
+IDs. Normal sends do not start additional model turns. At 800 active receipts,
+completed receipts are archived to `delivery-receipts.json.archive/`, reducing
+the working index toward 600. Full receipts and fingerprints remain available by
+ID and still prevent duplicate sends after restart. Pending and uncertain outcomes
+stay indexed; 1,000 such retained outcomes block new sends until investigated.
+Archive writes precede index removal, so interruption cannot create a deduplication
+gap. Recent-history queries show the working index; use an exact ID for archives.
+
+Detached runs use the same write-before-removal order: at 80 indexed runs,
+reported terminal runs and explicitly closed lost runs move to `archived-run.json`
+in their existing run directories, reducing the index toward 60. Logs, commands
+and status files remain in place. `status` with the original ID reads an archive
+with the same conversation checks. `list` shows the working index. Active,
+unreported and unclosed lost runs are never archived; the 100-record limit still
+protects the active index. Archiving does not authorize another launch.
+
 
 ## Boundaries retained intentionally
 
