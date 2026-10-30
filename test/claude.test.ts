@@ -184,7 +184,8 @@ process.on('SIGTERM', () => { record({ stopped: true }); process.exit(0); });
   const config = loadConfig({ MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: dir, CLAUDE_PATH: executable });
   const state = new State(join(dir, 'state.json'));
   const backend = createBackend(config, state);
-  const calls = () => existsSync(executable + '.calls') ? readFileSync(executable + '.calls', 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [];
+  // The fixture writes concurrently; only newline-terminated records are complete.
+  const calls = () => existsSync(executable + '.calls') ? readFileSync(executable + '.calls', 'utf8').split('\n').slice(0, -1).map(line => JSON.parse(line)) : [];
   return { dir, config, state, backend, calls };
 }
 const signal = () => new AbortController().signal;
