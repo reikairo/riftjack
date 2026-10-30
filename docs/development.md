@@ -174,3 +174,11 @@ failure followed by recovery and cancellation races. A successful test does not
 establish that every third-party failure exposes a structured code: unknown
 errors can still report a generic type, and some deliberately ignored cleanup
 errors do not change the primary operation's result.
+
+## Continuous integration
+
+The Code checks workflow runs TypeScript validation, the ordinary Node suite,
+Python tests and the separate local-HTTP suite on Linux and macOS with Node 24.
+It uses fixture services, not production credentials. Tests requiring optional
+installed model CLIs may skip when those CLIs are absent. Commit-policy checks
+run independently; passing them alone does not establish code correctness.
