@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { botStatus, engineReport } from '../src/bot-status.js';
+import { botStatus, engineReport, claudeEngineReport } from '../src/bot-status.js';
 import { loadConfig } from '../src/config.js';
 
 const config = loadConfig({ MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: process.cwd(),
@@ -36,4 +36,49 @@ test('CLI reports whitelist metadata, reject malformed fields and escape Markdow
   assert.ok(text.includes('\\[model\\]\\(https://example\\.com\\)'));
   assert.ok(text.includes('/projects/\\*\\*demo\\*\\*'));
   assert.doesNotMatch(text, /secret|private/);
+});
+
+
+test('Claude status separates requested fast mode from an account refusal and explains its exact reason', () => {
+  const report = claudeEngineReport({ type: 'system', subtype: 'init', fast_mode_state: 'off',
+    fast_mode_disabled_reason: 'preference' }, 'fast')!;
+  const status = botStatus('claude', { ...config, claudeServiceTier: 'fast' }, { claudeReport: report });
+  assert.match(status, /requested at launch: on/);
+  assert.match(status, /Fast mode: off/);
+  assert.match(status, /reason code: preference/);
+  assert.match(status, /organization preference or managed policy/);
+  assert.match(status, /does not confirm it is active/);
+  assert.doesNotMatch(status, /credits|billing problem/);
+});
+
+test('fast-mode result snapshots clear stale reasons, retain session metadata and ignore child or absent metadata', () => {
+  const initial = claudeEngineReport({ type: 'system', subtype: 'init', model: 'resolved-model',
+    fast_mode_state: 'off', fast_mode_disabled_reason: 'pending' }, 'fast')!;
+  const final = claudeEngineReport({ type: 'result', fast_mode_state: 'on' }, 'fast', initial)!;
+  assert.equal(final.model, initial.model);
+  assert.equal(final.fastModeDisabledReason, undefined);
+  assert.equal(final.fastMode, 'on');
+  assert.equal(claudeEngineReport({ type: 'result' }, 'fast', initial), undefined);
+  assert.equal(claudeEngineReport({ type: 'result', parent_tool_use_id: 'child', fast_mode_state: 'off' }, 'fast', initial), undefined);
+  const resumed = claudeEngineReport({ type: 'system', subtype: 'init' }, 'default', initial)!;
+  assert.equal(resumed.fastModeRequested, 'off');
+  assert.equal(resumed.model, undefined);
+  assert.equal(resumed.fastModeDisabledReason, undefined);
+  const text = botStatus('claude', config, { claudeReport: final });
+  assert.doesNotMatch(text, /pending|reason code|does not confirm/);
+});
+
+test('unknown or omitted reasons are not guessed, and untrusted reason strings stay literal and bounded', () => {
+  const status = (fastMode: string, fastModeDisabledReason?: unknown) => botStatus('claude', config,
+    { claudeReport: engineReport({ fastModeRequested: 'on', fastMode, fastModeDisabledReason }) });
+  assert.match(status('off'), /not reported by Claude/);
+  assert.match(status('cooldown'), /temporarily cooling down/);
+  assert.doesNotMatch(status('on', 'preference'), /reason code|Disabled by/);
+  const text = status('off', '[future](https://example.com)');
+  assert.match(text, /Unrecognized Claude reason/);
+  assert.ok(text.includes('\\[future\\]'));
+  for (const invalid of ['bad\nreason', 'x'.repeat(1025), { secret: 'private' }]) {
+    const report = engineReport({ fastModeDisabledReason: invalid });
+    assert.equal(report.fastModeDisabledReason, undefined);
+  }
 });

@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { dirname } from 'node:path';
 import { userInfo } from 'node:os';
-import { engineReport } from './bot-status.js';
+import { claudeEngineReport, type EngineReport } from './bot-status.js';
 import type { Backend, Steer } from './bridge.js';
 import type { Config } from './config.js';
 import type { State } from './state.js';
@@ -233,6 +233,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     if (!checked) { ({ replay, systemPromptSnapshot, hookEvents } = await checkClaude(config, signal)); checked = true; }
     const outbox = await outboxDirectory(config.workspace, 'claude:' + key);
     const savedSession = state.session(key).claude;
+    let currentReport: EngineReport | undefined;
     let checkpoint = savedSession ? contextCheckpoints(state, key, 'claude', config.workspace, savedSession) : undefined;
     let checkpointSender: ReturnType<typeof checkpointDelivery> | undefined;
     const initialCheckpoint = checkpoint?.notice();
@@ -339,9 +340,10 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         }
         return;
       }
-      if (message.type === 'system' && message.subtype === 'init') {
-        state.update(key, { claudeReport: engineReport({ model: message.model, cwd: message.cwd,
-          reasoningEffort: message.effort, fastMode: message.fast_mode_state, permissionMode: message.permissionMode }) });
+      const report = claudeEngineReport(message, config.claudeServiceTier, currentReport);
+      if (report) {
+        currentReport = report;
+        state.update(key, { claudeReport: report });
       }
       if (message.type === 'system' && !message.parent_tool_use_id) {
         if (message.subtype === 'status' && message.status === 'compacting') {

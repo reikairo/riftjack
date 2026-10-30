@@ -48,8 +48,14 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   if (started) { record({ response: message }); onResponse?.(message); return; }
   started = true; record({ input: message });
   const prompt = message.message.content[0].text;
-  output({ type: 'system', subtype: 'init', session_id: 'claude-session-1', ...(prompt.includes('[missing-status]') ? {} : { model: 'resolved-claude', cwd: process.cwd(), permissionMode: 'acceptEdits', fast_mode_state: 'off' }) });
+  output({ type: 'system', subtype: 'init', session_id: 'claude-session-1', ...(prompt.includes('[missing-status]') ? {} : { model: 'resolved-claude', cwd: process.cwd(), permissionMode: 'acceptEdits', fast_mode_state: 'off', ...(prompt.includes('[fast-') ? { fast_mode_disabled_reason: 'preference' } : {}) }) });
   const finish = result => output({ type: 'result', subtype: 'success', is_error: false, result, session_id: 'claude-session-1' });
+  if (prompt.includes('[fast-')) {
+    const fast = prompt.includes('[fast-on]') ? { fast_mode_state: 'on' }
+      : { fast_mode_state: 'off', fast_mode_disabled_reason: 'extra_usage_disabled' };
+    output({ type: 'result', subtype: prompt.includes('[fast-error]') ? 'error_during_execution' : 'success',
+      is_error: prompt.includes('[fast-error]'), result: 'Done', session_id: 'claude-session-1', ...fast }); return;
+  }
   if (prompt.includes('[compact]')) {
     output({ type: 'system', subtype: 'compact_boundary', uuid: 'old' });
     output({ type: 'system', subtype: 'status', status: 'compacting', parent_tool_use_id: 'child' });
@@ -634,7 +640,7 @@ test('Claude status uses init metadata, preserves unknowns and clears stale fiel
   assert.equal(f.state.session('another-key').claudeReport, undefined);
   assert.deepEqual(new State(join(f.dir, 'state.json')).session('key').claudeReport, report);
   await backend('claude', '[missing-status]', 'key', signal(), '@owner:test');
-  assert.deepEqual(Object.keys(f.state.session('key').claudeReport!), ['reportedAt']);
+  assert.deepEqual(Object.keys(f.state.session('key').claudeReport!), ['reportedAt', 'fastModeRequested']);
   f.state.reset('key');
   assert.equal(f.state.session('key').claudeReport, undefined);
 });
@@ -768,4 +774,24 @@ test('Claude tier overrides preserve sandbox, permission and checkpoint settings
       assert.ok(settings.hooks.SessionStart);
     }
   }
+});
+
+
+test('Claude final fast-mode reason survives errors and restart, and later on or legacy metadata clears stale causes', async t => {
+  const f = setup(t);
+  const backend = createBackend({ ...f.config, claudeServiceTier: 'fast' }, f.state);
+  await assert.rejects(backend('claude', '[fast-error]', 'key', signal(), '@owner:test'), /could not complete/);
+  let report = new State(join(f.dir, 'state.json')).session('key').claudeReport!;
+  assert.equal(report.fastModeRequested, 'on');
+  assert.equal(report.model, 'resolved-claude');
+  assert.equal(report.fastMode, 'off');
+  assert.equal(report.fastModeDisabledReason, 'extra_usage_disabled');
+  await backend('claude', '[fast-on]', 'key', signal(), '@owner:test');
+  report = f.state.session('key').claudeReport!;
+  assert.equal(report.fastMode, 'on');
+  assert.equal(report.fastModeDisabledReason, undefined);
+  await backend('claude', 'legacy metadata', 'key', signal(), '@owner:test');
+  report = f.state.session('key').claudeReport!;
+  assert.equal(report.fastMode, 'off');
+  assert.equal(report.fastModeDisabledReason, undefined);
 });
