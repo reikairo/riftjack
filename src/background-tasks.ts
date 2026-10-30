@@ -97,8 +97,8 @@ export class BackgroundTasks {
     }
     this.save();
   }
-  private save() {
-    writeFileSync(this.path + '.tmp', JSON.stringify({ version: 1, watches: this.watches, notified: this.notified }), { mode: 0o600 });
+  private save(watches = this.watches, notified = this.notified) {
+    writeFileSync(this.path + '.tmp', JSON.stringify({ version: 1, watches, notified }), { mode: 0o600 });
     renameSync(this.path + '.tmp', this.path);
   }
   private statusFile(file: string): { file: string; value: Record<string, unknown>; modified: number } {
@@ -129,12 +129,18 @@ export class BackgroundTasks {
       w.key === target.key && w.session === target.session && w.state === 'waiting' && !w.delivery);
     const count = this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length;
     if (count - pending.length >= 100) throw new Error('Completion notification queue full.');
-    for (const w of pending) w.state = 'cancelled';
-    this.prune();
-    this.watches.push({ ...target, id, workspace: this.workspace, label, file: '', field: '', terminal: [],
+    // Commit admission to disk before changing deduplication or superseding progress.
+    // A failed save must leave the same id retryable, including after restart.
+    const candidates = this.watches.map(w => pending.includes(w) ? { ...w, state: 'cancelled' as const } : w);
+    const active = (w: Watch) => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery;
+    const watches: Watch[] = candidates.filter(active).concat(candidates.filter(w => !active(w)).slice(-99));
+    watches.push({ ...target, id, workspace: this.workspace, label, file: '', field: '', terminal: [],
       expires: Date.now(), state: 'waiting', timer: { message, deliver: 'agent' }, notification });
-    this.notified = [...this.notified, id].slice(-10000);
-    this.save();
+    const notified = [...this.notified, id].slice(-10000);
+    this.save(watches, notified);
+    for (const w of pending) w.state = 'cancelled';
+    this.watches = watches;
+    this.notified = notified;
   }
   // Cancel undelivered notices when a subscription is removed or loses access.
   cancelNotifications(group: string, target: BackgroundTarget): void {
