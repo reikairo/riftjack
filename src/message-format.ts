@@ -76,7 +76,13 @@ function boxTable(rows: string[][], aligns: (Align | null)[]): { html: string; t
   };
 }
 
-const markdown = new Marked({ gfm: true, breaks: true, renderer: {
+const makeMarkdown = (wrapCommands = false) => new Marked({ gfm: true, breaks: true, renderer: {
+  code(token) {
+    if (!wrapCommands || token.lang !== 'riftjack-command') return false;
+    // Inline code follows the message width instead of opening a scrollable pre.
+    // Keep literal source and explicit line breaks; never reflow shell syntax.
+    return `<p><code>${escape(token.text).replace(/\n/g, '<br>')}</code></p>\n`;
+  },
   table(token) {
     const rows = [token.header, ...token.rows].map(row => row.map(cell => plainText(cell.tokens)));
     return `<pre><code>${boxTable(rows, token.align).html}</code></pre>\n`;
@@ -87,8 +93,11 @@ const markdown = new Marked({ gfm: true, breaks: true, renderer: {
   image: ({ href, text }) => `<a href="${escape(href)}">${escape(text || 'Image')}</a>`,
 } });
 
-function render(text: string): string {
-  return sanitizeHtml(markdown.parse(text, { async: false }), {
+const markdown = makeMarkdown();
+const confirmationMarkdown = makeMarkdown(true);
+
+function render(text: string, wrapCommands: boolean): string {
+  return sanitizeHtml((wrapCommands ? confirmationMarkdown : markdown).parse(text, { async: false }), {
     allowedTags: ['p', 'br', 'strong', 'em', 'del', 'blockquote', 'ul', 'ol', 'li', 'pre', 'code', 'a', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
 ],
     allowedAttributes: { a: ['href', 'title'], ol: ['start'], code: ['class'] },
@@ -179,12 +188,12 @@ export function replyRelation(thread: { rel_type: string; event_id?: string } | 
   return { ...thread, 'm.in_reply_to': { event_id: inReplyTo }, ...(thread && { is_falling_back: false }) };
 }
 
-export function replyContent(text: string, formatted = false, truncate = true, msgtype: Content['msgtype'] = 'm.notice'): Content[] {
+export function replyContent(text: string, formatted = false, truncate = true, msgtype: Content['msgtype'] = 'm.notice', wrapCommands = false): Content[] {
   if (!formatted) return messageParts(text).map(body => ({ msgtype, body }));
   const chars = Array.from(text);
   const source = truncate ? chars.slice(0, 100_000).join('') : text;
   let html: string;
-  try { html = render(source); } catch { html = `<pre><code>${escape(source)}</code></pre>`; }
+  try { html = render(source, wrapCommands); } catch { html = `<pre><code>${escape(source)}</code></pre>`; }
   const parts = splitHtml(html, msgtype);
   if (truncate && chars.length > 100_000) parts.push({ msgtype, body: '[Response truncated at 100,000 characters.]' });
   return parts;

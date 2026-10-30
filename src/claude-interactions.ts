@@ -29,7 +29,7 @@ export function claudeInteraction(request: Record<string, any>): Interaction | u
     if (input[key] === undefined) continue;
     shown.add(key);
     const value = text(input[key]);
-    details.push({ label, value, code: key !== 'description' });
+    details.push({ label, value, code: tool === 'Bash' && key === 'command' ? 'command' : key !== 'description' });
   }
   const rest = Object.fromEntries(Object.entries(input).filter(([key]) => !shown.has(key)));
   if (Object.keys(rest).length) details.push({ label: shown.size ? 'Other input' : 'Input', value: JSON.stringify(rest, null, 2), code: true });

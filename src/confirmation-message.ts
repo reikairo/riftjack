@@ -10,7 +10,7 @@ export async function sendConfirmation(text: string, controls: ReactionControls,
   let lastId: string | undefined;
   // The request size is checked before formatting. Escaping may expand the
   // source beyond the normal reply limit; confirmations must never truncate.
-  for (const part of replyContent(markdown ?? text, markdown !== undefined, false, 'm.text')) {
+  for (const part of replyContent(markdown ?? text, markdown !== undefined, false, 'm.text', true)) {
     if (!controls.isPending()) return;
     await transport.authorize();
     if (!controls.isPending()) return;

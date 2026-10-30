@@ -5,6 +5,7 @@ import { Interactions, type ReactionControls } from '../src/interactions.js';
 import { codexInteraction } from '../src/codex-interactions.js';
 import { claudeInteraction } from '../src/claude-interactions.js';
 import type { Interaction } from '../src/interactions.js';
+import { confirmationDetails } from '../src/confirmation-format.js';
 import { replyContent } from '../src/message-format.js';
 
 async function deliver(request: Interaction) {
@@ -41,7 +42,8 @@ test('command approvals render literal input, headings and compact controls in M
     assert.ok(parts.every(p => p.format === 'org.matrix.custom.html'));
     assert.match(html, /<h3>Confirmation <code>[a-f0-9]{12}<\/code><\/h3>/);
     assert.match(html, /<strong>Command:<\/strong>/);
-    assert.match(html, /<pre><code class="language-text">/);
+    assert.match(html, /<p><code>echo/);
+    assert.doesNotMatch(html, /<pre><code class="language-riftjack-command">/);
     assert.doesNotMatch(html, /<script>|<img|<a |<strong>text|<strong>literal/);
     assert.ok(plain.includes(command));
     assert.ok(plain.includes(cwd));
@@ -177,4 +179,31 @@ test('an early approval followed by delivery failure never approves the action',
       sendReaction: async () => assert.fail('Incomplete request'), report: error => { throw error; },
     }, markdown)), /offline/);
   assert.equal(interactions.size, 0);
+});
+
+test('wrapped commands preserve long arguments, blank lines and whitespace across message chunks', async () => {
+  const command = "python3 - <<'PY'\n\n    print('  " + '界<&`'.repeat(1800) + "  ')\n\nPY\n";
+  const request = claudeInteraction({ subtype: 'can_use_tool', tool_name: 'Bash', input: { command } })!;
+  const { html, plain, parts } = await deliver(request);
+  assert.ok(parts.length > 1);
+  assert.doesNotMatch(html, /<pre>|<script>|<a /);
+  assert.match(html, /<code>/);
+  assert.match(html, /<br><br>/);
+  assert.ok(plain.includes(command));
+  assert.deepEqual(request.approve, { behavior: 'allow', updatedInput: { command } });
+  for (const part of parts) assert.ok(Buffer.byteLength(JSON.stringify(part)) <= 36_000);
+});
+
+test('only designated confirmation commands wrap; other code and ordinary replies retain blocks', async () => {
+  const command = 'echo "a  b"\n\n  echo done';
+  const details = confirmationDetails([
+    { label: 'Command', value: command, code: 'command' },
+    { label: 'Changes', value: '- old\n+ new', code: true },
+  ]);
+  const { html, plain } = await deliver({ ...details, approve: {}, deny: {} });
+  assert.match(html, /<p><code>echo &quot;a  b&quot;<br><br>  echo done<\/code><\/p>/);
+  assert.match(html, /<pre><code class="language-text">- old\n\+ new/);
+  assert.ok(plain.includes(command));
+  const ordinary = replyContent(details.markdown, true, false).map(p => p.formatted_body).join('');
+  assert.match(ordinary, /<pre><code class="language-riftjack-command">/);
 });

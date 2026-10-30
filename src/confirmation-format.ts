@@ -1,9 +1,10 @@
 import { inlineCode, markdownText } from './manager-format.js';
 
-type Detail = { label?: string; value: string; code?: boolean; spaced?: boolean };
+type Detail = { label?: string; value: string; code?: boolean | 'command'; spaced?: boolean };
 
 // Compose both presentations from the same values. Tool input is literal text,
-// never Markdown: even a command containing fences must stay inside its block.
+// never Markdown: fences keep even embedded Markdown literal until rendering.
+// The confirmation renderer displays command fences as wrapping inline code.
 export function confirmationDetails(details: Detail[]): { text: string; markdown: string } {
   const separator = (index: number, formatted: boolean): string => {
     if (!index) return '';
@@ -20,7 +21,7 @@ export function confirmationDetails(details: Detail[]): { text: string; markdown
       const title = separator(index, true) + (label ? `**${markdownText(label)}:**\n` : '');
       if (!code) return title + markdownText(value);
       const fence = '`'.repeat(Math.max(2, ...(value.match(/`+/g) || []).map(run => run.length)) + 1);
-      return `${title}\n${fence}text\n${value}\n${fence}`;
+      return `${title}\n${fence}${code === 'command' ? 'riftjack-command' : 'text'}\n${value}\n${fence}`;
     }).join(''),
   };
 }

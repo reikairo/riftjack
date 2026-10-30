@@ -46,7 +46,7 @@ export function codexInteraction(request: ServerRequest, item?: Record<string, a
       return { ...confirmationDetails([
         { value: `Codex requests permission for a command${p.kind && p.kind !== 'command' ? ` (${p.kind})` : ''}.` },
         ...(intent.reason ? [{ label: 'Reason', value: intent.reason, spaced: true }] : []),
-        { label: 'Command', value: String(command || '[not provided]'), code: true },
+        { label: 'Command', value: String(command || '[not provided]'), code: 'command' },
         { label: 'Working directory', value: String(p.cwd || item?.cwd || '[not provided]'), code: true },
         ...(p.networkApprovalContext ? [{ label: 'Network', value: json(p.networkApprovalContext), code: true }] : []),
         ...(p.additionalPermissions ? [{ label: 'Additional permissions', value: json(p.additionalPermissions), code: true }] : []),
