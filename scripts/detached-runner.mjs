@@ -19,6 +19,22 @@ export function failureDetails(error, stage) {
     ...(signals.has(error?.signal) && { signal: error.signal }),
     ...(error?.killed === true && { killed: true }) };
 }
+// The data handlers only update bounded memory. The observation loop flushes at
+// most once per tick, and completion flushes once more before reporting success.
+export class BoundedOutput {
+  constructor(path, limit) { this.path = path; this.limit = limit; this.bytes = Buffer.alloc(0); this.dirty = false; this.truncated = false; }
+  append(chunk) {
+    if (this.bytes.length + chunk.length > this.limit) this.truncated = true;
+    this.bytes = Buffer.concat([this.bytes, chunk.subarray(-this.limit)]).subarray(-this.limit);
+    this.dirty = true;
+  }
+  flush() {
+    if (!this.dirty) return;
+    writeFileSync(this.path + '.tmp', this.bytes, { mode: 0o600 });
+    renameSync(this.path + '.tmp', this.path);
+    this.dirty = false;
+  }
+}
 let phase = 'validate_launch';
 
 export const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -79,13 +95,10 @@ async function main() {
   const env = {};
   for (const name of ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL', 'SHELL']) if (process.env[name]) env[name] = process.env[name];
   Object.assign(env, spec.env);
-  let log = Buffer.alloc(0), stopping = 0, exited = false, spawnError = false, uncertain = false;
+  let stopping = 0, exited = false, spawnError = false, uncertain = false;
+  const log = new BoundedOutput(join(dir, 'output.log'), spec.max_log_bytes);
   const observed = new Map();
-  const output = chunk => {
-    if (log.length + chunk.length > spec.max_log_bytes) state.log_truncated = true;
-    log = Buffer.concat([log, chunk]).subarray(-spec.max_log_bytes);
-    writeFileSync(join(dir, 'output.log'), log, { mode: 0o600 });
-  };
+  const output = chunk => { log.append(chunk); state.log_truncated = log.truncated; };
   phase = 'spawn_command';
   const child = spawn(spec.argv[0], spec.argv.slice(1), { cwd: spec.cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', output); child.stderr.on('data', output);
@@ -97,6 +110,7 @@ async function main() {
   for (;;) {
     await new Promise(resolve => setTimeout(resolve, 200));
     try {
+      log.flush();
       table = processes();
       const root = table.find(p => p.pid === child.pid);
       if (!state.child && root && root.ppid === process.pid) state.child = root;
@@ -142,6 +156,7 @@ async function main() {
       uncertain = true; state.reason = 'process_observation_failed'; break;
     }
   }
+  try { log.flush(); } catch (error) { uncertain = true; state.reason = 'log_write_failed'; state.diagnostic = failureDetails(error, 'write_output_log'); }
   state.status = uncertain ? 'lost' : state.reason === 'stop_requested' ? 'stopped'
     : spawnError || state.exit_code !== 0 || state.reason === 'timeout' || state.reason === 'descendants_after_exit' ? 'failed' : 'succeeded';
   state.finished_at = new Date().toISOString(); persist();
