@@ -1,17 +1,16 @@
-import { startDetachedMcp, DETACHED_SERVER, detachedInstructions } from './detached-mcp.js';
-import { startConfirmationMcp, CONFIRMATION_SERVER, confirmationInstructions } from './confirmation-mcp.js';
-import { drawioAction } from './drawio.js';
-import { startDrawioMcp, DRAWIO_SERVER, drawioInstructions } from './drawio-mcp.js';
-import { startGitHubMcp, GITHUB_SERVER, githubInstructions } from './github-mcp.js';
+import { startBackendTools } from './backend-tools.js';
+import { startDetachedMcp, DETACHED_SERVER } from './detached-mcp.js';
+import { startConfirmationMcp, CONFIRMATION_SERVER } from './confirmation-mcp.js';
+import { startDrawioMcp, DRAWIO_SERVER } from './drawio-mcp.js';
+import { startGitHubMcp, GITHUB_SERVER } from './github-mcp.js';
 import { routingInstructions } from './routing-instructions.js';
 import { compactionNotices } from './compaction-notices.js';
 import { contextCheckpoints, checkpointDelivery, checkpointInstructions } from './context-checkpoints.js';
-import { startBackgroundMcp, BACKGROUND_SERVER, backgroundInstructions } from './background-mcp.js';
+import { startBackgroundMcp, BACKGROUND_SERVER } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER } from './attachment-mcp.js';
-import { startRoomMessageMcp, ROOM_MESSAGE_SERVER, roomMessageInstructions } from './room-message-mcp.js';
-import { startFetchMcp, FETCH_SERVER, fetchInstructions } from './fetch-mcp.js';
-import { fetchAction } from './fetch.js';
+import { startRoomMessageMcp, ROOM_MESSAGE_SERVER } from './room-message-mcp.js';
+import { startFetchMcp, FETCH_SERVER } from './fetch-mcp.js';
 import { createHash } from 'node:crypto';
 import type { Config } from './config.js';
 import type { Backend, Steer } from './bridge.js';
@@ -25,7 +24,7 @@ import { codexInteraction } from './codex-interactions.js';
 import { approvalInstructions } from './approval-instructions.js';
 import { installPlugin } from './plugins.js';
 import { engineReport } from './bot-status.js';
-import { startPublishMcp, PUBLISH_SERVER, publicationInstructions } from './publish-mcp.js';
+import { startPublishMcp, PUBLISH_SERVER } from './publish-mcp.js';
 
 // Codex validates transport fields before checking enabled. Explicitly disable
 // unavailable tools (including stale per-turn endpoints on resumed threads)
@@ -89,25 +88,12 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let diagram: Awaited<ReturnType<typeof startDrawioMcp>> | undefined;
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
+    let tools: Awaited<ReturnType<typeof startBackendTools>> | undefined;
     try {
-      if (hooks?.detached && config.sandbox !== 'read-only') detached = await startDetachedMcp(hooks.detached, AbortSignal.any([signal, mediaLifetime.signal]));
-      if (hooks?.confirmation) confirmation = await startConfirmationMcp(hooks.confirmation, AbortSignal.any([signal, mediaLifetime.signal]));
-      if (hooks?.github) github = await startGitHubMcp(hooks.github, signal);
-      if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
-      // The tool writes response files into the workspace, so a read-only bot does not get it.
-      if (config.fetch && config.sandbox !== 'read-only') web = await startFetchMcp(fetchAction(config.fetch, config.workspace), AbortSignal.any([signal, mediaLifetime.signal]));
-      if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
       const outbox = await outboxDirectory(config.workspace, key);
-      if (config.drawio && config.sandbox !== 'read-only') diagram = await startDrawioMcp(drawioAction(config.drawio, outbox, config.maxMediaBytes), AbortSignal.any([signal, mediaLifetime.signal]));
-      if (hooks?.roomMessages) rooms = await startRoomMessageMcp((input, signal) => hooks.roomMessages!(input, signal, outbox), AbortSignal.any([signal, mediaLifetime.signal]));
-      if (hooks?.sendAttachments) {
-        delivery = attachmentDelivery(outbox, config.maxMediaBytes, async (files, callSignal) => {
-          await progress;
-          callSignal.throwIfAborted();
-          return hooks.sendAttachments!(files, callSignal);
-        }, hooks.deliveryReceipts);
-        media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
-      }
+      tools = await startBackendTools({ kind: 'codex', config, outbox, hooks, publish,
+        allowPublication: !!interact, signal: AbortSignal.any([signal, mediaLifetime.signal]), beforeAttachments: () => progress });
+      ({ detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media } = tools);
       signal.throwIfAborted();
       const server = current.server = new AppServer(config, notification => {
         const p = notification.params;
@@ -164,8 +150,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + (detached ? detachedInstructions : '') + (confirmation ? confirmationInstructions : '') + (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
-        + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '') + (diagram ? drawioInstructions : '');
+      const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + tools.instructions;
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
         cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
@@ -271,11 +256,8 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       current.ended = true;
       await compactions.close();
       mediaLifetime.abort();
-      await media?.close();
-      await rooms?.close();
-      await web?.close(); await diagram?.close();
+      await tools?.close();
       await progress.catch(() => {});
-      await detached?.close(); await confirmation?.close(); await github?.close(); await background?.close(); await publication?.close();
       current.ready.resolve();
       await Promise.allSettled([...current.steering]);
       await current.server?.close();

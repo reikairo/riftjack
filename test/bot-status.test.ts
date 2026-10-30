@@ -82,3 +82,14 @@ test('unknown or omitted reasons are not guessed, and untrusted reason strings s
     assert.equal(report.fastModeDisabledReason, undefined);
   }
 });
+
+test('status explicitly separates backend tool support from configured availability', () => {
+  for (const kind of ['codex', 'claude', 'pi'] as const) {
+    const text = botStatus(kind, config, {});
+    assert.match(text, /Supported connector tools/);
+    assert.match(text, /Availability depends on configuration and permissions/);
+    assert.match(text, /background_tasks/);
+    if (kind === 'pi') assert.doesNotMatch(text, /run_detached|request_confirmation|drawio/);
+    else assert.match(text, /run_detached/);
+  }
+});

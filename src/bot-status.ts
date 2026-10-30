@@ -1,3 +1,4 @@
+import { backendCapabilities } from './backend-capabilities.js';
 import type { Config } from './config.js';
 import type { Session } from './state.js';
 
@@ -71,8 +72,10 @@ function display(value: string | undefined, fallback: string): string {
 }
 
 export function botStatus(kind: 'codex' | 'claude' | 'pi', config: Config, session: Session): string {
+  const tools = 'Supported connector tools: ' + backendCapabilities(kind).map(name => '`' + name + '`').join(', ') + '. Availability depends on configuration and permissions.';
   if (kind === 'pi') return [
     '**Pi status**',
+    tools,
     `- Workspace: ${display(config.workspace, 'unknown')}`,
     `- Configured model: ${display(config.piModel, 'CLI default')}`,
     `- Last reported model: ${display(session.piReport?.model, 'not reported')}`,
@@ -100,7 +103,7 @@ export function botStatus(kind: 'codex' | 'claude' | 'pi', config: Config, sessi
     : 'No report yet. Values will appear when the CLI starts a task in this conversation.';
   return [
     `**${codex ? 'Codex' : 'Claude Code'} status**`,
-    '**Riftjack settings**', settings,
+    '**Riftjack settings**', settings, tools,
     '**Last CLI session report**', reported,
   ].join('\n\n');
 }

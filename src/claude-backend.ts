@@ -1,18 +1,17 @@
-import { startDetachedMcp, DETACHED_SERVER, DETACHED_TOOL, detachedInstructions } from './detached-mcp.js';
-import { startConfirmationMcp, CONFIRMATION_SERVER, CONFIRMATION_TOOL, confirmationInstructions } from './confirmation-mcp.js';
-import { drawioAction } from './drawio.js';
-import { startDrawioMcp, DRAWIO_SERVER, DRAWIO_TOOL, drawioInstructions } from './drawio-mcp.js';
-import { startGitHubMcp, GITHUB_SERVER, GITHUB_TOOL, githubInstructions } from './github-mcp.js';
+import { startBackendTools } from './backend-tools.js';
+import { startDetachedMcp, DETACHED_SERVER, DETACHED_TOOL } from './detached-mcp.js';
+import { startConfirmationMcp, CONFIRMATION_SERVER, CONFIRMATION_TOOL } from './confirmation-mcp.js';
+import { startDrawioMcp, DRAWIO_SERVER, DRAWIO_TOOL } from './drawio-mcp.js';
+import { startGitHubMcp, GITHUB_SERVER, GITHUB_TOOL } from './github-mcp.js';
 import { routingInstructions } from './routing-instructions.js';
 import { claudeAuthenticationFailure } from './auth-diagnostics.js';
 import { compactionNotices } from './compaction-notices.js';
 import { contextCheckpoints, checkpointDelivery, checkpointInstructions, claudeCheckpointHooks } from './context-checkpoints.js';
-import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL, backgroundInstructions } from './background-mcp.js';
+import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL } from './background-mcp.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 import { startAttachmentMcp, ATTACHMENT_SERVER, ATTACHMENT_TOOL } from './attachment-mcp.js';
-import { startRoomMessageMcp, ROOM_MESSAGE_SERVER, ROOM_MESSAGE_TOOL, roomMessageInstructions } from './room-message-mcp.js';
-import { startFetchMcp, FETCH_SERVER, FETCH_TOOL, fetchInstructions } from './fetch-mcp.js';
-import { fetchAction } from './fetch.js';
+import { startRoomMessageMcp, ROOM_MESSAGE_SERVER, ROOM_MESSAGE_TOOL } from './room-message-mcp.js';
+import { startFetchMcp, FETCH_SERVER, FETCH_TOOL } from './fetch-mcp.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
@@ -26,7 +25,7 @@ import { PublicError } from './accounts.js';
 import { imageMime, MAX_ATTACHMENTS, mediaInstructions, outboxDirectory, parseMediaReply, readOutgoing, type BackendReply, type IncomingAttachment } from './media.js';
 import { approvalInstructions } from './approval-instructions.js';
 import { CLAUDE_DENY, claudeInteraction } from './claude-interactions.js';
-import { startPublishMcp, PUBLISH_SERVER, PUBLISH_TOOL, publicationInstructions, type PublishConnection } from './publish-mcp.js';
+import { startPublishMcp, PUBLISH_SERVER, PUBLISH_TOOL, type PublishConnection } from './publish-mcp.js';
 
 const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
 // How long a finished turn waits for the echo of an update written just before its result.
@@ -290,32 +289,18 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     let diagram: Awaited<ReturnType<typeof startDrawioMcp>> | undefined;
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
+    let tools: Awaited<ReturnType<typeof startBackendTools>> | undefined;
     // Ends the turn's input: no further updates, unconfirmed ones are reported.
     const finish = () => {
       accepting = false; clearTimeout(grace);
       unconfirmed(); mediaLifetime.abort(); close(); stdinRef?.end();
     };
     try {
-      if (hooks?.detached && config.sandbox !== 'read-only') detached = await startDetachedMcp(hooks.detached, AbortSignal.any([signal, mediaLifetime.signal]));
-      if (hooks?.confirmation) confirmation = await startConfirmationMcp(hooks.confirmation, AbortSignal.any([signal, mediaLifetime.signal]));
-      if (hooks?.github) github = await startGitHubMcp(hooks.github, signal);
-      if (hooks?.background) background = await startBackgroundMcp(hooks.background, signal);
-      if (config.drawio && config.sandbox !== 'read-only') diagram = await startDrawioMcp(drawioAction(config.drawio, outbox, config.maxMediaBytes), AbortSignal.any([signal, mediaLifetime.signal]));
-      if (hooks?.roomMessages) rooms = await startRoomMessageMcp((input, signal) => hooks.roomMessages!(input, signal, outbox), AbortSignal.any([signal, mediaLifetime.signal]));
-      // The tool writes response files into the workspace, so a read-only bot does not get it.
-      if (config.fetch && config.sandbox !== 'read-only') web = await startFetchMcp(fetchAction(config.fetch, config.workspace), AbortSignal.any([signal, mediaLifetime.signal]));
-      if (publish && interact && config.sandbox !== 'read-only') publication = await startPublishMcp(publish, signal);
-      if (hooks?.sendAttachments) {
-        delivery = attachmentDelivery(outbox, config.maxMediaBytes, async (files, callSignal) => {
-          await progress;
-          callSignal.throwIfAborted();
-          return hooks.sendAttachments!(files, callSignal);
-        }, hooks.deliveryReceipts);
-        media = await startAttachmentMcp(delivery.action, AbortSignal.any([signal, mediaLifetime.signal]));
-      }
+      tools = await startBackendTools({ kind: 'claude', config, outbox, hooks, publish,
+        allowPublication: !!interact, signal: AbortSignal.any([signal, mediaLifetime.signal]), beforeAttachments: () => progress });
+      ({ detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media } = tools);
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + (detached ? detachedInstructions : '') + (confirmation ? confirmationInstructions : '') + (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') + (rooms ? roomMessageInstructions : '')
-          + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '') + (diagram ? drawioInstructions : ''), publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached), signal, (line, stdin) => {
+        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + tools.instructions, publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
@@ -436,7 +421,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       await compactions.close();
       if (live.get(key) === steerHere) live.delete(key);
       accepting = false; clearTimeout(grace); unconfirmed();
-      close(); mediaLifetime.abort(); await media?.close(); await rooms?.close(); await web?.close(); await diagram?.close(); await progress.catch(() => {}); await detached?.close(); await confirmation?.close(); await github?.close(); await background?.close(); await publication?.close();
+      close(); mediaLifetime.abort(); await tools?.close(); await progress.catch(() => {});
       await checkpointSender?.settled();
     }
     signal.throwIfAborted();

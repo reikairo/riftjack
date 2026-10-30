@@ -182,3 +182,11 @@ Python tests and the separate local-HTTP suite on Linux and macOS with Node 24.
 It uses fixture services, not production credentials. Tests requiring optional
 installed model CLIs may skip when those CLIs are absent. Commit-policy checks
 run independently; passing them alone does not establish code correctness.
+
+Backend connector tools are assembled in `src/backend-tools.ts`. Common permission
+gates, instructions and endpoint cleanup live there; adapters only translate the
+connections for their CLI. Setup failure closes endpoints already opened. The
+support matrix is `src/backend-capabilities.ts` and is shown in `!status`; support
+does not imply the owner configured or permitted a tool. Pi currently supports
+background watches, GitHub, room messages, attachments and publication. Its shell
+approval and steering semantics remain specific to Pi.
