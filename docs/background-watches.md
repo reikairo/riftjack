@@ -5,6 +5,10 @@ process. A watch ends on its first matching condition and delivers one durable
 notification to its originating conversation. Interrupted delivery retains the
 same result for recovery. Cancelling a watch only cancels monitoring.
 
+Observation continues while an agent turn is running. The first matching file
+condition is saved before delivery, so later writes cannot erase it while the
+agent is busy. Direct room reminders also continue independently of model turns.
+
 ## Plain text results
 
 Create a small result file, initially containing `running`, and write `exit 0`

@@ -53,3 +53,38 @@ test('approval result is marked notified only after its notification is persiste
   assert.equal(JSON.parse(recovered.action({ action: 'list' }, target, signal())).length, 1);
 });
 
+
+
+test('busy model delivery does not block other observations or room reminders', async t => {
+  const root = fixture(t), file = join(root, 'background.json');
+  const queue = new BackgroundTasks(file, root);
+  queue.notify('agent-result', target, 'Model work', { group: 'model-work', progress: false });
+  let release!: () => void, started!: () => void, posts = 0, turns = 0;
+  const pending = new Promise<void>(r => { release = r; });
+  const entered = new Promise<void>(r => { started = r; });
+  const options = { valid: () => true, report: (e: unknown) => { throw e; },
+    deliver: async (_target: unknown, _event: unknown, admitted: () => void) => {
+      if (turns) return false;
+      turns++; admitted(); started(); await pending; return true;
+    },
+    post: async (_target: unknown, _text: unknown, admitted: () => void) => { admitted(); posts++; return true; } };
+  const running = queue.pump(options);
+  await entered;
+  const reminder = JSON.parse(queue.action({ action: 'remind', label: 'Room reminder', message: 'Due now', deliver: 'room', delay_minutes: 1 }, target, signal()));
+  writeFileSync(join(root, 'status.json'), '{"status":"complete"}');
+  queue.action({ action: 'watch', label: 'Build', status_file: 'status.json', field: 'status', terminal: ['complete'] }, target, signal());
+  await queue.pump(options, Date.parse(reminder.due));
+  assert.equal(posts, 1);
+  assert.equal(turns, 1, 'ongoing delivery is not duplicated');
+  writeFileSync(join(root, 'status.json'), '{"status":"running"}');
+  release(); await running;
+  const restored = new BackgroundTasks(file, root);
+  const delivered: string[] = [];
+  await restored.pump({ ...options, deliver: async (_t, message, admit) => {
+    delivered.push(message.content!.body!); admit(); return true;
+  } });
+  assert.equal(delivered.length, 1);
+  assert.match(delivered[0], /"status":"complete"/);
+  assert.doesNotMatch(delivered[0], /previous notification turn/, 'unadmitted observations are not interrupted turns');
+  assert.equal(posts, 1);
+});

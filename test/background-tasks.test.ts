@@ -463,7 +463,7 @@ test('stale watches track valid writes across restarts, then notify once even if
   assert.match(received[0], /may still be running/);
 });
 
-test('malformed writes do not refresh liveness, busy delivery can recover to terminal completion', async t => {
+test('malformed writes do not refresh liveness and observed stalls survive busy delivery', async t => {
   const f = setup(t), start = Date.now();
   f.queue.action({ ...input, stale_after_minutes: 1 }, target, signal());
   writeFileSync(join(f.root, 'status.json'), '{partial');
@@ -474,7 +474,7 @@ test('malformed writes do not refresh liveness, busy delivery can recover to ter
   assert.equal(deferred, true);
   f.status('complete');
   await f.queue.pump({ valid: () => true, report, deliver: async (_t, message, admit) => {
-    assert.match(message.content!.body!, /"status":"complete"/); admit(); return true;
+    assert.match(message.content!.body!, /"status":"watch_stalled"/); admit(); return true;
   } }, start + 3 * 60_000);
 });
 

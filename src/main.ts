@@ -603,7 +603,7 @@ async function main() {
       });
       backgroundPumps.set(account.userId, async () => {
         if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
-        await codingBridge.drainQueued();
+        void codingBridge.drainQueued().catch(diagnostics);
         publications?.pump(); confirmationJobs?.pump(); detachedJobs?.pump();
         github?.reconcile(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude' | 'pi'] === target.session);
         detached?.pump(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session);

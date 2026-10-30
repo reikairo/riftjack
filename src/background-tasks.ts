@@ -55,6 +55,7 @@ const timerMessage = (value: unknown): value is string => typeof value === 'stri
 export class BackgroundTasks {
   private watches: Watch[];
   private pumping = false;
+  private inFlight = new Set<string>();
   private notified: string[];
   private nextCheck = new Map<string, number>();
   constructor(private path: string, private workspace: string, private processProbe: ProcessProbe = probeProcess) {
@@ -74,7 +75,7 @@ export class BackgroundTasks {
       (w.notification !== undefined && (!record(w.notification) || !short(w.notification.group, 4096) || typeof w.notification.progress !== 'boolean' || !record(w.timer) || w.timer.deliver !== 'agent')) ||
       (w.delivery !== undefined && (!record(w.delivery) || !short(w.delivery.id, 1024) ||
         typeof w.delivery.body !== 'string' || w.delivery.body.length > 16_384 || !['timer', 'background'].includes(w.delivery.notice as string) ||
-        !Number.isFinite(w.delivery.time) || !Number.isSafeInteger(w.delivery.attempts) || (w.delivery.attempts as number) < 1 ||
+        !Number.isFinite(w.delivery.time) || !Number.isSafeInteger(w.delivery.attempts) || (w.delivery.attempts as number) < 0 ||
         (record(w.timer) && w.timer.deliver === 'room'))) ||
       (w.pid !== undefined && (w.timer !== undefined || !validPid(w.pid))) ||
       (w.stale !== undefined && (w.timer !== undefined || !record(w.stale) || !Number.isInteger(w.stale.minutes) || (w.stale.minutes as number) < 1 || (w.stale.minutes as number) > MAX_STALE_MINUTES || !Number.isFinite(w.stale.updated))) ||
@@ -343,12 +344,17 @@ export class BackgroundTasks {
   }, now = Date.now()) {
     if (this.pumping) return;
     this.pumping = true;
+    const deliveries: Promise<void>[] = [];
+    const dispatch = (watch: Watch, run: () => Promise<void>) => {
+      this.inFlight.add(watch.id);
+      deliveries.push(Promise.resolve().then(run).finally(() => { this.inFlight.delete(watch.id); }));
+    };
     try {
       for (const watch of this.watches) {
-        if (watch.state !== 'waiting') continue;
+        if (watch.state !== 'waiting' || this.inFlight.has(watch.id)) continue;
         if (watch.workspace !== this.workspace || !options.valid(watch)) { watch.state = 'cancelled'; delete watch.delivery; this.save(); continue; }
-        if (watch.delivery) { await this.deliverAgent(watch, options); continue; }
-        if (watch.timer) { if (now >= watch.expires) await this.fire(watch, options, now); continue; }
+        if (watch.delivery) { dispatch(watch, () => this.deliverAgent(watch, options)); continue; }
+        if (watch.timer) { if (now >= watch.expires) dispatch(watch, () => this.fire(watch, options, now)); continue; }
         if (watch.conditions) {
           if (now < watch.expires && now < (this.nextCheck.get(watch.id) ?? 0)) continue;
           this.nextCheck.set(watch.id, now + watchInterval(watch.conditions));
@@ -370,7 +376,7 @@ export class BackgroundTasks {
               + JSON.stringify({ id: watch.id, label: watch.label, mode: watch.conditions.mode,
                 status_file: watch.conditions.file, idle_file: watch.conditions.idle?.file, pid: watch.conditions.process?.pid, ...observation }),
               ...(watch.thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: watch.thread } }) } };
-          await this.deliverAgent(watch, options, event, () => { watch.result = observation.status; watch.observation = observation; this.nextCheck.delete(watch.id); });
+          dispatch(watch, () => this.deliverAgent(watch, options, event, () => { watch.result = observation.status; watch.observation = observation; this.nextCheck.delete(watch.id); }));
           continue;
         }
         let outcome = now >= watch.expires ? 'watch_expired' : undefined;
@@ -403,9 +409,11 @@ export class BackgroundTasks {
             + 'watch_expired means no terminal state was observed before the deadline; it does not mean the process stopped.\n'
             + JSON.stringify({ id: watch.id, label: watch.label, status_file: watch.file, field: watch.field, ...(watch.pid !== undefined && { pid: watch.pid }), status: outcome, last_error: watch.last_error, last_error_at: watch.last_error_at, last_error_stage: watch.last_error_stage }),
             ...(watch.thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: watch.thread } }) } };
-        await this.deliverAgent(watch, options, event, () => { watch.result = outcome; });
+        dispatch(watch, () => this.deliverAgent(watch, options, event, () => { watch.result = outcome; }));
       }
     } finally { this.pumping = false; }
+    // Await this pass without holding the scan lock across a model turn.
+    await Promise.all(deliveries);
   }
   // Save each admitted occurrence before model execution. Failure waits for a
   // restart, avoiding an unbounded retry loop against a broken backend.
@@ -413,9 +421,20 @@ export class BackgroundTasks {
     const previous = watch.delivery;
     const snapshot = previous ?? { id: event!.event_id!, body: event!.content!.body!,
       notice: event!.content![NOTICE] as 'timer' | 'background', time: event!.origin_server_ts!, attempts: 0 };
+    if (!previous && !watch.timer) {
+      // Freeze observations while the model is busy; later writes cannot erase them.
+      const before = { ...watch };
+      onAdmit?.();
+      watch.delivery = snapshot;
+      try { this.save(); } catch (error) {
+        delete watch.delivery; delete watch.result; delete watch.observation;
+        Object.assign(watch, before); throw error;
+      }
+      onAdmit = undefined;
+    }
     const message: MatrixEvent = { type: 'm.room.message', event_id: snapshot.id, sender: watch.sender, origin_server_ts: snapshot.time,
       content: { msgtype: 'm.text', [NOTICE]: snapshot.notice,
-        body: (previous ? 'Connector recovery after restart: the previous notification turn did not finish successfully. It may have performed actions or sent replies already. Inspect existing results before continuing; do not blindly repeat external actions or reuse expired confirmations. Original notification follows:\n\n' : '') + snapshot.body,
+        body: (previous && previous.attempts > 0 ? 'Connector recovery after restart: the previous notification turn did not finish successfully. It may have performed actions or sent replies already. Inspect existing results before continuing; do not blindly repeat external actions or reuse expired confirmations. Original notification follows:\n\n' : '') + snapshot.body,
         ...(watch.thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: watch.thread } }) } };
     const completed = (cancelled = false) => {
       if (watch.delivery?.id !== snapshot.id || watch.state === 'cancelled') return;
