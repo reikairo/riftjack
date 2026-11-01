@@ -356,7 +356,7 @@ export class ConversationLinks {
     return !Array.isArray(mentions) || mentions.length === 0 || mentions.includes(bot);
   }
   prompt(bot: string, room: string, event: MatrixEvent, prompt: string, steering = false): string {
-    const a = this.agent(bot)!, trigger = event.content?.[AGENT_TRIGGER], notice = event.content?.[NOTICE];
+    const trigger = event.content?.[AGENT_TRIGGER], notice = event.content?.[NOTICE];
     const shared = this.room(bot, room);
     const shownBefore = !!trigger && !!shared && this.shownBefore(bot, room, trigger.events?.length ? trigger.events : [trigger.event]);
     const rooms = steering ? [] : shared ? [shared] : this.config.rooms.filter(r => r.bots.includes(bot));
@@ -395,7 +395,7 @@ export class ConversationLinks {
     if (!steering) this.deliveries.set(bot, delivery);
     return 'Matrix message context:\n'
       // A background result or timer is written by the connector; reaction feedback describes the human's reaction.
-      + JSON.stringify({ room, visibility: shared ? 'shared' : 'private', human: a.owner,
+      + JSON.stringify({ room, visibility: shared ? 'shared' : 'private',
         author: trigger?.agent ?? (notice && notice !== 'reaction' ? 'connector' : event.sender),
         trigger: trigger ? 'agent-mention' : notice ?? 'human-message', ...(shared && { participants: roomMembers(shared) }),
         ...(unread.length && { unreadSharedMessages: unread }), ...(remainingMessages && { remainingMessages }), ...(shared && { peerCredit: this.peerCredit(bot) }), ...(shownBefore && { alreadyDelivered: true }),
