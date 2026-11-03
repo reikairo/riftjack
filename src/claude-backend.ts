@@ -63,7 +63,7 @@ type ClaudeInput = { write: (message: object) => void; end: () => void };
 // keepOpen leaves stdin open after input so control responses and live updates
 // can be written; consume must call end(). started receives the input at once.
 function runClaude(config: Config, args: string[], signal: AbortSignal, consume: (line: string, stdin: ClaudeInput) => void, input?: string, keepOpen = false,
-  started?: (stdin: ClaudeInput) => void): Promise<void> {
+  started?: (stdin: ClaudeInput) => void, allowedExitCodes: readonly number[] = [0]): Promise<number> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(config.claudePath, args, { cwd: config.workspace, env: claudeEnvironment(), stdio: 'pipe' });
@@ -97,8 +97,8 @@ function runClaude(config: Config, args: string[], signal: AbortSignal, consume:
       if (killTimer) clearTimeout(killTimer);
       if (signal.aborted) reject(signal.reason);
       else if (failure) reject(failure);
-      else if (code !== 0 || killed) reject(new PublicError('Claude Code exited unsuccessfully. Check its login, installed version and permissions on the host.', { cause: { code, signal: killed } }));
-      else resolve();
+      else if (code === null || !allowedExitCodes.includes(code) || killed) reject(new PublicError('Claude Code exited unsuccessfully. Check its login, installed version and permissions on the host.', { cause: { code, signal: killed } }));
+      else resolve(code);
     });
     if (signal.aborted) abort();
     if (keepOpen) child.stdin.write(input ?? ''); else child.stdin.end(input);
@@ -106,28 +106,33 @@ function runClaude(config: Config, args: string[], signal: AbortSignal, consume:
   });
 }
 
-async function capture(config: Config, args: string[], signal: AbortSignal): Promise<string> {
+async function capture(config: Config, args: string[], signal: AbortSignal, allowedExitCodes: readonly number[] = [0]): Promise<{ output: string; code: number }> {
   let output = '';
-  await runClaude(config, args, signal, line => {
+  const code = await runClaude(config, args, signal, line => {
     output += line + '\n';
     if (Buffer.byteLength(output) > 256 * 1024) throw new PublicError('Unexpectedly large Claude Code diagnostic response.');
-  });
-  return output;
+  }, undefined, false, undefined, allowedExitCodes);
+  return { output, code };
 }
 
 // Returns whether the CLI can acknowledge user messages written during a turn
 // (--replay-user-messages), which live steering requires.
 export async function checkClaude(config: Config, signal = AbortSignal.timeout(15_000)): Promise<{ replay: boolean; systemPromptSnapshot: boolean; hookEvents: boolean }> {
   const checkSignal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
-  const help = await capture(config, ['--help'], checkSignal);
+  const { output: help } = await capture(config, ['--help'], checkSignal);
   for (const flag of ['--input-format', '--output-format', '--permission-mode', '--permission-prompt-tool', '--append-system-prompt', '--tools', '--settings', '--resume']) {
     if (!help.includes(flag)) throw new PublicError('This Claude Code version lacks required headless options. Update Claude Code on the host.');
   }
+  // The CLI returns exit 1 with valid JSON when no account is signed in.
+  const auth = await capture(config, ['auth', 'status', '--json'], checkSignal, [0, 1]);
   let status: { loggedIn?: boolean; authMethod?: string };
-  try { status = JSON.parse(await capture(config, ['auth', 'status', '--json'], checkSignal)); }
+  try { status = JSON.parse(auth.output); }
   catch (error) {
     if (error instanceof SyntaxError) throw new PublicError('Claude Code did not return JSON authentication status. Update it and run claude auth login on the host.');
     throw error;
+  }
+  if (auth.code !== 0 && status?.loggedIn !== false) {
+    throw new PublicError('Claude Code authentication check failed. Check its login, installed version and permissions on the host.', { cause: { code: auth.code } });
   }
   if (status?.loggedIn !== true || status.authMethod !== 'claude.ai') {
     throw new PublicError('Sign in to Claude Code with your Claude account on the host (claude auth login). This connector does not use Anthropic API keys.');

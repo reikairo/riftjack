@@ -15,7 +15,7 @@ import type { BackendReply } from '../src/media.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
 
-function setup(t: { after(fn: () => void): void }, options: { auth?: string; malformed?: boolean; legacy?: boolean; replay?: boolean; snapshot?: boolean } = {}) {
+function setup(t: { after(fn: () => void): void }, options: { auth?: string; authExit?: number; malformed?: boolean; legacy?: boolean; replay?: boolean; snapshot?: boolean } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matrix-claude-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const executable = join(dir, 'claude.cjs');
@@ -29,7 +29,7 @@ if (args.includes('--help')) {
   console.log(${JSON.stringify(options.legacy ? '--help' : '--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume' + (options.replay ? ' --replay-user-messages' : '') + (options.snapshot ? ' --system-prompt-snapshot' : ''))}); process.exit(0);
 }
 if (args[0] === 'auth') {
-  console.log(${JSON.stringify(options.malformed ? 'not json' : JSON.stringify({ loggedIn: options.auth !== 'none', authMethod: options.auth || 'claude.ai', apiProvider: 'firstParty' }))}); process.exit(0);
+  console.log(${JSON.stringify(options.malformed ? 'not json' : JSON.stringify({ loggedIn: options.auth !== 'none', authMethod: options.auth || 'claude.ai', apiProvider: 'firstParty' }))}); process.exit(${options.authExit ?? (options.auth === 'none' ? 1 : 0)});
 }
 if (args[0] === '-p' && args[1] === '/usage') {
   console.log(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'usage-session' }));
@@ -270,6 +270,21 @@ for (const options of [{ auth: 'api_key' }, { auth: 'none' }, { malformed: true 
   test('Claude readiness fails closed for ' + JSON.stringify(options), async t => {
     const f = setup(t, options);
     await assert.rejects(f.backend('claude', 'hello', 'conversation', signal(), '@owner:test'));
+    assert.ok(!f.calls().some(call => call.args?.includes('--print')));
+  });
+}
+
+for (const authExit of [0, 1]) test(`Claude logged-out status with exit ${authExit} gives login instructions`, async t => {
+  const f = setup(t, { auth: 'none', authExit });
+  await assert.rejects(f.backend('claude', 'hello', 'conversation', signal(), '@owner:test'), /claude auth login/);
+  assert.ok(!f.calls().some(call => call.args?.includes('--print')));
+});
+
+for (const options of [{ authExit: 1 }, { auth: 'none', authExit: 2 }, { malformed: true, authExit: 1 }]) {
+  test('Claude failed auth command cannot start a task: ' + JSON.stringify(options), async t => {
+    const f = setup(t, options);
+    await assert.rejects(f.backend('claude', 'hello', 'conversation', signal(), '@owner:test'),
+      options.malformed ? /JSON authentication status/ : options.authExit === 2 ? /exited unsuccessfully/ : /authentication check failed/);
     assert.ok(!f.calls().some(call => call.args?.includes('--print')));
   });
 }
