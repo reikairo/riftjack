@@ -11,7 +11,7 @@ import { createBackend } from '../../src/backends.js';
 import { loadConfig } from '../../src/config.js';
 import { State } from '../../src/state.js';
 
-const input = { action: 'subscribe', repository: 'example/project', pull_requests: [1], events: ['pull_request'] };
+const input = { action: 'subscribe', repository: 'example/project', pull_requests: [1], events: ['pull_request'], interval_seconds: 60 };
 test('GitHub MCP has scoped authentication and closes at the end of the task', async t => {
   const lifetime = new AbortController();
   let called = 0;
@@ -39,6 +39,7 @@ test('GitHub MCP reads approved repositories without a subscription or a command
   const rpc = async (method: string, params?: object) => (await (await fetch(server.url, { method: 'POST',
     headers: { ...server.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) })).json());
   const schema = (await rpc('tools/list')).result.tools[0].inputSchema.properties;
+  assert.equal(schema.pull_requests.maxItems, 50);
   assert.ok(schema.action.enum.includes('read')); assert.ok(schema.resource.enum.includes('review_comments'));
   const args = { action: 'read', repository: 'example/project', pull_request: 1, resource: 'reviews', per_page: 10 };
   const response = await rpc('tools/call', { name: 'github_subscriptions', arguments: args });

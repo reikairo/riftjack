@@ -58,7 +58,7 @@ Subscribe to selected PRs:
   "repository": "example/project",
   "pull_requests": [12, 13],
   "events": ["checks", "reviews", "comments", "pull_request"],
-  "interval_seconds": 60
+  "interval_seconds": 600
 }
 ```
 
@@ -72,8 +72,11 @@ Cancel and register a replacement to change a selection:
 
 The selection applies to explicit PR numbers, including closed PRs. Repository-wide
 discovery and automatically following new members of a stack are not implemented;
-subscribe to newly created PRs when they are added. Each bot may have up to 10
-active subscriptions and 20 total PR selections. Each interval is 60–3600 seconds.
+subscribe to newly created PRs when they are added. Each bot may have up to 50
+active subscriptions and 50 total PR selections, with up to 50 PRs per subscription.
+Each interval is 60–3600 seconds; new subscriptions default to 600 seconds.
+Existing subscriptions retain their saved intervals. Repeated PR selections in
+different subscriptions each count toward the total.
 Registration and polling read paginated results; oversized or malformed results
 fail visibly instead of advancing a partial baseline.
 
@@ -134,3 +137,11 @@ includes `per_pr` with each PR's last success, error and next poll. The subscrip
 `last_success` advances only when no PR has an outstanding polling error.
 A review-body edit also counts as a review change; notifications contain links,
 not the review text. Initial registration still requires a complete baseline.
+
+A full poll with all event types uses at least seven requests per PR: two PR
+reads, reviews, issue comments, inline comments, check runs and commit statuses.
+Fifty PRs every minute would demand at least 21,000 requests/hour; at the new
+ten-minute default this is about 2,100, before pagination. These estimates exclude
+request time. Bots sharing credentials also share the queue described above, so
+additional bots, manual reads and pagination can extend the effective interval.
+The ten-minute default is a load reduction, not a guaranteed polling deadline.

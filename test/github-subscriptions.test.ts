@@ -160,7 +160,7 @@ test('ordinary permission failures do not impose a secondary-limit cooldown', as
 
 const target: BackgroundTarget = { room: '!room:example.com', sender: '@alice:example.com', key: 'conversation', session: 'session-1' };
 const signal = () => new AbortController().signal;
-const selection = { action: 'subscribe', repository: 'example/project', pull_requests: [1], events: ['checks', 'reviews', 'comments', 'pull_request'] };
+const selection = { action: 'subscribe', repository: 'example/project', pull_requests: [1], events: ['checks', 'reviews', 'comments', 'pull_request'], interval_seconds: 60 };
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'github-subscriptions-'));
@@ -509,4 +509,54 @@ test('editing review text is observable without copying its body into a notifica
   assert.equal(f.notices().length, 1);
   assert.match(f.notices()[0].message, /"event":"reviews"/);
   assert.doesNotMatch(f.notices()[0].message, /Changed review body/);
+});
+
+for (const grouped of [true, false]) test(`50 PR selections survive restart, grouped=${grouped}`, async t => {
+  const f = fixture(t);
+  const read: GitHubRead = async () => structuredClone(f.state.pr);
+  let subscriptions = new GitHubSubscriptions(f.path, f.policy, f.queue, read);
+  const spec = { ...selection, events: ['pull_request'] };
+  if (grouped) {
+    await subscriptions.action({ ...spec, pull_requests: Array.from({ length: 50 }, (_, i) => i + 1) }, target, signal());
+  } else {
+    for (let pr = 1; pr <= 50; pr++) await subscriptions.action({ ...spec, pull_requests: [pr] }, target, signal());
+  }
+  subscriptions = new GitHubSubscriptions(f.path, f.policy, f.queue, read);
+  const list = JSON.parse(await subscriptions.action({ action: 'list' }, target, signal()));
+  assert.equal(list.subscriptions.length, grouped ? 1 : 50);
+  assert.equal(list.subscriptions.reduce((n: number, s: any) => n + s.pull_requests.length, 0), 50);
+  await assert.rejects(subscriptions.action({ ...spec, pull_requests: [51] }, target, signal()), /50 total PR selections/);
+  const first = list.subscriptions[0];
+  const duplicate = JSON.parse(await subscriptions.action({ ...spec, pull_requests: first.pull_requests }, target, signal()));
+  assert.equal(duplicate.already_subscribed, true);
+  await subscriptions.action({ action: 'cancel', id: first.id }, target, signal());
+  await subscriptions.action({ ...spec, pull_requests: [51] }, target, signal());
+  new GitHubSubscriptions(f.path, f.policy, f.queue, read);
+});
+
+test('new default polls after ten minutes and saved explicit intervals survive restart', async t => {
+  const f = fixture(t);
+  const { interval_seconds: _interval, ...spec } = selection;
+  const created = JSON.parse(await f.subscriptions.action(spec, target, signal()));
+  assert.equal(created.interval_seconds, 600);
+  const baseline = f.requests.length;
+  t.mock.timers.tick(61_000);
+  await f.subscriptions.pump(() => true, signal());
+  assert.equal(f.requests.length, baseline);
+  t.mock.timers.tick(540_000);
+  await f.subscriptions.pump(() => true, signal());
+  assert.ok(f.requests.length > baseline);
+  await f.subscriptions.action({ action: 'cancel', id: created.id }, target, signal());
+  await f.subscriptions.action(selection, target, signal());
+  const restored = new GitHubSubscriptions(f.path, f.policy, f.queue, f.read);
+  const before = f.requests.length;
+  t.mock.timers.tick(61_000);
+  await restored.pump(() => true, signal());
+  assert.ok(f.requests.length > before);
+});
+
+test('a single selection over 50 PRs is rejected before reading GitHub', async t => {
+  const f = fixture(t);
+  await assert.rejects(f.subscriptions.action({ ...selection, pull_requests: Array.from({ length: 51 }, (_, i) => i + 1) }, target, signal()), /1–50/);
+  assert.equal(f.requests.length, 0);
 });

@@ -1,3 +1,4 @@
+import { MAX_GITHUB_PR_SELECTIONS, MAX_GITHUB_SUBSCRIPTIONS, DEFAULT_GITHUB_POLL_SECONDS } from './github-limits.js';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, realpathSync } from 'node:fs';
@@ -133,7 +134,7 @@ export class GitHubSubscriptions {
   constructor(private path: string, private policy: GitHubPolicy | undefined, private background: BackgroundTasks, private read?: GitHubRead) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const data = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : { version: 1, subscriptions: [] };
-    if (data.version !== 1 || !Array.isArray(data.subscriptions) || data.subscriptions.length > 50 || data.subscriptions.some((s: any) =>
+    if (data.version !== 1 || !Array.isArray(data.subscriptions) || data.subscriptions.length > MAX_GITHUB_SUBSCRIPTIONS || data.subscriptions.some((s: any) =>
       !record(s) || !['id', 'room', 'sender', 'key', 'session'].every(k => typeof s[k] === 'string' && s[k].length > 0 && s[k].length <= 4096) ||
       (s.thread !== undefined && typeof s.thread !== 'string') || !this.validSelection(s) ||
       !['active', 'cancelled'].includes(s.state) || !Number.isFinite(s.next) || !Number.isSafeInteger(s.failures) || s.failures < 0 ||
@@ -146,7 +147,7 @@ export class GitHubSubscriptions {
     this.items = data.subscriptions;
   }
   private validSelection(s: Record<string, any>): boolean {
-    return repoName(s.repository) && Array.isArray(s.pull_requests) && s.pull_requests.length > 0 && s.pull_requests.length <= 20 &&
+    return repoName(s.repository) && Array.isArray(s.pull_requests) && s.pull_requests.length > 0 && s.pull_requests.length <= MAX_GITHUB_PR_SELECTIONS &&
       s.pull_requests.every((n: unknown) => Number.isSafeInteger(n) && (n as number) > 0) &&
       Array.isArray(s.events) && s.events.length > 0 && s.events.length <= events.length && s.events.every((k: any) => events.includes(k)) &&
       Number.isInteger(s.interval_seconds) && s.interval_seconds >= 60 && s.interval_seconds <= 3600;
@@ -199,9 +200,9 @@ export class GitHubSubscriptions {
       this.background.cancelNotifications(group(s), target);
       return JSON.stringify(this.describe(s));
     }
-    const selection = { ...input, interval_seconds: input.interval_seconds ?? 60 };
+    const selection = { ...input, interval_seconds: input.interval_seconds ?? DEFAULT_GITHUB_POLL_SECONDS };
     if (input.action !== 'subscribe' || Object.keys(input).some(k => !['action', 'repository', 'pull_requests', 'events', 'interval_seconds'].includes(k)) || !this.validSelection(selection)) {
-      throw new PublicError('Use subscribe with repository (owner/name), pull_requests (1–20 numbers), events (checks, reviews, comments, pull_request), and optional interval_seconds (60–3600).');
+      throw new PublicError(`Use subscribe with repository (owner/name), pull_requests (1–${MAX_GITHUB_PR_SELECTIONS} numbers), events (checks, reviews, comments, pull_request), and optional interval_seconds (60–3600, default ${DEFAULT_GITHUB_POLL_SECONDS}).`);
     }
     if (!this.policy?.repositories.includes(input.repository.toLowerCase()) || !this.read) throw new PublicError('This repository is not enabled for this bot by the owner. Use list to see allowed repositories.');
     const s: Subscription = { ...target, id: randomUUID(), repository: input.repository.toLowerCase(), pull_requests: [...new Set<number>(input.pull_requests)].sort((a,b) => a-b),
@@ -209,7 +210,7 @@ export class GitHubSubscriptions {
     const existing = this.items.find(x => same(x, s) && x.state === 'active' && x.repository === s.repository &&
       JSON.stringify(x.pull_requests) === JSON.stringify(s.pull_requests) && JSON.stringify(x.events) === JSON.stringify(s.events) && x.interval_seconds === s.interval_seconds);
     if (existing) return JSON.stringify({ ...this.describe(existing), already_subscribed: true });
-    if (this.items.filter(x => x.state === 'active').length >= 10 || this.items.filter(x => x.state === 'active').reduce((n, x) => n + x.pull_requests.length, 0) + s.pull_requests.length > 20) throw new PublicError('Cancel an unused subscription first (maximum 10 subscriptions and 20 total PR selections per bot).');
+    if (this.items.filter(x => x.state === 'active').length >= MAX_GITHUB_SUBSCRIPTIONS || this.items.filter(x => x.state === 'active').reduce((n, x) => n + x.pull_requests.length, 0) + s.pull_requests.length > MAX_GITHUB_PR_SELECTIONS) throw new PublicError(`Cancel an unused subscription first (maximum ${MAX_GITHUB_SUBSCRIPTIONS} subscriptions and ${MAX_GITHUB_PR_SELECTIONS} total PR selections per bot).`);
     // Baseline first, never replay existing comments or completed checks on registration.
     s.snapshot = await this.capture(s, signal);
     signal.throwIfAborted();
