@@ -191,6 +191,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   // Permission prompts arrive as stream-json control requests and are answered in Matrix.
   if (interactive) args.push('--permission-prompt-tool', 'stdio');
   if (config.claudeModel) args.push('--model', config.claudeModel);
+  if (config.claudeReasoningEffort) args.push('--effort', config.claudeReasoningEffort);
   // Connector instructions belong in the system prompt, not in every user message of the history.
   if (instructions) {
     args.push('--append-system-prompt', instructions);

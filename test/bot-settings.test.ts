@@ -65,7 +65,7 @@ test('authorization, unsupported engines and invalid values leave settings untou
   const f = setup(t), before = readFileSync(f.file, 'utf8');
   assert.throws(() => f.run('set model bot codex to example', '@other:test'), /Only/);
   for (const text of ['set model bot grok to example', 'set model bot manager to example', 'set tier bot claude to priority',
-    'reset reasoning bot claude', 'set model bot codex to --flag', 'set model bot codex to ' + 'x'.repeat(129)]) assert.throws(() => f.run(text));
+    'set reasoning bot claude to invalid', 'set model bot codex to --flag', 'set model bot codex to ' + 'x'.repeat(129)]) assert.throws(() => f.run(text));
   assert.equal(readFileSync(f.file, 'utf8'), before);
   f.accounts.add({ ...f.accounts.list()[0], userId: '@duplicate:test' });
   assert.throws(() => f.run('set model bot codex to example'), /Several bots/);
@@ -79,7 +79,7 @@ test('malformed stored settings fail validation on startup', t => {
     writeFileSync(f.file, JSON.stringify(data));
     assert.throws(() => new Accounts(f.file));
   }
-  original[1].engineSettings = { reasoning: 'high' };
+  original[1].engineSettings = { reasoning: 'invalid' };
   writeFileSync(f.file, JSON.stringify(original));
   assert.throws(() => new Accounts(f.file));
 });
@@ -124,4 +124,40 @@ test('Claude shared tier validates values and remains unset by default', t => {
   original[1].engineSettings = { tier: 'priority' };
   writeFileSync(f.file, JSON.stringify(original));
   assert.throws(() => new Accounts(f.file), /default or fast/);
+});
+
+test('Claude reasoning persists, inherits and resets independently of model, tier and Codex', t => {
+  const f = setup(t), codexBefore = f.accounts.list()[0];
+  f.run('set model bot claude to personal-claude');
+  f.run('set tier bot claude to fast');
+  for (const level of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    assert.match(f.run('set reasoning bot claude to ' + level, '@creator:test'), new RegExp('reasoning:.*' + level + '.*bot override'));
+    const account = new Accounts(f.file).list()[1];
+    assert.equal(account.engineSettings!.reasoning, level);
+    const effective = withEngineSettings({ ...f.config, claudeReasoningEffort: 'medium' }, account);
+    assert.equal(effective.claudeReasoningEffort, level);
+    assert.match(botStatus('claude', effective, {}), new RegExp('Reasoning: ' + level));
+  }
+  const before = readFileSync(f.file, 'utf8');
+  assert.match(f.run('show settings bot claude'), /reasoning:.*max.*bot override/);
+  assert.throws(() => f.run('set reasoning bot claude to low', '@other:test'), /Only/);
+  for (const value of ['invalid', 'HIGH', 'none', '--help']) assert.throws(() => f.run('set reasoning bot claude to ' + value));
+  assert.equal(readFileSync(f.file, 'utf8'), before);
+  assert.match(f.run('reset reasoning bot claude'), /reasoning: automatic.*inherited/);
+  const account = new Accounts(f.file).list()[1];
+  assert.equal(withEngineSettings(f.config, account).claudeReasoningEffort, undefined);
+  assert.equal(withEngineSettings({ ...f.config, claudeReasoningEffort: 'medium' }, account).claudeReasoningEffort, 'medium');
+  assert.deepEqual(account.engineSettings, { model: 'personal-claude', tier: 'fast' });
+  assert.deepEqual(f.accounts.list()[0], codexBefore);
+});
+
+test('Claude shared reasoning validates levels and defaults to CLI inheritance', t => {
+  const f = setup(t);
+  const env = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: f.config.workspace };
+  assert.equal(loadConfig(env).claudeReasoningEffort, undefined);
+  assert.equal(loadConfig({ ...env, CLAUDE_REASONING_EFFORT: ' ' }).claudeReasoningEffort, undefined);
+  for (const level of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    assert.equal(loadConfig({ ...env, CLAUDE_REASONING_EFFORT: ' ' + level + ' ' }).claudeReasoningEffort, level);
+  }
+  assert.throws(() => loadConfig({ ...env, CLAUDE_REASONING_EFFORT: 'invalid' }), /CLAUDE_REASONING_EFFORT/);
 });

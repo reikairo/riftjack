@@ -35,6 +35,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (!['on-request', 'never'].includes(piApprovalPolicy)) throw new Error('PI_APPROVAL_POLICY must be on-request or never.');
   const claudeApprovalPolicy = env.CLAUDE_APPROVAL_POLICY?.trim() || 'on-request';
   if (claudeApprovalPolicy !== 'on-request' && claudeApprovalPolicy !== 'never') throw new Error('CLAUDE_APPROVAL_POLICY must be on-request or never.');
+  const claudeReasoningEffort = env.CLAUDE_REASONING_EFFORT?.trim() || undefined;
+  if (claudeReasoningEffort && !['low', 'medium', 'high', 'xhigh', 'max'].includes(claudeReasoningEffort)) throw new Error('CLAUDE_REASONING_EFFORT must be low, medium, high, xhigh, max or blank.');
   const claudeServiceTier = env.CLAUDE_SERVICE_TIER?.trim() || undefined;
   if (claudeServiceTier && !['default', 'fast'].includes(claudeServiceTier)) throw new Error('CLAUDE_SERVICE_TIER must be default, fast or blank.');
   const turnCompletionReactions = env.TURN_COMPLETION_REACTIONS?.trim() || 'true';
@@ -68,6 +70,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     codexPath: env.CODEX_PATH?.trim() || 'codex',
     codexNetworkAllow,
     claudeModel: env.CLAUDE_MODEL?.trim() || undefined,
+    claudeReasoningEffort,
     claudeServiceTier,
     piApprovalPolicy: piApprovalPolicy as 'on-request' | 'never',
     piPath: env.PI_PATH?.trim() || 'pi',

@@ -102,7 +102,7 @@ reset reasoning bot Builder
 reset tier bot Builder
 ```
 
-Replace `MODEL` with an identifier accepted by that bot’s CLI and account. Model selection works for both Codex and Claude. Reasoning overrides are Codex-only. For Codex tiers, `default` requests standard service and `priority` requests priority processing. For Claude tiers, `fast` requests fast mode and `default` explicitly turns it off. `reset tier bot Research` restores inheritance from `CLAUDE_SERVICE_TIER`, or from CLI settings when that shared value is blank. Grok’s model belongs to its external worker.
+Replace `MODEL` with an identifier accepted by that bot’s CLI and account. Model selection works for both Codex and Claude. Reasoning overrides work for both engines. Claude accepts `low`, `medium`, `high`, `xhigh` or `max`, passed as `--effort` to Claude Code. `reset reasoning bot Research` restores inheritance from `CLAUDE_REASONING_EFFORT`, or from CLI settings when blank. This requires a Claude Code version and model supporting the selected effort. For Codex tiers, `default` requests standard service and `priority` requests priority processing. For Claude tiers, `fast` requests fast mode and `default` explicitly turns it off. `reset tier bot Research` restores inheritance from `CLAUDE_SERVICE_TIER`, or from CLI settings when that shared value is blank. Grok’s model belongs to its external worker.
 
 Each field inherits its corresponding `.env` default until explicitly set for the bot. Resetting a field removes just that override. If the shared value is blank, Riftjack leaves that option to the CLI. `show settings bot` labels overrides and inherited values; `!status` in the bot chat shows the effective configuration separately from the last CLI session report.
 

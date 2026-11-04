@@ -91,7 +91,7 @@ export function botStatus(kind: 'codex' | 'claude' | 'pi', config: Config, sessi
   const settings = [
     row('Workspace', config.workspace),
     row('Model', codex ? config.codexModel : config.claudeModel, configured),
-    ...(codex ? [row('Reasoning', config.codexReasoningEffort, configured)] : []),
+    row('Reasoning', codex ? config.codexReasoningEffort : config.claudeReasoningEffort, configured),
     row('Service tier', codex ? config.codexServiceTier : config.claudeServiceTier, configured),
   ].join('\n');
   const reported = report ? [
