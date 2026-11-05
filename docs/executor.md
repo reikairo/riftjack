@@ -217,3 +217,7 @@ room timelines after downtime, using the existing message-recovery implementatio
 Failed decryption cannot admit a command; check device keys and resend only after
 inspecting the existing job ID. This mode has local automated tests; real encrypted
 room delivery and Linux ARM64 operation need a deployment smoke test.
+
+## Device verification
+
+The executor signs its Matrix device with its account’s cross-signing identity at startup, using the same identity recovery as other bots. It saves recovery material in `EXECUTOR_DATA_DIR/device-recovery.json`; include this private file when backing up the executor state and never send it in chat. Existing identities are preserved. If verification cannot finish, encrypted messaging remains available and startup logs report the incomplete verification. Trusting the account in your own client is separate; see [device identity and verification](security.md#device-identity-and-verification).

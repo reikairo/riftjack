@@ -9,6 +9,7 @@ import { executorPolicy, executorRoomAllowed } from './executor-protocol.js';
 import { lockInstance } from './instance-lock.js';
 import { MatrixMedia } from './media.js';
 import { safeErrorSummary } from './errors.js';
+import { ensureDeviceIdentity } from './device-identity.js';
 
 export function bindExecutorInbox(client: Pick<MessageMatrixClient, 'on' | 'inbox'>, queue: Pick<ExecutorQueue, 'receive'>, allowed: ExecutorTransport['allowed']) {
   // Only successfully decrypted text messages may submit commands.
@@ -76,6 +77,13 @@ export async function executorMain() {
   const me = await client.getWhoAmI();
   if (me.user_id !== bot || !me.device_id) throw new Error('Use a device-bound access token belonging to MATRIX_USER_ID.');
   await client.crypto.prepare();
+  try {
+    await ensureDeviceIdentity(client, bot, join(dir, 'device-recovery.json'));
+    console.log('Executor device cross-signing verified.');
+  } catch (error) {
+    console.warn('Executor device verification incomplete; encrypted messaging remains available.');
+    console.error(safeErrorSummary(error));
+  }
   await client.start();
   const timer = setInterval(() => { if (!stopped) void queue.tick(transport).catch(e => console.error(safeErrorSummary(e))); }, 2000);
   const shutdown = () => { stopped = true; clearInterval(timer); client.stop(); release(); process.exit(0); };
