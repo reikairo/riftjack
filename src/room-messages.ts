@@ -15,7 +15,7 @@ export type MessageAction = (request: MessageRequest, signal: AbortSignal) => Pr
 export type RoomMessageTool = (input: unknown, signal: AbortSignal, outbox?: string) => Promise<string>;
 
 export function linkedRoomMessages(links: ConversationLinks, bot: string,
-  context: { event: MatrixEvent; key: string }, transport: {
+  context: { room: string; event: MatrixEvent; key: string }, transport: {
     allowed(room: string, sender: string): Promise<boolean>;
     stopping(): boolean;
     send(room: string, content: { msgtype: 'm.text'; body: string; format?: 'org.matrix.custom.html'; formatted_body?: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: ReturnType<ConversationLinks['reserve']> | ReturnType<ConversationLinks['reserveMentions']> }): Promise<string>;
@@ -78,6 +78,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
     if (recipients.length && !grants) throw new PublicError('Room message withheld: no peer credit is available for all recipients. It is restored when the human next writes to you; select fewer recipients or send without mention.');
     // Use the running client's encryption state. Do not inherit private thread
     // relations, approvals or a human origin from the source room.
+    const executorOrigin = request.text.startsWith('!exec ') ? links.executorOrigin(bot, context) : undefined;
     const eventId = await transport.send(request.room, {
       ...(recipients.length ? mentionContent(request.text, recipients.map(id => ({ id, name: links.displayName(id) })))
         : { msgtype: 'm.text' as const, body: request.text }),
@@ -86,8 +87,11 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
     });
     // Record executor correlation before returning the tool result, without
     // depending on a later sync echo (which may arrive after a fast completion).
-    if (request.text.startsWith('!exec ')) links.observe(bot, request.room, { type: 'm.room.message', sender: bot, event_id: eventId,
-      content: { msgtype: 'm.text', body: request.text } });
+    if (executorOrigin) {
+      links.observe(bot, request.room, { type: 'm.room.message', sender: bot, event_id: eventId,
+        content: { msgtype: 'm.text', body: request.text } });
+      links.rememberExecutorOrigin(bot, request.room, eventId, executorOrigin);
+    }
     return JSON.stringify({ status: 'sent', room: request.room, event_id: eventId });
   };
 }

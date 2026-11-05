@@ -126,6 +126,15 @@ It is saved before the Matrix sync checkpoint advances. A busy agent receives it
 when available; a failed notification turn recovers after restart. Repeated events
 are deduplicated. No human follow-up is needed.
 
+When an agent sends a command with `room_messages`, Riftjack saves the originating
+chat and thread locally. Completion and progress resume the agent there, so its
+discussion and approval requests stay with the task. Commands and execution logs
+remain in the executor room; the notification identifies that room for attachment
+retrieval. The executor cannot choose the continuation destination. The saved
+origin survives restart, and delivery still requires access to the source room
+and the same linked session. Requests without a saved origin return to the
+agent's linked private chat.
+
 Set `"wakeIntervalSeconds":60` on a run request for progress notifications at most
 once a minute, only when new output exists. `0` (the default) disables progress
 wakes; nonzero values are whole seconds from 10 to 86400. These intervals are

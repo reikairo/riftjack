@@ -62,7 +62,7 @@ test('three agents retain separate sessions and exact room membership', async t 
   assert.equal(isSharedRoomState([...roomState(), { type: 'm.room.member', state_key: '@extra:test', content: { membership: 'invite' } }], [owner, ...bots]), false);
   for (const invalid of [[bots[0]], [bots[0], bots[1], bots[1]], [bots[0], bots[1], owner]]) {
     writeFileSync(f.path, JSON.stringify({ ...f.config, rooms: [{ room, owner, bots: invalid }] }));
-    assert.throws(f.load, /distinct agents/);
+    assert.throws(f.load, invalid.length === 1 ? /requires a configured executor/ : /distinct agents/);
   }
   writeFileSync(f.path, JSON.stringify({ ...f.config, agents: f.config.agents.slice(0, 2) }));
   assert.throws(f.load, /explicit session link/);
@@ -158,7 +158,7 @@ test('a three-agent mention cycle exhausts its credit without new human messages
 test('room tool lists agents and requires explicit recipients for group mentions', async t => {
   const f = fixture(t), sent: any[] = [], signal = new AbortController().signal;
   const action = roomMessageDelivery(linkedRoomMessages(f.links, bots[0], {
-    event: message(), key: sessionKey(home(bots[0]), message()),
+    room: home(bots[0]), event: message(), key: sessionKey(home(bots[0]), message()),
   }, { allowed: async () => true, stopping: () => false, send: async (_room, content) => { sent.push(content); return '$sent'; } }));
   const listed = JSON.parse(await action({ action: 'list' }, signal));
   assert.deepEqual(listed.rooms[0], { room, type: 'shared', agents: bots });

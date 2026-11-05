@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { ConversationLinks, isSharedRoomState, MENTION_REPLY_LIMIT, mentionText, PEER_CREDIT } from '../src/conversation-links.js';
 import { replyContent, replyRelation } from '../src/message-format.js';
 import { State } from '../src/state.js';
+import { BackgroundTasks } from '../src/background-tasks.js';
 import { linkedRoomMessages, roomMessageDelivery } from '../src/room-messages.js';
 import { AGENT_TRIGGER, Bridge, GRANT, NOTICE, REPLY, SERVICE, sessionKey, type MatrixEvent } from '../src/bridge.js';
 
@@ -42,7 +43,7 @@ test('shared attachment retrieval checks the exact event, producer and live acce
   let target: MatrixEvent | undefined = { ...message('picture.png', '$image', peer), room_id: group,
     content: { msgtype: 'm.image', body: 'picture.png', file: { url: 'mxc://test/image' } as any } };
   const file = { path: '/local/picture.png', name: 'picture.png', size: 1, mimetype: 'image/png', image: true };
-  const action = linkedRoomMessages(f.links, bot, { event: message('Inspect the image'), key: canonical }, {
+  const action = linkedRoomMessages(f.links, bot, { room: home, event: message('Inspect the image'), key: canonical }, {
     allowed: async () => live, stopping: () => false, send: async () => { throw new Error('Retrieval must not send'); },
     read: async () => { reads++; if (revokeAt === 'read') live = false; return target; },
     receive: async (_event, key, _signal, authorize) => {
@@ -84,7 +85,7 @@ test('shared encrypted downloads leave no plaintext when access or cancellation 
       if (mode === 'revoked') live = false;
       return new Response(new Uint8Array(encrypted.encryptedData));
     });
-    const action = linkedRoomMessages(f.links, bot, { event: message('Get the attachment'), key: canonical }, {
+    const action = linkedRoomMessages(f.links, bot, { room: home, event: message('Get the attachment'), key: canonical }, {
       allowed: async () => { if (downloaded && mode === 'cancelled') { await Promise.resolve(); abort.abort(); } return live; },
       stopping: () => false, send: async () => { throw new Error('No sends expected'); },
       read: async () => target,
@@ -109,7 +110,7 @@ test('a completed shared download returns its receipt when access changes after 
   }, {
     workspace: f.dir, homeserver: 'https://matrix.test', accessToken: 'test', maxBytes: 1024, scope: bot,
   }, async () => new Response(new Uint8Array(encrypted.encryptedData)));
-  const action = linkedRoomMessages(f.links, bot, { event: message('Get the attachment'), key: canonical }, {
+  const action = linkedRoomMessages(f.links, bot, { room: home, event: message('Get the attachment'), key: canonical }, {
     allowed: async () => live, stopping: () => false, send: async () => { throw new Error('No sends expected'); },
     read: async () => target,
     receive: async (event, key, signal, authorize) => {
@@ -135,7 +136,7 @@ test('linked file sends validate the batch and return partial receipts without r
   symlinkSync(join(root, 'one.txt'), join(root, 'link.txt'));
   writeFileSync(join(root, 'hard.txt'), 'hard'); linkSync(join(root, 'hard.txt'), join(root, 'hard-copy.txt'));
   let live = true, calls = 0, fail = false, revoke = false;
-  const action = roomMessageDelivery(linkedRoomMessages(f.links, bot, { event: message('Share files'), key: canonical }, {
+  const action = roomMessageDelivery(linkedRoomMessages(f.links, bot, { room: home, event: message('Share files'), key: canonical }, {
     allowed: async () => live, stopping: () => false, maxBytes: 4, send: async () => { throw new Error('No text'); },
     sendFiles: async (room, files, _signal, authorize) => {
       assert.equal(room, group); assert.equal(files.length, 1); calls++;
@@ -198,7 +199,7 @@ test('outbound room messages enforce destination privacy and session binding wit
   let live = roomState(), stopping = false, calls = 0, resetDuringCheck = false;
   const event = message('Private instruction');
   Object.assign(event.content!, { 'm.relates_to': { rel_type: 'm.thread', event_id: '$private' }, 'm.mentions': { user_ids: [peer] } });
-  const action = linkedRoomMessages(f.links, bot, { event, key: canonical }, {
+  const action = linkedRoomMessages(f.links, bot, { room: home, event, key: canonical }, {
     stopping: () => stopping,
     allowed: async (room, sender) => {
       if (resetDuringCheck) f.state.reset(canonical);
@@ -231,7 +232,7 @@ test('an agent can return a result to its own private chat, but not mention anyo
   const f = fixture(t), signal = new AbortController().signal, sent: [string, object][] = [];
   const privateState = roomState().filter(e => e.state_key !== peer);
   let homePrivate = true;
-  const action = linkedRoomMessages(f.links, bot, { event: message('Ask the reviewer'), key: canonical }, {
+  const action = linkedRoomMessages(f.links, bot, { room: home, event: message('Ask the reviewer'), key: canonical }, {
     stopping: () => false,
     allowed: (room, sender) => f.links.allowed(bot, room, sender, async () => room === home ? (homePrivate ? privateState : roomState()) : roomState()),
     send: async (room, content) => { sent.push([room, content]); return '$sent'; },
@@ -249,7 +250,7 @@ test('an agent can return a result to its own private chat, but not mention anyo
 
 test('an outbound room message can mention the peer only with peer credit', async t => {
   const f = pair(t), signal = new AbortController().signal, sent: object[] = [];
-  const action = linkedRoomMessages(f.links, bot, { event: message('Tell the reviewer'), key: canonical }, {
+  const action = linkedRoomMessages(f.links, bot, { room: home, event: message('Tell the reviewer'), key: canonical }, {
     stopping: () => false, allowed: async (room, sender) => f.links.allowed(bot, room, sender, async () => roomState()),
     send: async (_room, content) => { sent.push(content); return '$sent'; },
   });
@@ -985,7 +986,7 @@ test('configured observers share text and attachments but never gain controller 
   assert.ok(prompt.participants.includes(observer));
   assert.equal(prompt.unreadSharedMessages[0].role, 'participant');
   assert.equal(prompt.unreadSharedMessages[0].body, 'job: succeeded');
-  const action = linkedRoomMessages(links, bot, { event: message('Read log'), key: canonical }, {
+  const action = linkedRoomMessages(links, bot, { room: home, event: message('Read log'), key: canonical }, {
     allowed: async () => true, stopping: () => false, send: async () => assert.fail('No send'),
     read: async () => ({ ...observation, content: { msgtype: 'm.file', body: 'output.log', file: { url: 'mxc://test/log' } as any } }),
     receive: async (_e, _key, _signal, authorize) => { await authorize(); return { path: '/local/output.log', name: 'output.log', size: 4, image: false, mimetype: 'text/plain' }; },
@@ -1002,7 +1003,7 @@ for (const singleAgent of [false, true]) test(`executor notifications preserve a
   if (singleAgent) f.config.rooms[0].bots = [bot];
   writeFileSync(f.path, JSON.stringify(f.config));
   let links = f.load();
-  const action = linkedRoomMessages(links, bot, { event: message('Run'), key: canonical }, {
+  const action = linkedRoomMessages(links, bot, { room: home, event: message('Run'), key: canonical }, {
     allowed: async () => true, stopping: () => false, send: async () => '$request',
   });
   await action({ action: 'send', id: 'job', room: group, text: `!exec ${executor} {"action":"run","id":"job","wakeIntervalSeconds":60}` }, new AbortController().signal);
@@ -1034,6 +1035,126 @@ for (const singleAgent of [false, true]) test(`executor notifications preserve a
   assert.ok(links.executorResult(bot, group, result)!.body.length <= 4000);
   (f.config.rooms[0] as any).executors = [peer]; writeFileSync(f.path, JSON.stringify(f.config));
   assert.throws(f.load, /configured observers/);
+});
+
+
+for (const source of ['private', 'shared'] as const) test(`executor continuations return to the ${source} source thread after restart`, async t => {
+  const f = fixture(t), executor = '@executor:test', control = '!control:test';
+  f.config.rooms.push({ room: control, owner: human, bots: [bot] });
+  Object.assign(f.config.rooms[1], { observers: [executor], executors: [executor] });
+  writeFileSync(f.path, JSON.stringify(f.config));
+  let links = f.load();
+  const originRoom = source === 'private' ? home : group;
+  const event = message('Run this task');
+  event.content!['m.relates_to'] = { rel_type: 'm.thread', event_id: '$source-thread' };
+  const command = `!exec ${executor} {"action":"run","id":"job","wakeIntervalSeconds":60}`;
+  const action = linkedRoomMessages(links, bot, { room: originRoom, event, key: canonical }, {
+    allowed: async () => true, stopping: () => false,
+    send: async (room, content) => {
+      assert.equal(room, control);
+      assert.deepEqual(content, { msgtype: 'm.text', body: command, 'm.mentions': { user_ids: [] } });
+      // An early sync echo must not prevent recording the private origin.
+      links.observe(bot, control, message(command, '$request', bot));
+      return '$request';
+    },
+  });
+  await action({ action: 'send', id: 'job', room: control, text: command }, new AbortController().signal);
+  links.prompt(bot, control, message('Next'), 'Next'); links.acknowledge(bot);
+  links = f.load();
+  // Late duplicate echoes must not overwrite the persisted origin either.
+  links.observe(bot, control, message(command, '$request', bot));
+  const result: MatrixEvent = { ...message('Finished', '$result', executor), content: {
+    msgtype: 'm.text', body: 'Finished', 'm.mentions': { user_ids: [bot] },
+    'm.relates_to': { rel_type: 'm.thread', event_id: '$executor-thread' },
+    'riftjack.executor_result': { jobId: 'job', reason: 'completed', request: '$request',
+      target: { room: control, thread: '$forged', sender: executor } } as any,
+  } };
+  for (const reason of ['completed', 'uncertain', 'progress']) {
+    result.content!['riftjack.executor_result']!.reason = reason;
+    const notice = links.executorResult(bot, control, result)!;
+    assert.deepEqual(notice.target, { room: originRoom, sender: human, key: canonical,
+      session: 'original-thread', thread: '$source-thread' });
+    assert.equal(JSON.parse(notice.body.split('\n')[1]).room, control);
+  }
+  // Exercise the durable inbox and Bridge: both discussion and confirmation
+  // inherit the source room/thread, not the executor reply's thread.
+  result.content!['riftjack.executor_result']!.reason = 'completed';
+  const notice = links.executorResult(bot, control, result)!;
+  const queueFile = join(f.dir, 'background.json');
+  new BackgroundTasks(queueFile, f.dir).notify(notice.id, notice.target, notice.body,
+    { group: notice.group, progress: notice.progress });
+  const destinations: string[] = [];
+  const checkDestination = (room: string, event: MatrixEvent) => {
+    destinations.push(room);
+    assert.equal(room, originRoom);
+    assert.equal(event.content?.['m.relates_to']?.event_id, '$source-thread');
+  };
+  const bridge = new Bridge({ botId: bot, kind: 'codex', since: 0, timeoutMs: 2000, state: f.state,
+    linkedSession: (room, event) => links.key(bot, room, event),
+    isAuthorized: sender => sender === human, isPrivateRoom: async () => true,
+    report: error => { throw error; }, reply: async (room, event) => checkDestination(room, event),
+    confirmation: async (room, event, _text, controls) => {
+      checkDestination(room, event); controls.bind('$confirmation');
+      await bridge.handle(room, { type: 'm.reaction', sender: human, event_id: '$decision', origin_server_ts: Date.now(),
+        content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$confirmation', key: '❌' } } });
+    },
+    run: async (_mode, _prompt, _key, signal, _sender, _attachments, interact, _publish, hooks) => {
+      await hooks!.progress!('Inspecting the result');
+      assert.deepEqual(await interact!({ text: 'Apply changes?', approve: { yes: true }, deny: { yes: false } }, signal), { yes: false });
+      return 'Finished inspection';
+    },
+  });
+  await new BackgroundTasks(queueFile, f.dir).pump({ valid: () => true, report: error => { throw error; },
+    deliver: (target, event, admitted, ready, completed) => bridge.resumeBackground(target.room, event, target.session, admitted, ready, completed) });
+  assert.equal(destinations.length, 4); // Progress, confirmation, denial acknowledgement and final reply.
+  // Revoked/reconfigured destinations and new sessions cannot inherit the job.
+  if (source === 'shared') {
+    f.config.rooms[0].bots = [bot];
+    Object.assign(f.config.rooms[0], { observers: [executor], executors: [executor] });
+    writeFileSync(f.path, JSON.stringify(f.config));
+    assert.equal(f.load().executorResult(bot, control, result), undefined);
+    f.config.rooms.splice(0, 1); writeFileSync(f.path, JSON.stringify(f.config));
+    assert.equal(f.load().executorResult(bot, control, result), undefined);
+  }
+  f.state.update(canonical, { codex: 'replacement-thread' });
+  assert.equal(links.executorResult(bot, control, result), undefined);
+  f.config.agents[0].session = 'replacement-thread'; writeFileSync(f.path, JSON.stringify(f.config));
+  assert.equal(f.load().executorResult(bot, control, result), undefined);
+});
+
+test('a session change while sending cannot attach an executor job to the replacement session', async t => {
+  const f = fixture(t), executor = '@executor:test';
+  Object.assign(f.config.rooms[0], { observers: [executor], executors: [executor] });
+  writeFileSync(f.path, JSON.stringify(f.config));
+  const links = f.load();
+  const action = linkedRoomMessages(links, bot, { room: home, event: message('Run'), key: canonical }, {
+    allowed: async () => true, stopping: () => false, send: async () => {
+      f.state.update(canonical, { codex: 'replacement-thread' });
+      return '$request';
+    },
+  });
+  const receipt = JSON.parse(await action({ action: 'send', id: 'job', room: group,
+    text: `!exec ${executor} {"action":"run","id":"job"}` }, new AbortController().signal));
+  assert.equal(receipt.status, 'sent'); // Do not encourage replay of a delivered command.
+  f.config.agents[0].session = 'replacement-thread'; writeFileSync(f.path, JSON.stringify(f.config));
+  assert.equal(f.load().executorResult(bot, group, { ...message('Done', '$result', executor), content: {
+    msgtype: 'm.text', body: 'Done', 'm.mentions': { user_ids: [bot] },
+    'riftjack.executor_result': { jobId: 'job', request: '$request', reason: 'completed' },
+  } }), undefined);
+});
+
+test('executor requests without a saved origin use the linked home, never executor-supplied routing', t => {
+  const f = fixture(t), executor = '@executor:test';
+  Object.assign(f.config.rooms[0], { observers: [executor], executors: [executor] });
+  writeFileSync(f.path, JSON.stringify(f.config));
+  const links = f.load();
+  links.observe(bot, group, message(`!exec ${executor} {"action":"status","id":"job","origin":{"room":"!forged:test"}}`, '$request', bot));
+  const result = { ...message('Status', '$result', executor), content: {
+    msgtype: 'm.text', body: 'Status', 'm.mentions': { user_ids: [bot] },
+    'riftjack.executor_result': { jobId: 'job', reason: 'response', request: '$request' },
+  } };
+  assert.deepEqual(f.load().executorResult(bot, group, result)!.target,
+    { room: home, sender: human, key: canonical, session: 'original-thread' });
 });
 
 

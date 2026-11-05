@@ -547,12 +547,9 @@ async function main() {
         if (!Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < since || !(await privateRoom(room, shared.owner))) return false;
         links.observe(account.userId, room, event);
         const result = background && links.executorResult(account.userId, room, event);
-        if (result && linkedAgent) {
-          const targetEvent: MatrixEvent = { sender: shared.owner, content: { msgtype: 'm.text' } };
-          background!.notify('executor:' + createHash('sha256').update(result.id + account.userId).digest('hex'), {
-            room, sender: shared.owner, key: links.key(account.userId, room, targetEvent), session: linkedAgent.session,
-            ...(event.content?.['m.relates_to']?.event_id && { thread: event.content['m.relates_to'].event_id }),
-          }, result.body, { group: result.group, progress: result.progress });
+        if (result && linkedAgent && await privateRoom(result.target.room, result.target.sender)) {
+          background!.notify('executor:' + createHash('sha256').update(result.id + account.userId).digest('hex'),
+            result.target, result.body, { group: result.group, progress: result.progress });
         }
         // Other agents are heard as context, never impersonated as the controller.
         // Peer mentions paid with credit start a separate connector
