@@ -93,10 +93,11 @@ export class ConversationLinks {
       throw new PublicError('Each linked agent must own a distinct session.');
     }
     for (const room of c.rooms) {
-      if (!matrixRoom(room.room) || room.owner !== owner || !Array.isArray(room.bots) || room.bots.length < 2 ||
+      if (!matrixRoom(room.room) || room.owner !== owner || !Array.isArray(room.bots) || room.bots.length < 1 ||
           !room.bots.every(matrixUser) || (room.observers !== undefined && (!Array.isArray(room.observers) || !room.observers.every(matrixUser))) || !unique(roomMembers(room)) || c.agents.some(a => a.home === room.room) ||
-          !room.bots.some(bot => c.agents.some(a => a.bot === bot))) throw new PublicError('A shared room requires the owner and at least two distinct agents, including a linked local agent.');
+          !room.bots.some(bot => c.agents.some(a => a.bot === bot))) throw new PublicError('A shared room requires the owner and distinct agents, including a linked local agent.');
       if (room.executors !== undefined && (!Array.isArray(room.executors) || !room.executors.every(id => matrixUser(id) && room.observers?.includes(id)) || !unique(room.executors))) throw new PublicError('Executors must be distinct configured observers.');
+      if (room.bots.length === 1 && !room.executors?.length) throw new PublicError('A single-agent shared room requires a configured executor.');
       for (const bot of room.bots) {
         if (accounts.some(a => a.userId === bot) && !c.agents.some(a => a.bot === bot)) throw new PublicError('Every local participant in a shared room must have an explicit session link.');
       }

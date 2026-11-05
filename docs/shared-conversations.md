@@ -109,7 +109,8 @@ Matrix thread. Never guess a session ID or replace it with another agent's ID.
 ```
 
 Create the shared Matrix room with encryption, invite-only access and history
-visibility **joined**, then invite the owner and all configured bots (at least two). Restart the
+visibility **joined**, then invite the owner and all configured bots. A room needs
+at least two agents, or one agent and a configured executor (see below). Restart the
 connector. Shared-room processing requires all configured participants to have joined
 and no extra joined, invited or knocking participant. An optional `observers` array
 on a room lists additional exact Matrix IDs, such as a command executor and its

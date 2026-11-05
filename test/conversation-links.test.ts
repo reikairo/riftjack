@@ -996,9 +996,10 @@ test('configured observers share text and attachments but never gain controller 
   assert.throws(() => f.load(), /shared room/);
 });
 
-test('executor notifications require configured sender, own persisted request, job match and opt-in progress', async t => {
+for (const singleAgent of [false, true]) test(`executor notifications preserve authorization and correlation with ${singleAgent ? 'one agent' : 'multiple agents'}`, async t => {
   const f = fixture(t), executor = '@executor:test';
   Object.assign(f.config.rooms[0], { observers: [executor, '@observer:test'], executors: [executor] });
+  if (singleAgent) f.config.rooms[0].bots = [bot];
   writeFileSync(f.path, JSON.stringify(f.config));
   let links = f.load();
   const action = linkedRoomMessages(links, bot, { event: message('Run'), key: canonical }, {
@@ -1199,4 +1200,26 @@ test('shared turns carry a usable mention example after private turns and across
   // A missing fence must never turn ordinary JSON into an automatic wake.
   const bare = 'Result.\n\n' + JSON.stringify({ to: [peer] });
   assert.deepEqual(links.mentions(bot, group, bare), { text: bare, mentions: [] });
+});
+
+test('one agent and an executor require the exact joined membership and preserve the private session', async t => {
+  const f = fixture(t), executor = '@executor:test';
+  f.config.rooms[0].bots = [bot];
+  Object.assign(f.config.rooms[0], { observers: [executor], executors: [executor] });
+  writeFileSync(f.path, JSON.stringify(f.config));
+  const links = f.load();
+  const state = roomState().filter(e => e.state_key !== peer);
+  state.push({ type: 'm.room.member', state_key: executor, content: { membership: 'join' } });
+  assert.equal(await links.allowed(bot, group, human, async () => state), true);
+  assert.equal(await links.allowed(bot, group, human, async () => state.filter(e => e.state_key !== executor)), false);
+  assert.equal(await links.allowed(bot, group, human, async () => [...state, { type: 'm.room.member', state_key: peer, content: { membership: 'join' } }]), false);
+  assert.equal(links.key(bot, group, message('Inspect')), canonical);
+  assert.equal(links.key(bot, home, message('Inspect')), canonical);
+  links.credit(bot);
+  assert.equal(links.reserve(bot, group), undefined);
+  assert.equal(links.reserveMentions(bot, group, [executor]), undefined);
+  for (const executors of [undefined, []]) {
+    Object.assign(f.config.rooms[0], { executors }); writeFileSync(f.path, JSON.stringify(f.config));
+    assert.throws(f.load, /requires a configured executor/);
+  }
 });
