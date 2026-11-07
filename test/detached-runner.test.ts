@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync } from '
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DetachedRuns } from '../src/detached-runs.js';
-import { processes } from '../scripts/detached-runner.mjs';
+import { processes, selectProcessTable } from '../scripts/detached-runner.mjs';
 
 const target = { key: 'k', room: '!test:example.com', sender: '@alice:example.com', session: 's' };
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -15,6 +15,13 @@ async function until<T>(fn: () => T | undefined, timeout = 12000): Promise<T> {
   throw new Error('Fixture did not reach expected state');
 }
 function canObserve() { try { processes(); return true; } catch { return false; } }
+function psRefused() { try { selectProcessTable('ps'); return false; } catch (error: any) { return error?.code === 'EPERM'; } }
+// Launched supervisors inherit this environment and read only the forced source.
+function forceSource(t: { after(fn: () => void): void }, source: string) {
+  const previous = process.env.RIFTJACK_TEST_PROCESS_TABLE;
+  process.env.RIFTJACK_TEST_PROCESS_TABLE = source;
+  t.after(() => { if (previous === undefined) delete process.env.RIFTJACK_TEST_PROCESS_TABLE; else process.env.RIFTJACK_TEST_PROCESS_TABLE = previous; });
+}
 async function fixture(code: string, timeout = 10) {
   const workspace = mkdtempSync(join(tmpdir(), 'detached-runner-'));
   const directory = join(workspace, 'runs');
@@ -31,7 +38,7 @@ async function fixture(code: string, timeout = 10) {
   return { workspace, dir, run, manager, status, launch, stop };
 }
 test('detached command survives launch-parent termination and observer reconstruction', async t => {
-  if (!canObserve()) return t.skip('OS process table denied in this sandbox; run this process test with one-time approval.');
+  if (!canObserve()) return t.skip('Neither ps nor kern.proc.all can be read here; run this process test with one-time approval.');
   const f = await fixture('console.log("started"); setTimeout(() => console.log("finished"), 1500)');
   t.after(f.stop);
   const parent = spawn(process.execPath, ['-e', `const {spawnSync}=require('node:child_process'); spawnSync(${JSON.stringify(f.run.launch_argv[0])},${JSON.stringify(f.run.launch_argv.slice(1))}); setInterval(()=>{},1000);`], { stdio: 'ignore' });
@@ -46,25 +53,39 @@ test('detached command survives launch-parent termination and observer reconstru
   assert.throws(f.launch); // permanent launch claim prevents a second execution
 });
 test('runtime bounds output and timeout stops a live command', async t => {
-  if (!canObserve()) return t.skip('OS process table denied; process tests need one-time approval.');
+  if (!canObserve()) return t.skip('Process table unavailable; process tests need one-time approval.');
   const f = await fixture('process.stdout.write("x".repeat(1500000)); setInterval(()=>{},1000)', 1);
   t.after(f.stop); f.launch();
   const final = await until(() => f.status()?.status === 'failed' && f.status());
   assert.equal(final.reason, 'timeout'); assert.equal(final.log_truncated, true);
   assert.ok(statSync(join(f.dir, 'output.log')).size <= 1024 * 1024);
 });
-test('stop reaches a tracked child that started its own process group', async t => {
-  if (!canObserve()) return t.skip('OS process table denied; process tests need one-time approval.');
-  const f = await fixture(`const {spawn}=require('node:child_process'); const fs=require('node:fs');
+const escapingChild = `const {spawn}=require('node:child_process'); const fs=require('node:fs');
     const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});
-    fs.writeFileSync('escaped.pid',String(c.pid)); setInterval(()=>{},1000);`);
-  t.after(f.stop); f.launch();
+    fs.writeFileSync('escaped.pid',String(c.pid)); setInterval(()=>{},1000);`;
+async function stopsEscapedChild(f: Awaited<ReturnType<typeof fixture>>) {
   await until(() => existsSync(join(f.workspace, 'escaped.pid')));
   const pid = Number(readFileSync(join(f.workspace, 'escaped.pid'), 'utf8'));
-  await until(() => f.status()?.descendants?.some((p: any) => p.pid === pid), 8000);
+  // A kern.proc.all read starts Python, which can take a second under load.
+  await until(() => f.status()?.descendants?.some((p: any) => p.pid === pid), 20000);
   await f.stop();
   assert.equal(f.status().status, 'stopped');
   assert.ok(!processes().some(p => p.pid === pid));
+}
+test('stop reaches a tracked child that started its own process group', async t => {
+  if (!canObserve()) return t.skip('Process table unavailable; process tests need one-time approval.');
+  const f = await fixture(escapingChild);
+  t.after(f.stop); f.launch();
+  await stopsEscapedChild(f);
+});
+test('kern.proc.all observation tracks and stops a child that started its own process group', async t => {
+  if (process.platform !== 'darwin') return t.skip('kern.proc.all is read only on macOS.');
+  forceSource(t, 'sysctl');
+  const f = await fixture(escapingChild);
+  t.after(f.stop); f.launch();
+  await until(() => f.status()?.process_table);
+  assert.deepEqual(f.status().process_table, { source: 'sysctl', interval_ms: 1000 });
+  await stopsEscapedChild(f);
 });
 test('changed specification is refused without executing the command', async t => {
   const f = await fixture('require("node:fs").writeFileSync("executed", "yes")');
@@ -73,7 +94,7 @@ test('changed specification is refused without executing the command', async t =
   assert.equal(existsSync(join(f.workspace, 'executed')), false);
 });
 test('ordinary command approval can wait over an hour without losing the single-use launch', async t => {
-  if (!canObserve()) return t.skip('OS process table denied; process tests need one-time approval.');
+  if (!canObserve()) return t.skip('Process table unavailable; process tests need one-time approval.');
   const prepared = Date.now() - 90 * 60_000;
   const clock = t.mock.method(Date, 'now', () => prepared);
   const f = await fixture('require("node:fs").appendFileSync("executed", "once\\n")');
@@ -99,7 +120,8 @@ test('expired and explicitly stopped launches never execute after a long wait', 
   assert.equal(existsSync(join(stopped.workspace, 'executed')), false);
 });
 test('unavailable process observation fails closed before executing the command', async t => {
-  if (canObserve()) return t.skip('This case exercises the restricted process-table environment.');
+  if (!psRefused()) return t.skip('This case needs an environment that refuses /bin/ps.');
+  forceSource(t, 'ps');
   const f = await fixture('require("node:fs").writeFileSync("executed", "yes")');
   f.launch();
   const final = await until(() => f.status()?.status === 'lost' && f.status());

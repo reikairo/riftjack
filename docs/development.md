@@ -12,7 +12,7 @@ npm test
 python3 -m unittest discover -s test -p '*_test.py'
 ```
 
-`npm test` runs the tests in `test/` without opening HTTP listening ports. They use local files, child-process stubs and mocked transports; start them in the normal sandbox without requesting network or port access. The launcher tests also inspect and signal their own temporary processes using `ps` and `lsof`; a sandbox that denies those operations requires a separately approved rerun of `node --test test/connector-launcher.test.mjs`.
+`npm test` runs the tests in `test/` without opening HTTP listening ports. They use local files, child-process stubs and mocked transports; start them in the normal sandbox without requesting network or port access. The launcher tests also inspect and signal their own temporary processes using `ps` and `lsof`; a sandbox that denies those operations requires a separately approved rerun of `node --test test/connector-launcher.test.mjs`. Detached-runner tests read the process table with `/bin/ps` or, where a macOS sandbox refuses it, with the `kern.proc.all` helper and `/usr/bin/python3`. `RIFTJACK_TEST_PROCESS_TABLE=ps` or `sysctl` makes launched supervisors use only that source; the tests use it to exercise the sysctl path and fail-closed observation.
 
 `npm run test:http` runs `test/http/*.test.ts`. These tests bind an ephemeral port on `127.0.0.1` and make loopback requests, including from the Python worker client. They use no live Matrix service or model account. A sandbox that blocks listening ports may require permission for this command.
 
