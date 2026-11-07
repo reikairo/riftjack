@@ -1,8 +1,9 @@
 export type ProcessIdentity = { pid: number; ppid: number; pgid: number; birth: string };
 export type ProcessRow = ProcessIdentity & { state: string };
-export type ProcessTable = { source: 'ps' | 'sysctl'; read(): ProcessRow[]; interval: number };
+export type ProcessTable = { source: 'ps' | 'sysctl'; read(): ProcessRow[]; pause: number };
 export function digest(bytes: string | Buffer): string;
 export function parseSysctlTable(text: string): ProcessRow[];
+export function sysctlFailure(stdout: string, status?: number | null): (Error & { code?: string }) | null;
 export function sysctlTable(python: string): ProcessRow[];
 export function resolvePython(launcher?: string): string;
 export function selectProcessTable(forced?: string): ProcessTable;

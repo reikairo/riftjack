@@ -112,15 +112,23 @@ export function parseSysctlTable(text) {
   }
   return table;
 }
+// The error of a failed helper run, or null when the output tells nothing. An environment refusing the sysctl
+// itself is EPERM, like a refused /bin/ps; an unexpected layout, state or size and other exits are not.
+export function sysctlFailure(stdout, status) {
+  const refused = /^riftjack-process-table error: ([a-z0-9_]+)$/m.exec(stdout)?.[1];
+  if (refused) {
+    const error = new RunnerError(`The kern.proc.all process table was refused: ${refused}.`);
+    if (refused === 'size_errno_1' || refused === 'read_errno_1') error.code = 'EPERM';
+    return error;
+  }
+  return Number.isInteger(status) ? new RunnerError(`The kern.proc.all helper exited with status ${status}.`) : null;
+}
 export function sysctlTable(python) {
   let text;
   try {
     text = execFileSync(python, ['-I', '-S', '-c', sysctlHelper], { encoding: 'utf8', timeout: 10_000, maxBuffer: 4 * 1024 * 1024, env: tableEnv });
   } catch (error) {
-    const refused = /^riftjack-process-table error: ([a-z0-9_]+)$/m.exec(String(error?.stdout ?? ''))?.[1];
-    if (refused) throw new RunnerError(`The kern.proc.all process table was refused: ${refused}.`);
-    if (Number.isInteger(error?.status)) throw new RunnerError(`The kern.proc.all helper exited with status ${error.status}.`);
-    throw error;
+    throw sysctlFailure(String(error?.stdout ?? ''), error?.status) ?? error;
   }
   return parseSysctlTable(text);
 }
@@ -141,15 +149,15 @@ export function resolvePython(launcher = '/usr/bin/python3') {
 export function selectProcessTable(forced) {
   if (forced && forced !== 'ps' && forced !== 'sysctl') throw new RunnerError('RIFTJACK_TEST_PROCESS_TABLE must be ps or sysctl.');
   if (forced !== 'sysctl') {
-    try { psTable(); return { source: 'ps', read: psTable, interval: 200 }; }
+    try { psTable(); return { source: 'ps', read: psTable, pause: 200 }; }
     catch (error) { if (forced === 'ps' || process.platform !== 'darwin' || error?.code !== 'EPERM') throw error; }
   }
   if (process.platform !== 'darwin') throw new RunnerError('The kern.proc.all process table is read only on macOS.');
   const python = resolvePython();
   const read = () => sysctlTable(python);
   read();
-  // Each read starts Python, so the supervisor observes once a second instead.
-  return { source: 'sysctl', read, interval: 1000 };
+  // Each read starts Python, so the supervisor pauses a second after each observation instead.
+  return { source: 'sysctl', read, pause: 1000 };
 }
 let selected;
 export const processTable = () => selected ??= selectProcessTable(process.env.RIFTJACK_TEST_PROCESS_TABLE);
@@ -200,7 +208,7 @@ async function main() {
   const identity = table.find(p => p.pid === process.pid);
   if (!identity) throw new RunnerError('Cannot establish supervisor process identity.');
   const state = { id: spec.id, status: 'starting', supervisor: identity, started_at: new Date().toISOString(), updated_at: '',
-    process_table: { source: observer.source, interval_ms: observer.interval },
+    process_table: { source: observer.source, pause_ms: observer.pause },
     child: null, descendants: [], exit_code: null, signal: null, reason: null, log_truncated: false,
     containment: 'Observed descendants only; processes escaping between observations cannot be guaranteed stopped.' };
   const persist = () => { state.updated_at = new Date().toISOString(); save(join(dir, 'status.json'), state); };
@@ -224,7 +232,7 @@ async function main() {
   process.on('SIGTERM', () => stop('stop_requested')); process.on('SIGINT', () => stop('stop_requested'));
   const started = Date.now();
   for (;;) {
-    await new Promise(resolve => setTimeout(resolve, observer.interval));
+    await new Promise(resolve => setTimeout(resolve, observer.pause));
     try {
       log.flush();
       table = observer.read();

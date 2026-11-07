@@ -14,7 +14,15 @@ async function until<T>(fn: () => T | undefined, timeout = 12000): Promise<T> {
   do { const value = fn(); if (value) return value; await wait(100); } while (Date.now() < end);
   throw new Error('Fixture did not reach expected state');
 }
-function canObserve() { try { processes(); return true; } catch { return false; } }
+// Strict runs require every process table source available on this platform instead of skipping when one is refused.
+const strict = process.env.RIFTJACK_TEST_REQUIRE_PROCESS_TABLES === '1';
+// Only an environment refusing a process table (EPERM) skips a test; any other error fails it.
+function refused(error: any) {
+  if (error?.code !== 'EPERM' || strict) throw error;
+  return true;
+}
+function canObserve() { try { processes(); return true; } catch (error) { return !refused(error); } }
+function sysctlAvailable() { try { selectProcessTable('sysctl'); return true; } catch (error) { return !refused(error); } }
 function psRefused() { try { selectProcessTable('ps'); return false; } catch (error: any) { return error?.code === 'EPERM'; } }
 // Launched supervisors inherit this environment and read only the forced source.
 function forceSource(t: { after(fn: () => void): void }, source: string) {
@@ -38,7 +46,7 @@ async function fixture(code: string, timeout = 10) {
   return { workspace, dir, run, manager, status, launch, stop };
 }
 test('detached command survives launch-parent termination and observer reconstruction', async t => {
-  if (!canObserve()) return t.skip('Neither ps nor kern.proc.all can be read here; run this process test with one-time approval.');
+  if (!canObserve()) return t.skip('This environment refuses ps and kern.proc.all; run this process test with one-time approval.');
   const f = await fixture('console.log("started"); setTimeout(() => console.log("finished"), 1500)');
   t.after(f.stop);
   const parent = spawn(process.execPath, ['-e', `const {spawnSync}=require('node:child_process'); spawnSync(${JSON.stringify(f.run.launch_argv[0])},${JSON.stringify(f.run.launch_argv.slice(1))}); setInterval(()=>{},1000);`], { stdio: 'ignore' });
@@ -53,7 +61,7 @@ test('detached command survives launch-parent termination and observer reconstru
   assert.throws(f.launch); // permanent launch claim prevents a second execution
 });
 test('runtime bounds output and timeout stops a live command', async t => {
-  if (!canObserve()) return t.skip('Process table unavailable; process tests need one-time approval.');
+  if (!canObserve()) return t.skip('This environment refuses the process table; process tests need one-time approval.');
   const f = await fixture('process.stdout.write("x".repeat(1500000)); setInterval(()=>{},1000)', 1);
   t.after(f.stop); f.launch();
   const final = await until(() => f.status()?.status === 'failed' && f.status());
@@ -66,25 +74,26 @@ const escapingChild = `const {spawn}=require('node:child_process'); const fs=req
 async function stopsEscapedChild(f: Awaited<ReturnType<typeof fixture>>) {
   await until(() => existsSync(join(f.workspace, 'escaped.pid')));
   const pid = Number(readFileSync(join(f.workspace, 'escaped.pid'), 'utf8'));
-  // A kern.proc.all read starts Python, which can take a second under load.
+  // A kern.proc.all read starts Python, which adds up to a second or more under load.
   await until(() => f.status()?.descendants?.some((p: any) => p.pid === pid), 20000);
   await f.stop();
   assert.equal(f.status().status, 'stopped');
   assert.ok(!processes().some(p => p.pid === pid));
 }
 test('stop reaches a tracked child that started its own process group', async t => {
-  if (!canObserve()) return t.skip('Process table unavailable; process tests need one-time approval.');
+  if (!canObserve()) return t.skip('This environment refuses the process table; process tests need one-time approval.');
   const f = await fixture(escapingChild);
   t.after(f.stop); f.launch();
   await stopsEscapedChild(f);
 });
 test('kern.proc.all observation tracks and stops a child that started its own process group', async t => {
   if (process.platform !== 'darwin') return t.skip('kern.proc.all is read only on macOS.');
+  if (!sysctlAvailable()) return t.skip('This environment refuses the kern.proc.all sysctl.');
   forceSource(t, 'sysctl');
   const f = await fixture(escapingChild);
   t.after(f.stop); f.launch();
   await until(() => f.status()?.process_table);
-  assert.deepEqual(f.status().process_table, { source: 'sysctl', interval_ms: 1000 });
+  assert.deepEqual(f.status().process_table, { source: 'sysctl', pause_ms: 1000 });
   await stopsEscapedChild(f);
 });
 test('changed specification is refused without executing the command', async t => {
@@ -94,7 +103,7 @@ test('changed specification is refused without executing the command', async t =
   assert.equal(existsSync(join(f.workspace, 'executed')), false);
 });
 test('ordinary command approval can wait over an hour without losing the single-use launch', async t => {
-  if (!canObserve()) return t.skip('Process table unavailable; process tests need one-time approval.');
+  if (!canObserve()) return t.skip('This environment refuses the process table; process tests need one-time approval.');
   const prepared = Date.now() - 90 * 60_000;
   const clock = t.mock.method(Date, 'now', () => prepared);
   const f = await fixture('require("node:fs").appendFileSync("executed", "once\\n")');

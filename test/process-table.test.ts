@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSysctlTable, resolvePython, selectProcessTable, track, type ProcessRow } from '../scripts/detached-runner.mjs';
+import { parseSysctlTable, resolvePython, selectProcessTable, sysctlFailure, track, type ProcessRow } from '../scripts/detached-runner.mjs';
 
+// Strict runs require every process table source available on this platform instead of skipping when one is refused.
+const strict = process.env.RIFTJACK_TEST_REQUIRE_PROCESS_TABLES === '1';
+// Only an environment refusing a process table (EPERM) skips a check; any other error fails the test.
+function refused(error: any) {
+  if (error?.code !== 'EPERM' || strict) throw error;
+}
 const row = (pid: number, ppid: number, birth: string, state = 'S'): ProcessRow => ({ pid, ppid, pgid: pid, state, birth });
 const pids = (rows: ProcessRow[]) => rows.map(p => p.pid).sort((a, b) => a - b);
 
@@ -48,6 +54,20 @@ test('kern.proc.all output is accepted only when complete', () => {
   ]) assert.throws(() => parseSysctlTable(broken), /incomplete/);
 });
 
+test('only a refused sysctl counts as the environment refusing kern.proc.all', () => {
+  const output = (reason: string) => `riftjack-process-table error: ${reason}\n`;
+  for (const reason of ['size_errno_1', 'read_errno_1']) {
+    assert.equal(sysctlFailure(output(reason), 3)?.code, 'EPERM');
+  }
+  for (const reason of ['size_errno_12', 'unexpected_layout', 'unexpected_state', 'unexpected_record_size', 'table_kept_growing']) {
+    const error = sysctlFailure(output(reason), 3);
+    assert.match(String(error?.message), new RegExp(reason));
+    assert.equal(error?.code, undefined);
+  }
+  assert.match(String(sysctlFailure('', 1)?.message), /exited with status 1/);
+  assert.equal(sysctlFailure('', null), null);
+});
+
 test('an unknown process table source is refused', () => {
   assert.throws(() => selectProcessTable('top'), /must be ps or sysctl/);
 });
@@ -58,14 +78,19 @@ test('a missing Python is reported with its path', () => {
 
 test('kern.proc.all reports this process with the identity ps reports', async t => {
   if (process.platform !== 'darwin') return t.skip('kern.proc.all is read only on macOS.');
-  const sysctl = selectProcessTable('sysctl');
+  let sysctl;
+  try { sysctl = selectProcessTable('sysctl'); }
+  catch (error) {
+    refused(error);
+    return t.skip('This environment refuses the kern.proc.all sysctl.');
+  }
   assert.equal(sysctl.source, 'sysctl');
   const self = sysctl.read().find(p => p.pid === process.pid);
   assert.equal(self?.ppid, process.ppid);
   let ps;
   try { ps = selectProcessTable('ps'); }
-  catch (error: any) {
-    assert.equal(error.code, 'EPERM');
+  catch (error) {
+    refused(error);
     return t.diagnostic('This environment refuses /bin/ps, so births were not compared.');
   }
   assert.equal(ps.read().find(p => p.pid === process.pid)?.birth, self?.birth);
