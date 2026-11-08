@@ -1,6 +1,8 @@
 export type ProcessIdentity = { pid: number; ppid: number; pgid: number; birth: string };
 export type ProcessRow = ProcessIdentity & { state: string };
-export type ProcessTable = { source: 'ps' | 'sysctl'; read(): ProcessRow[]; pause: number };
+export type ProcessTable = { source: 'ps' | 'sysctl'; read(): ProcessRow[]; readAsync(): Promise<ProcessRow[]>; pause: number };
+export function superviseCommand(child: import('node:child_process').ChildProcess, observer: Pick<ProcessTable, 'readAsync' | 'pause'>,
+  spec: { max_log_bytes: number; timeout_seconds: number }, dir: string, state: Record<string, any>, persist: () => void): Promise<void>;
 export function digest(bytes: string | Buffer): string;
 export function parseSysctlTable(text: string): ProcessRow[];
 export function sysctlFailure(stdout: string, status?: number | null): (Error & { code?: string }) | null;

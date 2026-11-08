@@ -1,6 +1,7 @@
 // Runs only when invoked by the agent's ordinary command tool. The connector
 // never executes this file: the launcher inherits that tool's OS sandbox.
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, openSync, closeSync, fsyncSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,8 +20,8 @@ export function failureDetails(error, stage) {
     ...(signals.has(error?.signal) && { signal: error.signal }),
     ...(error?.killed === true && { killed: true }) };
 }
-// The data handlers only update bounded memory. The observation loop flushes at
-// most once per tick, and completion flushes once more before reporting success.
+// The data handlers only update bounded memory. A separate timer flushes it,
+// and completion flushes once more before reporting its final state.
 export class BoundedOutput {
   constructor(path, limit) { this.path = path; this.limit = limit; this.bytes = Buffer.alloc(0); this.dirty = false; this.truncated = false; }
   append(chunk) {
@@ -46,15 +47,20 @@ export function save(path, value) {
 // No argv or environment is collected. lstart is a birth identity, not elapsed
 // runtime; an unreadable process table is uncertainty, never proof of death.
 const tableEnv = { PATH: '/usr/bin:/bin', LC_ALL: 'C' };
+const execFileAsync = promisify(execFile);
+const psArgs = ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='];
+const psOptions = { encoding: 'utf8', timeout: 3000, maxBuffer: 4 * 1024 * 1024, env: tableEnv };
 const tableRow = line => {
   const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
   return m ? [{ pid: +m[1], ppid: +m[2], pgid: +m[3], state: m[4], birth: m[5] }] : [];
 };
 function psTable() {
-  const text = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='], {
-    encoding: 'utf8', timeout: 3000, maxBuffer: 4 * 1024 * 1024, env: tableEnv,
-  });
+  const text = execFileSync('/bin/ps', psArgs, psOptions);
   return text.split('\n').flatMap(tableRow);
+}
+async function psTableAsync() {
+  const { stdout } = await execFileAsync('/bin/ps', psArgs, psOptions);
+  return stdout.split('\n').flatMap(tableRow);
 }
 // Claude Code's macOS sandbox refuses to execute the setuid /bin/ps, but its profile
 // allows the kern.proc.all sysctl that ps itself reads. Node cannot call sysctl, so
@@ -132,6 +138,16 @@ export function sysctlTable(python) {
   }
   return parseSysctlTable(text);
 }
+async function sysctlTableAsync(python) {
+  try {
+    const { stdout } = await execFileAsync(python, ['-I', '-S', '-c', sysctlHelper], {
+      encoding: 'utf8', timeout: 10_000, maxBuffer: 4 * 1024 * 1024, env: tableEnv,
+    });
+    return parseSysctlTable(stdout);
+  } catch (error) {
+    throw sysctlFailure(String(error?.stdout ?? ''), error?.code) ?? error;
+  }
+}
 // /usr/bin/python3 is an xcrun shim that adds about 0.1 s to every start, so the
 // interpreter it resolves is reused for later reads.
 export function resolvePython(launcher = '/usr/bin/python3') {
@@ -149,7 +165,7 @@ export function resolvePython(launcher = '/usr/bin/python3') {
 export function selectProcessTable(forced) {
   if (forced && forced !== 'ps' && forced !== 'sysctl') throw new RunnerError('RIFTJACK_TEST_PROCESS_TABLE must be ps or sysctl.');
   if (forced !== 'sysctl') {
-    try { psTable(); return { source: 'ps', read: psTable, pause: 200 }; }
+    try { psTable(); return { source: 'ps', read: psTable, readAsync: psTableAsync, pause: 200 }; }
     catch (error) { if (forced === 'ps' || process.platform !== 'darwin' || error?.code !== 'EPERM') throw error; }
   }
   if (process.platform !== 'darwin') throw new RunnerError('The kern.proc.all process table is read only on macOS.');
@@ -157,7 +173,7 @@ export function selectProcessTable(forced) {
   const read = () => sysctlTable(python);
   read();
   // Each read starts Python, so the supervisor pauses a second after each observation instead.
-  return { source: 'sysctl', read, pause: 1000 };
+  return { source: 'sysctl', read, readAsync: () => sysctlTableAsync(python), pause: 1000 };
 }
 let selected;
 export const processTable = () => selected ??= selectProcessTable(process.env.RIFTJACK_TEST_PROCESS_TABLE);
@@ -176,6 +192,106 @@ export function track(table, observed) {
     }
   } while (added);
   return table.filter(p => !p.state.startsWith('Z') && same(p, observed.get(p.pid)));
+}
+
+// Output collection has its own timer and stays alive even when observation is
+// lost. Readers are asynchronous so a slow ps/Python cannot block pipe draining.
+export async function superviseCommand(child, observer, spec, dir, state, persist) {
+  let stopping = 0, signalling = 0, exited = false, closed = false, spawnError = false, uncertain = false;
+  let failures = 0, pause = observer.pause;
+  const log = new BoundedOutput(join(dir, 'output.log'), spec.max_log_bytes);
+  const observed = new Map();
+  state.output_capture = 'collecting';
+  const stop = reason => { if (!stopping) { stopping = Date.now(); state.reason ??= reason; } };
+  const onSignal = () => stop('stop_requested');
+  const output = chunk => { log.append(chunk); state.log_truncated = log.truncated; };
+  child.stdout.on('data', output); child.stderr.on('data', output);
+  child.once('error', error => { spawnError = true; state.reason = 'spawn_failed'; state.diagnostic = failureDetails(error, 'spawn_command'); exited = true; });
+  child.once('exit', (code, signal) => { state.exit_code = code; state.signal = signal; exited = true; });
+  child.once('close', () => { closed = true; state.output_capture = 'closed'; });
+  process.on('SIGTERM', onSignal); process.on('SIGINT', onSignal);
+  const flush = () => {
+    try { log.flush(); }
+    catch (error) {
+      uncertain = true; stop('log_write_failed');
+      state.diagnostic = failureDetails(error, 'write_output_log');
+    }
+  };
+  const outputTimer = setInterval(flush, 200);
+  const started = Date.now();
+  try {
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, pause));
+      if (existsSync(join(dir, 'stop'))) stop('stop_requested');
+      if (Date.now() - started >= spec.timeout_seconds * 1000) stop('timeout');
+      let table;
+      try {
+        table = await observer.readAsync();
+      } catch (error) {
+        failures++;
+        state.diagnostic = failureDetails(error, 'observe_running_command');
+        // Three consecutive failures exhaust the initial recovery window. Lost
+        // remains sticky: later reads cannot rule out descendants missed here.
+        if (failures >= 3) { uncertain = true; state.reason ??= 'process_observation_failed'; }
+        state.observation = { state: failures >= 3 ? 'lost' : 'retrying', failures,
+          last_success_at: state.observation?.last_success_at ?? null };
+        state.status = uncertain ? 'lost' : stopping ? 'stopping' : 'running';
+        persist();
+        // Never signal from stale identities or report success without a table.
+        // Continue draining even after lost; slow recovery checks allow a later
+        // stop to use fresh identities, but cannot turn this run into success.
+        if (failures >= 3 && exited && closed) break;
+        pause = failures >= 3 ? 5000 : 1000;
+        continue;
+      }
+      failures = 0; pause = uncertain ? 5000 : observer.pause;
+      state.observation = { state: 'available', failures: 0, last_success_at: new Date().toISOString() };
+      if (!uncertain && state.diagnostic?.stage === 'observe_running_command') delete state.diagnostic;
+      const root = table.find(p => p.pid === child.pid);
+      if (!state.child && root && root.ppid === process.pid) state.child = root;
+      if (state.child) observed.set(state.child.pid, state.child);
+      const alive = track(table, observed);
+      state.descendants = alive.slice(0, 256);
+      if (alive.length > 256) { uncertain = true; stop('descendant_tracking_limit'); }
+      if (exited && alive.length) stop('descendants_after_exit');
+      if (stopping && !signalling) signalling = Date.now();
+      if (signalling && Date.now() - signalling <= 10_000) {
+        const signal = Date.now() - signalling >= 2000 ? 'SIGKILL' : 'SIGTERM';
+        const leader = table.find(p => p.pid === state.child?.pid);
+        if (same(leader, state.child) && leader.pgid === leader.pid) {
+          try { process.kill(-leader.pgid, signal); }
+          catch (error) { state.diagnostic = failureDetails(error, 'signal_process_group'); }
+        }
+        // Refresh after signalling the group. A read failure is handled by the
+        // next iteration; no individual signal uses the pre-signal snapshot.
+        if (alive.length) {
+          try {
+            const current = await observer.readAsync();
+            for (const p of alive) {
+              try {
+                if (same(current.find(x => x.pid === p.pid), p)) process.kill(p.pid, signal);
+              } catch (error) {
+                if (error.code !== 'ESRCH') { uncertain = true; state.diagnostic = failureDetails(error, 'signal_descendant'); }
+              }
+            }
+          } catch (error) { state.diagnostic = failureDetails(error, 'observe_before_signal'); }
+        }
+      }
+      if (exited && !alive.length && closed) break;
+      if (signalling && Date.now() - signalling > 10_000) uncertain = true;
+      const next = uncertain ? 'lost' : stopping ? 'stopping' : 'running';
+      const changed = state.status !== next;
+      state.status = next;
+      if (changed || Date.now() - Date.parse(state.updated_at) >= 5000) persist();
+    }
+    flush();
+    state.status = uncertain ? 'lost' : state.reason === 'stop_requested' ? 'stopped'
+      : spawnError || state.exit_code !== 0 || state.reason === 'timeout' || state.reason === 'descendants_after_exit' ? 'failed' : 'succeeded';
+    state.finished_at = new Date().toISOString(); persist();
+  } finally {
+    clearInterval(outputTimer);
+    process.off('SIGTERM', onSignal); process.off('SIGINT', onSignal);
+  }
 }
 
 async function main() {
@@ -219,68 +335,9 @@ async function main() {
   const env = {};
   for (const name of ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL', 'SHELL']) if (process.env[name]) env[name] = process.env[name];
   Object.assign(env, spec.env);
-  let stopping = 0, exited = false, spawnError = false, uncertain = false;
-  const log = new BoundedOutput(join(dir, 'output.log'), spec.max_log_bytes);
-  const observed = new Map();
-  const output = chunk => { log.append(chunk); state.log_truncated = log.truncated; };
   phase = 'spawn_command';
   const child = spawn(spec.argv[0], spec.argv.slice(1), { cwd: spec.cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  child.stdout.on('data', output); child.stderr.on('data', output);
-  child.once('error', error => { spawnError = true; state.reason = 'spawn_failed'; state.diagnostic = failureDetails(error, 'spawn_command'); exited = true; });
-  child.once('exit', (code, signal) => { state.exit_code = code; state.signal = signal; exited = true; });
-  const stop = reason => { if (!stopping) { stopping = Date.now(); state.reason = reason; } };
-  process.on('SIGTERM', () => stop('stop_requested')); process.on('SIGINT', () => stop('stop_requested'));
-  const started = Date.now();
-  for (;;) {
-    await new Promise(resolve => setTimeout(resolve, observer.pause));
-    try {
-      log.flush();
-      table = observer.read();
-      const root = table.find(p => p.pid === child.pid);
-      if (!state.child && root && root.ppid === process.pid) state.child = root;
-      if (state.child) observed.set(state.child.pid, state.child);
-      const alive = track(table, observed);
-      state.descendants = alive.slice(0, 256);
-      if (alive.length > 256) { uncertain = true; stop('descendant_tracking_limit'); }
-      if (existsSync(join(dir, 'stop'))) stop('stop_requested');
-      if (Date.now() - started >= spec.timeout_seconds * 1000) stop('timeout');
-      if (exited && alive.length) stop('descendants_after_exit');
-      if (stopping) {
-        const signal = Date.now() - stopping >= 2000 ? 'SIGKILL' : 'SIGTERM';
-        // Never signal a reused PID, or a process group whose leader identity
-        // cannot be checked. Escaped observed descendants are signalled singly,
-        // each checked against one table read after the group signal.
-        const leader = table.find(p => p.pid === state.child?.pid);
-        if (same(leader, state.child) && leader.pgid === leader.pid) {
-          try { process.kill(-leader.pgid, signal); } catch (error) { state.diagnostic = failureDetails(error, 'signal_process_group'); /* individual identity checks below */ }
-        }
-        if (alive.length) {
-          const current = observer.read();
-          for (const p of alive) {
-            try {
-              if (same(current.find(x => x.pid === p.pid), p)) process.kill(p.pid, signal);
-            } catch (error) { if (error.code !== 'ESRCH') { uncertain = true; state.diagnostic = failureDetails(error, 'signal_descendant'); } }
-          }
-        }
-      }
-      if (exited && !alive.length) break;
-      if (stopping && Date.now() - stopping > 10_000) { uncertain = true; break; }
-      const next = stopping ? 'stopping' : 'running';
-      const changed = state.status !== next;
-      state.status = next;
-      if (changed || Date.now() - Date.parse(state.updated_at) >= 5000) persist();
-    } catch (error) {
-      state.diagnostic = failureDetails(error, 'observe_running_command');
-      // Failure to observe cannot justify sending signals to old identities.
-      uncertain = true; state.reason = 'process_observation_failed'; break;
-    }
-  }
-  try { log.flush(); } catch (error) { uncertain = true; state.reason = 'log_write_failed'; state.diagnostic = failureDetails(error, 'write_output_log'); }
-  state.status = uncertain ? 'lost' : state.reason === 'stop_requested' ? 'stopped'
-    : spawnError || state.exit_code !== 0 || state.reason === 'timeout' || state.reason === 'descendants_after_exit' ? 'failed' : 'succeeded';
-  state.finished_at = new Date().toISOString(); persist();
-  // A lost supervisor must not wait forever on inherited output pipes.
-  child.stdout.destroy(); child.stderr.destroy(); child.unref();
+  await superviseCommand(child, observer, spec, dir, state, persist);
 }
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) main().catch(error => {
   if (process.argv[4] === '--supervise') {

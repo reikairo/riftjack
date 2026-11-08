@@ -20,6 +20,25 @@ function setup() {
   const action = (input: unknown, interact = approve, t = target, auth = async () => {}) => manager.action(input, t, signal, interact, auth).then(JSON.parse);
   return { workspace, directory, notices, hooks, manager, request, action };
 }
+test('lost capture completion delivers final output once and still occupies uncertain capacity', async () => {
+  const f = setup(), run = await f.action(f.request);
+  const file = join(f.directory, run.id, 'status.json');
+  const state = { id: run.id, status: 'lost', reason: 'process_observation_failed', output_capture: 'collecting' };
+  save(file, state); writeFileSync(join(f.directory, run.id, 'output.log'), 'early');
+  f.manager.pump(() => true);
+  assert.equal(f.notices.length, 1);
+  const restored = new DetachedRuns(f.directory, f.workspace, f.hooks);
+  restored.pump(() => true); assert.equal(f.notices.length, 1);
+  save(file, { ...state, output_capture: 'closed', finished_at: new Date().toISOString(), exit_code: 0 });
+  writeFileSync(join(f.directory, run.id, 'output.log'), 'late result');
+  restored.pump(() => true); restored.pump(() => true);
+  assert.equal(f.notices.length, 2);
+  assert.match(f.notices[1][2], /late result/);
+  assert.match(f.notices[1][2], /"status":"lost"/);
+  const action = (input: unknown) => restored.action(input, target, signal, approve, async () => {});
+  await action(f.request);
+  await assert.rejects(action(f.request), /Two runs/);
+});
 test('start stages one reviewed command and script snapshot, but executes nothing', async () => {
   const f = setup();
   const script = join(f.workspace, 'task.mjs'); writeFileSync(script, 'console.log("before")');

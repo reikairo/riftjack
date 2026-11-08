@@ -88,6 +88,33 @@ withdraws the notice. It grants no new permissions or confirmation approvals.
 New bots without an established conversation, Bot Manager and externally driven
 Grok workers do not receive a startup model turn.
 
+## Detached-run observation recovery
+
+The detached supervisor reads the process table asynchronously, so a slow `ps`
+or Python helper does not block stdout/stderr collection. Its bounded output log
+is flushed independently every 200 ms. A failed observation preserves the last
+known identities as stale information; it never substitutes an empty table or
+signals a process using those stale identities.
+
+After a read failure, the supervisor pauses one second before retrying. Three
+consecutive failures mark the run `lost`. Individual reads retain their timeouts:
+3 seconds for `ps`, 10 seconds for `kern.proc.all`. After `lost`, recovery checks
+pause five seconds between reads while output collection continues. A fresh table
+can support a pending stop request, but cannot clear `lost`: descendants may have
+escaped during the observation gap. Stop escalation allows ten seconds of
+signalling from the first available table, not from a request made while blind.
+
+`output_capture: collecting` means the supervisor still drains the command's
+pipes; `closed` means the child exited and both pipes closed. When a lost run's
+capture finishes, a second notification includes its final log tail. Neither this
+notification nor an exit code of zero proves that all descendants ended. A lost
+run continues occupying an active slot until inspected and explicitly closed.
+If observation remains unavailable and the command or an inherited pipe stays
+open, collection can outlive the command timeout; manual inspection is required.
+The supervisor does not force-close live pipes just to exit, which could otherwise
+truncate output or cause the command to fail on a broken pipe. Log bounds still
+apply; storage errors are reported and cannot guarantee continued persistence.
+
 ## Publishing rebased branches
 
 `prepare_publish` detects when the destination tip is not an ancestor of the
