@@ -208,7 +208,7 @@ test('outbound room messages enforce destination privacy and session binding wit
     send: async (room, content) => {
       calls++;
       assert.equal(room, group);
-      assert.deepEqual(content, { msgtype: 'm.text', body: 'Public result.', 'm.mentions': { user_ids: [] } });
+      assert.deepEqual(content, { msgtype: 'm.text', body: 'Public result.', 'm.mentions': { user_ids: [] }, 'riftjack.peer': f.links.announcement(bot, group) });
       return '$sent';
     },
   });
@@ -1052,7 +1052,7 @@ for (const source of ['private', 'shared'] as const) test(`executor continuation
     allowed: async () => true, stopping: () => false,
     send: async (room, content) => {
       assert.equal(room, control);
-      assert.deepEqual(content, { msgtype: 'm.text', body: command, 'm.mentions': { user_ids: [] } });
+      assert.deepEqual(content, { msgtype: 'm.text', body: command, 'm.mentions': { user_ids: [] }, 'riftjack.peer': links.announcement(bot, control) });
       // An early sync echo must not prevent recording the private origin.
       links.observe(bot, control, message(command, '$request', bot));
       return '$request';
@@ -1341,6 +1341,6 @@ test('one agent and an executor must be joined but additional participants do no
   assert.equal(links.reserveMentions(bot, group, [executor]), undefined);
   for (const executors of [undefined, []]) {
     Object.assign(f.config.rooms[0], { executors }); writeFileSync(f.path, JSON.stringify(f.config));
-    assert.throws(f.load, /requires a configured executor/);
+    assert.deepEqual(f.load().bots(bot, group), [bot]);
   }
 });

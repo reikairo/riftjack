@@ -34,7 +34,11 @@ type Credit = { level: number; since: number };
 type WireGrant = { version: 1; id: string; from: string; to: string; room: string; remaining: number; since: number };
 type Grant = { from: string; to: string; room: string; level: number; since: number; wire?: WireGrant };
 type Credits = { agents: Record<string, Credit>; grants: Record<string, Grant>; received?: Record<string, number> };
-const CREDITS_KEY = '#credits';
+const CREDITS_KEY = '#credits', PEERS_KEY = '#peers';
+export const PEER_EVENT = 'org.riftjack.peer', PEER_FIELD = 'riftjack.peer';
+type Peer = { join: string; name: string };
+type PeerState = Record<string, { members: string; agents: Record<string, Peer> }>;
+const PEER_LIMIT = 64;
 const roomMembers = (room: Room) => [room.owner, ...room.bots, ...(room.observers ?? [])];
 const membershipKey = (room: Room) => JSON.stringify([room.owner, ...roomMembers(room).slice(1).sort()]);
 type RoomState = Parameters<typeof isPrivateRoomState>[0];
@@ -73,6 +77,8 @@ export class ConversationLinks {
   private config: Configuration;
   private history: History;
   private credits: Credits;
+  private discovered: PeerState;
+  private joined = new Map<string, Map<string, { id: string; at: number }>>();
   private deliveries = new Map<string, Delivery>();
   constructor(file: string, private historyFile: string, private accounts: Account[], private state: State, owner: string) {
     this.config = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { version: 1, agents: [], rooms: [] };
@@ -98,14 +104,14 @@ export class ConversationLinks {
           !room.bots.every(matrixUser) || (room.observers !== undefined && (!Array.isArray(room.observers) || !room.observers.every(matrixUser))) || !unique(roomMembers(room)) || c.agents.some(a => a.home === room.room) ||
           !room.bots.some(bot => c.agents.some(a => a.bot === bot))) throw new PublicError('A shared room requires the owner and distinct agents, including a linked local agent.');
       if (room.executors !== undefined && (!Array.isArray(room.executors) || !room.executors.every(id => matrixUser(id) && room.observers?.includes(id)) || !unique(room.executors))) throw new PublicError('Executors must be distinct configured observers.');
-      if (room.bots.length === 1 && !room.executors?.length) throw new PublicError('A single-agent shared room requires a configured executor.');
       for (const bot of room.bots) {
         if (accounts.some(a => a.userId === bot) && !c.agents.some(a => a.bot === bot)) throw new PublicError('Every local participant in a shared room must have an explicit session link.');
       }
     }
     const saved = existsSync(historyFile) ? JSON.parse(readFileSync(historyFile, 'utf8')) : {};
     this.credits = saved[CREDITS_KEY] ?? { agents: {}, grants: {} };
-    delete saved[CREDITS_KEY];
+    this.discovered = saved[PEERS_KEY] ?? {};
+    delete saved[CREDITS_KEY]; delete saved[PEERS_KEY];
     this.history = saved;
   }
   // A newly accepted human message to this agent restores its peer credit to the
@@ -123,7 +129,7 @@ export class ConversationLinks {
   }
   // Pair-room convenience. Larger groups must select their recipients explicitly.
   reserve(bot: string, room: string, now = Date.now()): WireGrant | undefined {
-    const peers = this.room(bot, room)?.bots.filter(id => id !== bot);
+    const peers = this.bots(bot, room).filter(id => id !== bot);
     if (peers?.length !== 1) return;
     return this.reserveMentions(bot, room, peers, now)?.[0];
   }
@@ -131,7 +137,7 @@ export class ConversationLinks {
   // Each recipient gets the same final remainder, regardless of delivery order.
   reserveMentions(bot: string, room: string, recipients: string[], now = Date.now()): WireGrant[] | undefined {
     const shared = this.room(bot, room), peers = [...new Set(recipients)], have = this.peerCredit(bot, now);
-    if (!shared || !peers.length || peers.length > have || !peers.every(id => id !== bot && shared.bots.includes(id))) return;
+    if (!shared || !peers.length || peers.length > have || !peers.every(id => id !== bot && this.bots(bot, room).includes(id))) return;
     const since = this.credits.agents[bot].since, remaining = have - peers.length;
     const wires: WireGrant[] = peers.map(to => ({ version: 1, id: randomUUID(), from: bot, to, room, since, remaining }));
     this.credits.agents[bot] = { level: remaining, since };
@@ -143,9 +149,53 @@ export class ConversationLinks {
     return wires;
   }
   agent(bot: string) { return this.config.agents.find(a => a.bot === bot); }
-  displayName(bot: string): string { return this.accounts.find(a => a.userId === bot)?.name.trim().slice(0, 100) || 'Agent'; }
+  displayName(bot: string): string { return this.accounts.find(a => a.userId === bot)?.name.trim().slice(0, 100)
+    || Object.values(this.discovered).map(room => room.agents[bot]?.name).find(Boolean) || 'Agent'; }
   room(bot: string, room: string) { return this.config.rooms.find(r => r.room === room && r.bots.includes(bot)); }
   sharedRooms(bot: string): string[] { return this.config.rooms.filter(r => r.bots.includes(bot)).map(r => r.room); }
+  // Discovered identities are usable only after a fresh room-state check.
+  bots(bot: string, room: string): string[] {
+    const shared = this.room(bot, room);
+    if (!shared) return [];
+    const known = this.discovered[room], joined = this.joined.get(room);
+    const peers = known?.members === membershipKey(shared) ? Object.entries(known.agents)
+      .filter(([id, peer]) => joined?.get(id)?.id === peer.join).map(([id]) => id) : [];
+    return [...new Set([...shared.bots, ...peers])];
+  }
+  participants(bot: string, room: string): string[] {
+    const shared = this.room(bot, room);
+    return shared ? [shared.owner, ...this.bots(bot, room), ...(shared.observers ?? [])] : [];
+  }
+  announcement(bot: string, room: string) {
+    const shared = this.room(bot, room);
+    return shared && this.agent(bot) ? { version: 1, owner: shared.owner, name: this.displayName(bot) } : undefined;
+  }
+  // Called only for decrypted events, after allowed() checked live Matrix state.
+  learnPeer(bot: string, room: string, event: { type?: string; sender?: string; event_id?: string; room_id?: string;
+    origin_server_ts?: number; content?: Record<string, unknown> }, now = Date.now()): boolean {
+    const shared = this.room(bot, room), sender = event.sender;
+    const raw = event.type === PEER_EVENT ? event.content : event.type === 'm.room.message' ? event.content?.[PEER_FIELD] : undefined;
+    if (!shared || !sender || sender === shared.owner || sender === bot || !matrixUser(sender) || !event.event_id ||
+        (event.room_id && event.room_id !== room) || shared.observers?.includes(sender) ||
+        (this.accounts.some(a => a.userId === sender) && !shared.bots.includes(sender)) ||
+        (event.content?.['m.relates_to'] as { rel_type?: string } | undefined)?.rel_type === 'm.replace' ||
+        !raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+    const hello = raw as Record<string, unknown>, joined = this.joined.get(room)?.get(sender);
+    if (hello.version !== 1 || hello.owner !== shared.owner || typeof hello.name !== 'string' || !hello.name.trim() ||
+        hello.name.length > 100 || /[\x00-\x1f]/.test(hello.name) || !joined || !Number.isFinite(event.origin_server_ts) ||
+        event.origin_server_ts! < joined.at || event.origin_server_ts! < now - 300_000 || event.origin_server_ts! > now + 60_000) return false;
+    if (shared.bots.includes(sender)) return true;
+    const old = this.discovered[room];
+    const agents = old?.members === membershipKey(shared) ? { ...old.agents } : {};
+    if (!agents[sender] && Object.keys(agents).length >= PEER_LIMIT) return false;
+    const peer = { join: joined.id, name: hello.name.trim() };
+    if (JSON.stringify(agents[sender]) !== JSON.stringify(peer)) {
+      agents[sender] = peer;
+      this.discovered[room] = { members: membershipKey(shared), agents };
+      this.saveHistory();
+    }
+    return true;
+  }
   private anchor(a: Agent) { return JSON.stringify([a.home, a.owner, a.thread ?? null]); }
   private assertSession(a: Agent) {
     const kind = this.accounts.find(account => account.userId === a.bot)!.kind as 'codex' | 'claude' | 'pi' | 'grok';
@@ -163,14 +213,33 @@ export class ConversationLinks {
     const shared = this.room(bot, room);
     if (room !== a.home && !shared) return false;
     const state = await getState();
-    return shared ? isSharedRoomState(state, roomMembers(shared)) : isPrivateRoomState(state, bot, sender);
+    if (!shared) return isPrivateRoomState(state, bot, sender);
+    const permitted = isSharedRoomState(state, roomMembers(shared));
+    const joined = new Map<string, { id: string; at: number }>();
+    if (permitted) for (const member of state) {
+      if (member.type !== 'm.room.member' || member.content?.membership !== 'join' || !member.state_key) continue;
+      const event = member as typeof member & { event_id?: string; origin_server_ts?: number };
+      if (typeof event.event_id === 'string' && Number.isFinite(event.origin_server_ts)) {
+        joined.set(member.state_key, { id: event.event_id, at: event.origin_server_ts! });
+      }
+    }
+    this.joined.set(room, joined);
+    const known = this.discovered[room];
+    if (known) {
+      const agents = known.members === membershipKey(shared) ? Object.fromEntries(Object.entries(known.agents)
+        .filter(([id, peer]) => joined.get(id)?.id === peer.join)) : {};
+      if (JSON.stringify(agents) !== JSON.stringify(known.agents)) {
+        this.discovered[room] = { members: membershipKey(shared), agents }; this.saveHistory();
+      }
+    }
+    return permitted;
   }
   // Called only after checking the current room state, even for bot observations.
   // Returns true only for a newly recorded message.
   observe(bot: string, room: string, event: MatrixEvent): boolean {
     const shared = this.room(bot, room), content = event.content;
     if (!shared || !content || !event.event_id || !event.sender || event.type !== 'm.room.message' || content[SERVICE] ||
-        !roomMembers(shared).includes(event.sender) || !['m.text', 'm.image', 'm.file', 'm.audio'].includes(content?.msgtype ?? '') ||
+        !this.participants(bot, room).includes(event.sender) || !['m.text', 'm.image', 'm.file', 'm.audio'].includes(content?.msgtype ?? '') ||
         typeof content.body !== 'string' || content['m.relates_to']?.rel_type === 'm.replace') return false;
     // Connector commands control the bots and are not part of the conversation
     // agents read. A reply quote is removed exactly as the bridge does: only
@@ -184,9 +253,9 @@ export class ConversationLinks {
       : { members, messages: [], next: 1, seen: [], readers: {} };
     if (log.seen.includes(event.event_id)) return false;
     log.messages.push({ seq: log.next++, id: event.event_id, sender: event.sender,
-      role: event.sender === shared.owner ? 'human' : shared.bots.includes(event.sender) ? 'agent' : 'participant', body: content.body, type: content.msgtype!,
+      role: event.sender === shared.owner ? 'human' : this.bots(bot, room).includes(event.sender) ? 'agent' : 'participant', body: content.body, type: content.msgtype!,
       ...(typeof content[REPLY] === 'string' && event.sender !== shared.owner && { reply: content[REPLY] }) });
-    if (shared.bots.includes(event.sender) && content.msgtype === 'm.text') {
+    if (this.bots(bot, room).includes(event.sender) && content.msgtype === 'm.text') {
       const executor = shared.executors?.find(id => content.body!.startsWith(`!exec ${id} `));
       if (executor) try {
         const request = JSON.parse(content.body.slice(`!exec ${executor} `.length));
@@ -273,7 +342,7 @@ export class ConversationLinks {
   private mentionAndSave(bot: string, room: string, event: MatrixEvent, admit?: (notice: MatrixEvent) => void): MatrixEvent | undefined {
     const shared = this.room(bot, room), log = this.log(room), content = event.content;
     if (!shared || !log || !this.agent(bot) || !event.event_id || !event.sender || event.sender === bot || event.sender === shared.owner ||
-        !shared.bots.includes(event.sender) || event.type !== 'm.room.message' || content?.msgtype !== 'm.text' || content[SERVICE] ||
+        !this.bots(bot, room).includes(event.sender) || event.type !== 'm.room.message' || content?.msgtype !== 'm.text' || content[SERVICE] ||
         content['m.relates_to']?.rel_type === 'm.replace' || !content['m.mentions']?.user_ids?.includes(bot)) return;
     const mentioned = ((log.mentioned ??= {})[bot] ??= []);
     if (mentioned.includes(event.event_id)) return;
@@ -292,7 +361,8 @@ export class ConversationLinks {
       .filter(([, expires]) => expires > now));
     const receipt = valid ? JSON.stringify([event.sender, room, wire!.id]) : '';
     const local = this.agent(event.sender), grant = valid ? this.credits.grants[wire!.id] : undefined;
-    // Remote bots are explicitly trusted via the configured shared-room membership.
+    // Remote peers are configured or discovered from encrypted self-announcements.
+    // Their grants permit agent invocation, never human authorization.
     // Local grants still have to match the reservation, including its generation.
     const allowed = valid && !received[receipt] && Object.keys(received).length < 10000 &&
       (!local || !!grant?.wire && (Object.keys(grant.wire) as (keyof WireGrant)[]).every(key => grant.wire![key] === wire![key]));
@@ -343,7 +413,7 @@ export class ConversationLinks {
     // Unread messages stay in the log even when older histories lack senders or the index has moved past them.
     const author = log?.messages.find(entry => entry.id === replyTo)?.sender ?? log?.senders?.find(([id]) => id === replyTo)?.[1];
     // (a reply to the human or to oneself wakes nobody by default)
-    if (replyTo !== undefined && to === undefined && author) to = author !== bot && shared.bots.includes(author) ? [author] : [];
+    if (replyTo !== undefined && to === undefined && author) to = author !== bot && this.bots(bot, room).includes(author) ? [author] : [];
     const recipients = Array.isArray(to) && to.every(id => typeof id === 'string') ? [...new Set(to as string[])] : undefined;
     const error = blocks.length > 1 ? 'Mention not sent: use a single matrix-mentions block.'
       : rest.length > MENTION_REPLY_LIMIT ? `Mention not sent: a reply that mentions another agent must be at most ${MENTION_REPLY_LIMIT} characters.`
@@ -351,7 +421,7 @@ export class ConversationLinks {
       : replyTo !== undefined && !author ? 'Mention not sent: reply_to must name a recent message of this room.'
       : replyTo === undefined && (!recipients || !recipients.length) ? 'Mention not sent: the matrix-mentions block needs JSON like {"to":["@agent:example.com"]}.'
       : !recipients ? 'Mention not sent: "to" must be a list of agents, or [] to wake nobody.'
-      : !recipients.every(id => id !== bot && shared.bots.includes(id)) ? 'Mention not sent: only other agents in this shared room can be mentioned.'
+      : !recipients.every(id => id !== bot && this.bots(bot, room).includes(id)) ? 'Mention not sent: only other agents in this shared room can be mentioned.'
       : recipients.length && this.peerCredit(bot) < 1 ? 'Mention not sent: no peer credit is left. It is restored when the human next writes to you.'
       : recipients.length > this.peerCredit(bot) ? 'Mention not sent: insufficient peer credit for all recipients; select fewer agents.' : undefined;
     if (error) { this.note(bot, room, error); return { text: rest, mentions: [], error }; }
@@ -372,11 +442,11 @@ export class ConversationLinks {
     T & { [REPLY]?: string; [GRANT]?: WireGrant | WireGrant[]; 'm.mentions'?: { user_ids: string[] } } {
     if (!this.room(bot, room)) return content;
     const grants = mentions?.length ? this.reserveMentions(bot, room, mentions) : undefined;
-    return { ...content, ...(content.msgtype === 'm.text' && reply && { [REPLY]: reply }),
+    return { ...content, [PEER_FIELD]: this.announcement(bot, room), ...(content.msgtype === 'm.text' && reply && { [REPLY]: reply }),
       ...(grants && { 'm.mentions': { user_ids: grants.map(g => g.to) }, [GRANT]: grants.length === 1 ? grants[0] : grants }) };
   }
   private saveHistory() {
-    writeFileSync(this.historyFile + '.tmp', JSON.stringify({ ...this.history, [CREDITS_KEY]: this.credits }), { mode: 0o600 });
+    writeFileSync(this.historyFile + '.tmp', JSON.stringify({ ...this.history, [CREDITS_KEY]: this.credits, [PEERS_KEY]: this.discovered }), { mode: 0o600 });
     renameSync(this.historyFile + '.tmp', this.historyFile);
   }
   acknowledge(bot: string): void {
@@ -442,7 +512,7 @@ export class ConversationLinks {
       // A background result or timer is written by the connector; reaction feedback describes the human's reaction.
       + JSON.stringify({ room, visibility: shared ? 'shared' : 'private',
         author: trigger?.agent ?? (notice && notice !== 'reaction' ? 'connector' : event.sender),
-        trigger: trigger ? 'agent-mention' : notice ?? 'human-message', ...(shared && { participants: roomMembers(shared) }),
+        trigger: trigger ? 'agent-mention' : notice ?? 'human-message', ...(shared && { participants: this.participants(bot, room) }),
         ...(unread.length && { unreadSharedMessages: unread }), ...(remainingMessages && { remainingMessages }), ...(shared && { peerCredit: this.peerCredit(bot) }), ...(shownBefore && { alreadyDelivered: true }),
         ...(connectorNotes.length && { connectorNotes }) })
       + (shared ? '\n' + peerMentionReminder + '\n' : '')

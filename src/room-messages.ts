@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import type { BackgroundTarget } from './background-tasks.js';
 import { PublicError } from './errors.js';
 import { mentionContent } from './message-format.js';
-import { PEER_CREDIT, type ConversationLinks } from './conversation-links.js';
+import { PEER_CREDIT, PEER_FIELD, type ConversationLinks } from './conversation-links.js';
 import { GRANT, type MatrixEvent } from './bridge.js';
 import { attachmentDelivery, attachmentFingerprint } from './attachment-delivery.js';
 import { isMedia, outgoingAttachments, type IncomingAttachment, type OutgoingAttachment } from './media.js';
@@ -44,7 +44,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       const rooms: { room: string; type: 'shared' | 'private'; agents?: string[] }[] = [];
       for (const target of [...links.sharedRooms(bot), ...home ? [home] : []]) {
         try { await allowed(target); rooms.push({ room: target, type: target === home ? 'private' : 'shared',
-          ...(target !== home && { agents: [...links.room(bot, target)!.bots] }) }); }
+          ...(target !== home && { agents: links.bots(bot, target) }) }); }
         catch { signal.throwIfAborted(); }
       }
       return JSON.stringify({ rooms });
@@ -77,7 +77,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       const event = await transport.read(request.room, request.event_id);
       await allowed(request.room);
       if (!event || event.event_id !== request.event_id || (event.room_id && event.room_id !== request.room) ||
-          event.type !== 'm.room.message' || ![shared.owner, ...shared.bots, ...(shared.observers ?? [])].includes(event.sender!) ||
+          event.type !== 'm.room.message' || !links.participants(bot, request.room).includes(event.sender!) ||
           !isMedia(event.content?.msgtype) || !event.content?.file || event.content['m.relates_to']?.rel_type === 'm.replace') {
         throw new PublicError('No encrypted attachment found on that shared-room message.');
       }
@@ -93,7 +93,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       const result = await delivery.action({ files: request.files }, signal);
       return JSON.stringify({ room: request.room, ...JSON.parse(result) });
     }
-    const peers = links.room(bot, request.room)?.bots.filter(id => id !== bot) ?? [];
+    const peers = links.bots(bot, request.room).filter(id => id !== bot);
     if ((request.mention || request.mentions?.length) && request.room === home) throw new PublicError('Room message withheld: mentions are only for other agents of a shared room.');
     if (request.mention && request.mentions !== undefined) throw new PublicError('Choose mention or mentions, not both.');
     if (request.mention && peers.length !== 1) throw new PublicError('Select recipients with mentions in a room with more than two agents.');
@@ -108,6 +108,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       ...(recipients.length ? mentionContent(request.text, recipients.map(id => ({ id, name: links.displayName(id) })))
         : { msgtype: 'm.text' as const, body: request.text }),
       'm.mentions': { user_ids: recipients },
+      ...(links.room(bot, request.room) && { [PEER_FIELD]: links.announcement(bot, request.room) }),
       ...(grants && { [GRANT]: grants.length === 1 ? grants[0] : grants }),
     });
     // Record executor correlation before returning the tool result, without

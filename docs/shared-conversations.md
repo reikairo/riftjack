@@ -147,12 +147,13 @@ Matrix thread. Never guess a session ID or replace it with another agent's ID.
 
 Create the shared Matrix room with encryption, invite-only access and history
 visibility **joined**, then invite the owner and all configured bots. A room needs
-at least two agents, or one agent and a configured executor (see below). Restart the
-connector. Shared-room processing requires all configured participants to have joined.
+at least one linked local agent. Restart the connector. Shared-room processing
+requires all configured participants to have joined.
 Additional joined, invited or knocking participants do not block the existing
 agents. They may read room replies under Matrix's membership and encryption rules.
-Their messages do not become agent instructions or shared observations until they
-are registered in the room configuration. An optional `observers` array
+Their messages do not become instructions merely by joining. Peer discovery,
+described below, enables observations and bounded mentions for announcing agents.
+An optional `observers` array
 on a room lists additional exact Matrix IDs, such as a command executor and its
 host owner. These participants must also have joined. Their text and attachments
 are available as observations, but they cannot control the agents, provide
@@ -162,9 +163,9 @@ notifications from the [model-free command executor](executor.md), including
 explicitly requested progress wakes. Only the agent that sent the recorded job
 request is resumed; raw log text is not treated as a request. Adding observers
 changes the membership boundary and resets that room's observation history.
-Configure additional bots on every relevant Riftjack instance to enable their
-peer mentions, and link each bot's existing conversation on its own instance.
-Inviting an unconfigured bot alone does not activate that routing.
+Link each bot and configure its shared room on its own Riftjack instance. Remote
+peers supporting discovery do not need entries in the other instances' `bots`
+lists. Explicit remote IDs remain supported for peers without discovery.
 
 The initial connector owner controls these links. Every local participant must
 have a link to a distinct existing session. A missing or different session causes
@@ -176,6 +177,45 @@ For agents in separate installations, put only the local agent in each
 installation's `agents` array, with the same owner and group in `rooms`. All
 installations need this feature and retain their own agent's session. Do not run
 the same agent session in two connectors.
+
+## Automatic peer discovery
+
+Each installation configures its own accounts, existing session links and shared
+rooms. For example, one instance can list only `@builder:example.com` in a room's
+`bots`, while another lists only `@reviewer:example.com` for the same room and
+owner. Invite both bots to that room. Once both installations support discovery,
+they learn each other's Matrix IDs and names without copying accounts, sessions,
+tokens or remote-peer configuration. Joining alone does not create a local session
+link or opt a local bot into a new room.
+
+Linked bots exchange encrypted `org.riftjack.peer` events containing version `1`,
+the room owner and their display name. The Matrix sender is the peer identity;
+there is no claimed sender field. Requests carry a random `request` ID; responses
+carry `response` with that ID and do not trigger another response. Announcements
+run at startup, after membership changes (at the next 30-second pump), and every
+five minutes to repair missed discovery. Responses are limited to one per sender
+and room every 30 seconds. Ordinary outgoing shared messages also carry the same
+declaration in `riftjack.peer`, so a first paid mention can introduce its sender
+before the receiving instance queues the turn. Protocol events never reach a
+model or restore peer credit.
+
+A declaration is accepted only from a current joined member in a linked,
+encrypted, invite-only room with joined history visibility and the same configured
+owner. It must be fresh (at most five minutes old, with one minute of future clock
+skew allowed) and no older than the member's current join event. Plaintext events,
+message edits, the owner, configured observers and local accounts not linked to
+that room cannot declare themselves as peers. At most 64 discovered peers are
+retained per room. The cache survives restart but becomes usable only after a
+fresh room-state check. Leaving, rejoining or failing the room-privacy check
+invalidates a cached identity; a rejoined peer must announce again.
+
+This is self-identification by a Matrix member, not proof that its software is
+Riftjack or that the configured owner operates it. Admit only trusted participants
+to these shared rooms: a joined participant that implements the protocol can
+claim the peer role and issue bounded credit grants. Peer messages are still
+untrusted observations, never human instructions or approvals. Discovery grants
+no command, publication, private-room or executor permissions. Explicit observers
+keep their observer role. Human control remains tied to the configured owner.
 
 ## Messages and turns
 
@@ -255,11 +295,11 @@ Only one block per reply counts: a second top-level `matrix-mentions` block make
 the whole reply go out without a mention, so show examples as plain JSON or inside
 another fence.
 
-The connector removes the block, checks that each recipient is another configured agent
-of this room, and sends the reply with `m.mentions` and a visible pill on its
+The connector removes the block, checks that each recipient is another configured or
+discovered agent of this room, and sends the reply with `m.mentions` and a visible pill on its
 last part, after any attachments. Both final replies and `room_messages` use the
-configured bot name as the visible mention label (or “Agent” for a remote bot
-without a local account name). Matrix IDs remain in routing metadata and link
+configured or discovered bot name as the visible mention label (or “Agent” when
+no name is known). Matrix IDs remain in routing metadata and link
 targets. Only a top-level block counts: an example
 inside another fence, a quote or a list is ordinary text. An invalid block sends
 no mention; the room gets a notice and the agent receives the error with its
@@ -297,8 +337,8 @@ A received mention starts a separate turn for the mentioned agent:
   restore credit. Silent or failed turns still consume the reserved send.
 - The encrypted event content carries `riftjack.grant`: version, unique grant ID,
   originating time, remaining credit, sender, recipient and room. Both
-  installations must support this format. Configuring the remote agent in a
-  shared room's `bots` list trusts that installation to issue these grants.
+  installations must support this format. Configured remote agents and peers
+  discovered through encrypted self-announcements are trusted to issue grants.
   The recipient validates the actual Matrix sender, room, destination, bounds
   and expiry after the normal room-access checks. Arbitrary observers cannot
   issue grants. This trust permits bounded agent invocation, not human approval.
@@ -324,9 +364,10 @@ A received mention starts a separate turn for the mentioned agent:
 ## Privacy
 
 Room membership and privacy settings are rechecked before processing and outgoing
-delivery. Extra participants are allowed in shared rooms; the configured
-`participants` prompt field is not a complete list of everyone who may read an
-answer. Peer bots are never added to human access lists.
+delivery. Extra participants are allowed in shared rooms; the `participants`
+prompt field includes configured participants and discovered peers, and is not a
+complete list of everyone who may read an answer. Peer bots are never added to
+human access lists.
 
 The same model session knows both private and shared conversations. Routing
 instructions tell it where it is replying, but this is **not strict information

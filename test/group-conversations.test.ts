@@ -69,9 +69,9 @@ test('three agents retain separate sessions and routing permissions when another
     f.links.credit(bot);
     assert.equal(f.links.reserveMentions(bot, room, [newcomer]), undefined);
   }
-  for (const invalid of [[bots[0]], [bots[0], bots[1], bots[1]], [bots[0], bots[1], owner]]) {
+  for (const invalid of [[bots[0], bots[1], bots[1]], [bots[0], bots[1], owner]]) {
     writeFileSync(f.path, JSON.stringify({ ...f.config, rooms: [{ room, owner, bots: invalid }] }));
-    assert.throws(f.load, invalid.length === 1 ? /requires a configured executor/ : /distinct agents/);
+    assert.throws(f.load, /distinct agents/);
   }
   writeFileSync(f.path, JSON.stringify({ ...f.config, agents: f.config.agents.slice(0, 2) }));
   assert.throws(f.load, /explicit session link/);

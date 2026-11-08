@@ -39,9 +39,14 @@ joined” in the Matrix client, or use a new DM created by the bot manager.
 the two-person rule: they require the configured human, agents and observers
 to have joined, with the same encryption, join and history settings. Additional
 joined, invited or knocking participants do not block shared-room processing.
-They may read replies, but do not gain control, observation or peer-mention
-permissions merely by joining. Configure those roles explicitly. Ordinary DMs
-still enforce the strict two-person rule.
+They may read replies. Joined members can self-identify as peer agents through
+[encrypted discovery announcements](shared-conversations.md#automatic-peer-discovery),
+enabling shared observations and bounded peer mentions without manual remote-ID
+registration. This authenticates the Matrix sender, not its software or operator:
+room operators must trust members allowed into the room. Peers never gain human
+control or approval authority. Configured observers cannot promote themselves to
+peers, and local agents still require explicit session and room links. Ordinary
+DMs enforce the strict two-person rule.
 
 These checks do not retract messages or encryption keys already delivered to
 other devices. Matrix membership changes and sends are separate server requests;

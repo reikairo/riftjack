@@ -39,6 +39,7 @@ import { replyContent, replyRelation } from './message-format.js';
 import { inlineCode, markdownText, managerBotList } from './manager-format.js';
 import { createMatrixUser, parseUserCreation } from './matrix-users.js';
 import { isPrivateRoom } from './private-room.js';
+import { PeerDiscovery } from './peer-discovery.js';
 import { ConversationLinks, mentionText } from './conversation-links.js';
 import { sendConfirmation } from './confirmation-message.js';
 import { createBackend } from './backends.js';
@@ -160,6 +161,9 @@ async function main() {
   const clients = new Map<string, { client: MatrixClient; bridge: Bridge | WorkerBridge; privateRoom: (room: string, sender: string) => Promise<boolean> }>();
   const workerServer = new WorkerServer();
   const workers = new Map<string, WorkerService>();
+  const discoveries = new Map<string, PeerDiscovery>();
+  const discoveryTimer = setInterval(() => { for (const discovery of discoveries.values()) void discovery.pump().catch(diagnostics); }, 30_000);
+  discoveryTimer.unref();
   const startupId = randomBytes(16).toString('hex');
   const githubPumps = new Map<string, () => Promise<void>>();
   const githubLifetime = new AbortController();
@@ -181,7 +185,7 @@ async function main() {
     if (stopping) return;
     stopping = true;
     clearInterval(restartNoticeTimer);
-    clearInterval(workerTimer);
+    clearInterval(workerTimer); clearInterval(discoveryTimer);
     clearInterval(backgroundTimer); clearInterval(githubTimer); githubLifetime.abort();
     for (const { client, bridge } of clients.values()) { bridge.stop(); client.stop(); }
     void Promise.all([tunnel?.stop(), workerServer.stop(), new Promise(resolve => setTimeout(resolve, 1500))])
@@ -619,7 +623,16 @@ async function main() {
       client.inbox = async (room, event) => { await inbox(room, event); };
       client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
     } else if (account.kind !== 'grok') client.on('room.message', (room, event) => { void inbox(room, event).catch(diagnostics); });
+    if (linkedAgent && client instanceof MessageMatrixClient) {
+      const discovery = new PeerDiscovery(links, account.userId, {
+        allowed: privateRoom, stopping: () => stopping || restart.pending || !clients.has(account.userId),
+        send: (room, type, content) => client.sendEvent(room, type, content), report: diagnostics,
+      });
+      discoveries.set(account.userId, discovery);
+      client.protocol = (room, event) => discovery.receive(room, event);
+    }
     client.on('room.event', (room: string, event: MatrixEvent) => {
+      if (event.type === 'm.room.member') discoveries.get(account.userId)?.changed(room);
       if (account.kind !== 'grok' && !(client instanceof MessageMatrixClient) && event.type === 'm.reaction') void inbox(room, event).catch(diagnostics);
     });
     client.on('room.invite', (room: string, event: MatrixEvent) => {
@@ -705,10 +718,11 @@ async function main() {
       // start() launches the sync loop without waiting for the first /sync response.
       phase('clientStart');
       online = true;
+      void discoveries.get(account.userId)?.pump().catch(diagnostics);
       console.log(account.name + ' (' + account.kind + ') online: ' + account.userId);
       console.log(JSON.stringify({ time: new Date().toISOString(), event: 'bot-startup', bot: account.userId,
         totalMs: Math.round(performance.now() - startedAt), phases }));
-    } catch (error) { client.stop(); clients.delete(account.userId); workers.get(account.userId)?.stop(); workers.delete(account.userId); workerServer.remove(account.userId); throw error; }
+    } catch (error) { client.stop(); discoveries.delete(account.userId); clients.delete(account.userId); workers.get(account.userId)?.stop(); workers.delete(account.userId); workerServer.remove(account.userId); throw error; }
   }
   for (const account of accounts.list()) {
     try { await startAccount(account); } catch (error) { console.error('Could not start ' + account.userId + '.'); diagnostics(error); }

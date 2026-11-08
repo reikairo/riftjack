@@ -129,6 +129,11 @@ at admission, claim, attachment access and reply delivery. Replacing a pinned
 session or changing a task's configured source-room membership cancels old work.
 `!reset` is disabled while linked; `!cancel` affects the invoking room/thread.
 
+When bots live on different Riftjack installations, configure each bot and its
+shared room only on its own instance. The connector discovers remote peers from
+encrypted announcements; no remote account or session registration is needed.
+Both installations must support [peer discovery](shared-conversations.md#automatic-peer-discovery).
+
 Update the external worker's copy of `worker-client.py`. Feed the complete task
 `text` to the model: linked tasks include a Matrix context envelope with room,
 visibility, actual author, trigger, shared observations and peer credit. The

@@ -78,7 +78,7 @@ export class WorkerBridge {
     if (!conversation) { conversation = randomUUID(); o.state.update(key, { grok: conversation }); }
     const fresh = !o.queue.hasEvent(event.event_id!);
     const shared = links?.room(o.botId, room);
-    const context = { room, type: shared ? 'shared' as const : 'private' as const, agents: shared?.bots ?? [],
+    const context = { room, type: shared ? 'shared' as const : 'private' as const, agents: links?.bots(o.botId, room) ?? [],
       key, session: conversation, binding: workerBinding(links, o.botId, room) };
     o.queue.enqueue(room, event, key + '\n' + conversation, false, context);
     if (fresh && !event.content?.[AGENT_TRIGGER]) links?.credit(o.botId);
