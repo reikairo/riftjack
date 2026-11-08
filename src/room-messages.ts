@@ -1,4 +1,6 @@
 import type { ScopedReceipts } from './delivery-receipts.js';
+import { createHash } from 'node:crypto';
+import type { BackgroundTarget } from './background-tasks.js';
 import { PublicError } from './errors.js';
 import { mentionContent } from './message-format.js';
 import { PEER_CREDIT, type ConversationLinks } from './conversation-links.js';
@@ -8,6 +10,7 @@ import { isMedia, outgoingAttachments, type IncomingAttachment, type OutgoingAtt
 
 // Use explicit recipients in groups; mention=true selects the sole peer in a pair room.
 export type MessageRequest = { action: 'list' }
+  | { action: 'continue_private'; text: string; id: string }
   | { action: 'send'; room: string; text: string; id: string; mention?: boolean; mentions?: string[] }
   | { action: 'receive_attachment'; room: string; event_id: string }
   | { action: 'send_files'; room: string; id: string; files: { path: string; name?: string }[]; outbox: string };
@@ -18,6 +21,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
   context: { room: string; event: MatrixEvent; key: string }, transport: {
     allowed(room: string, sender: string): Promise<boolean>;
     stopping(): boolean;
+    continuePrivate?(id: string, target: BackgroundTarget, message: string): void;
     send(room: string, content: { msgtype: 'm.text'; body: string; format?: 'org.matrix.custom.html'; formatted_body?: string; 'm.mentions': { user_ids: string[] }; [GRANT]?: ReturnType<ConversationLinks['reserve']> | ReturnType<ConversationLinks['reserveMentions']> }): Promise<string>;
     read?(room: string, eventId: string): Promise<MatrixEvent | undefined>;
     receive?(event: MatrixEvent, key: string, signal: AbortSignal, authorize: () => Promise<void>): Promise<IncomingAttachment>;
@@ -44,6 +48,27 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
         catch { signal.throwIfAborted(); }
       }
       return JSON.stringify({ rooms });
+    }
+    if (request.action === 'continue_private') {
+      if (!home || !links.room(bot, context.room) || !context.event.event_id || !transport.continuePrivate) {
+        throw new PublicError('Private continuation requires a linked shared-room turn and a configured notification queue.');
+      }
+      await allowed(context.room);
+      await allowed(home);
+      const agent = links.agent(bot)!;
+      const target: BackgroundTarget = { room: home, sender: agent.owner, key: context.key, session: agent.session,
+        ...(agent.thread && { thread: agent.thread }) };
+      const relation = context.event.content?.['m.relates_to'];
+      const thread = relation?.rel_type === 'm.thread' ? relation.event_id : undefined;
+      const id = 'continuation:' + createHash('sha256').update(JSON.stringify([bot, target, context.room, thread, request.id])).digest('hex');
+      const message = 'Continue the existing task in your linked private chat after the shared-room turn. '
+        + 'This is your own handoff note, not a new human request or approval. Inspect existing effects before continuing; '
+        + 'do not repeat uncertain actions or reuse permissions from another room. Obtain any required approval here.\n'
+        + JSON.stringify({ source_room: context.room, source_event: context.event.event_id, note: request.text });
+      if (message.length > 4000) throw new PublicError('The continuation note and source references exceed 4000 characters. Shorten the note.');
+      transport.continuePrivate(id, target, message);
+      return JSON.stringify({ status: 'queued', room: home, continuation_id: id,
+        note: 'End this shared-room turn. The same session will continue privately when idle; no approval or command was transferred.' });
     }
     await allowed(request.room);
     if (request.action === 'receive_attachment') {
@@ -100,6 +125,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
 // A configured receipt store extends this protection across turns and restarts.
 export function roomMessageDelivery(send: MessageAction, receipts?: () => ScopedReceipts | Promise<ScopedReceipts>, maxBytes = 512 * 1024 * 1024): RoomMessageTool {
   const attempts = new Map<string, { content: string; result: Promise<string> }>();
+  let continuationId: string | undefined;
   return async (input, signal, outbox) => {
     signal.throwIfAborted();
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PublicError('Expected a room message request.');
@@ -108,6 +134,16 @@ export function roomMessageDelivery(send: MessageAction, receipts?: () => Scoped
     if (r.action === 'status' && Object.keys(r).every(k => ['action', 'id'].includes(k))) {
       if (!receipts) throw new PublicError('Persistent delivery receipts are not configured.');
       return (await receipts()).read(r.id as string | undefined);
+    }
+    if (r.action === 'continue_private') {
+      if (Object.keys(r).some(k => !['action', 'text', 'id'].includes(k)) ||
+          typeof r.text !== 'string' || !r.text.trim() || Buffer.byteLength(r.text, 'utf8') > 3000 || /[\x00-\x08\x0b-\x1f]/.test(r.text) ||
+          typeof r.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(r.id)) {
+        throw new PublicError('Use continue_private with a unique id and a handoff text of at most 3000 UTF-8 bytes. The destination is your own linked private chat.');
+      }
+      if (continuationId !== undefined && continuationId !== r.id) throw new PublicError('Only one private continuation may be requested per turn. Inspect its receipt instead of creating another.');
+      continuationId = r.id;
+      return attempt(r.id, { action: 'continue_private', id: r.id, text: r.text }, signal);
     }
     const roomValid = typeof r.room === 'string' && /^![^\s:]+:[^\s]+$/.test(r.room);
     if (r.action === 'receive_attachment') {

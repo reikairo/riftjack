@@ -58,6 +58,26 @@ test('room MCP advertises mention and passes it through validated', async t => {
   assert.deepEqual(requests, [{ ...request, mention: true }, group]);
 });
 
+test('room MCP exposes private continuation without caller-supplied routing or approvals', async t => {
+  const requests: unknown[] = [];
+  const server = await startRoomMessageMcp(roomMessageDelivery(async request => {
+    requests.push(request); return '{"status":"queued","continuation_id":"continuation:test"}';
+  }), new AbortController().signal);
+  t.after(() => server.close());
+  const tools = (await (await post(server, 1, {}, 'tools/list')).json()).result.tools;
+  assert.ok(tools[0].inputSchema.properties.action.enum.includes('continue_private'));
+  const continuation = { action: 'continue_private', id: 'next', text: 'Inspect the result and request approval privately.' };
+  for (const [i, extra] of [{ room: '!other:test' }, { session: 'other' }, { approved: true }, { mentions: ['@peer:test'] }].entries()) {
+    assert.equal((await (await post(server, i + 2, { ...continuation, ...extra })).json()).result.isError, true);
+  }
+  for (const id of [10, 11]) {
+    const result = (await (await post(server, id, continuation)).json()).result;
+    assert.equal(result.isError, undefined);
+    assert.equal(JSON.parse(result.content[0].text).status, 'queued');
+  }
+  assert.deepEqual(requests, [continuation]);
+});
+
 test('room MCP passes attachment retrieval and outbox file sends through validation', async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'room-files-mcp-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));

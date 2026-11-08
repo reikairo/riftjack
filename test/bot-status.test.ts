@@ -35,7 +35,8 @@ test('CLI reports whitelist metadata, reject malformed fields and escape Markdow
   const text = botStatus('codex', config, { codexReport: report });
   assert.ok(text.includes('\\[model\\]\\(https://example\\.com\\)'));
   assert.ok(text.includes('/projects/\\*\\*demo\\*\\*'));
-  assert.doesNotMatch(text, /secret|private/);
+  // The configured workspace may itself contain these words; check the CLI report.
+  assert.doesNotMatch(text.split('**Last CLI session report**')[1], /secret|private/);
 });
 
 

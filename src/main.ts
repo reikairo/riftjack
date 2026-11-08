@@ -385,6 +385,10 @@ async function main() {
       } : undefined,
       roomMessages: linkedAgent ? (request, context, signal) => linkedRoomMessages(links, account.userId, context, {
         allowed: privateRoom, stopping: () => stopping || restart.pending,
+        continuePrivate: background ? (id, target, message) => {
+          background.notify(id, target, message, { group: id, progress: false }, 'Private task continuation');
+          context.onCancel(() => background.cancelNotifications(id, target));
+        } : undefined,
         send: async (room, content) => {
           const eventId = await client.sendMessage(room, content);
           turnReaction.rememberReply(room, eventId);

@@ -90,7 +90,8 @@ export class DeliveryReceipts {
           try {
             const value = JSON.parse(await send());
             const statuses = Array.isArray(value.files) ? value.files.map((f: { status: string }) => f.status) : [value.status];
-            receipt.status = statuses.every((s: string) => s === 'sent') ? 'sent' : statuses.every((s: string) => s === 'not_sent') ? 'not_sent' : 'uncertain';
+            // A queued continuation confirms durable registration, not that its turn has run.
+            receipt.status = statuses.every((s: string) => s === 'sent' || s === 'queued') ? 'sent' : statuses.every((s: string) => s === 'not_sent') ? 'not_sent' : 'uncertain';
             receipt.result = JSON.stringify({ ...value, delivery_id: id });
           } catch (error) {
             receipt.result = JSON.stringify({ delivery_id: id, status: 'uncertain', error: errorMessage(error, 'Delivery outcome unknown; inspect the destination') });

@@ -27,7 +27,7 @@ paid with one unit of [peer credit](#peer-mentions) per distinct recipient; such
 6000 bytes so that the started turn can quote it whole. This lets an agent
 that received a task in its private chat hand it to its peer. Reusing an ID with identical content during the same
 turn returns the earlier result, including a failure, without sending again.
-IDs are scoped to one turn; never automatically retry an uncertain delivery with
+IDs and receipts persist within the conversation and session; never automatically retry an uncertain delivery with
 a new ID or in a later turn. Inspect the destination first. The tool expires when
 the turn ends and permits at most 32 distinct message attempts per turn.
 
@@ -37,6 +37,40 @@ two fields. `action: "list"` includes an `agents` array for each shared room so
 recipients can be selected without guessing. Each distinct recipient costs one
 peer credit; insufficient credit rejects the whole recipient set. All recipients
 receive the sender's remainder after paying for the whole set.
+
+## Continuing a shared-room task privately
+
+An agent can continue an already authorized task in its own linked private chat
+without asking the human to send another message merely to start a turn there:
+
+```json
+{"action":"continue_private","id":"review-followup","text":"Review is complete. The remaining check needs command approval. Inspect the saved test results before requesting that check."}
+```
+
+This action is available only from a linked shared-room turn. The connector
+selects the same agent's configured home chat and pinned session, including its
+configured home thread. The caller cannot supply a destination, sender, session,
+thread or mention. Both source and destination access are checked before queueing;
+the private room's membership, encryption and session are checked again on delivery.
+The note is limited to 3000 UTF-8 bytes. Include only the task's relevant state,
+remaining work and evidence references, not a copy of unrelated conversations.
+
+A `queued` receipt confirms durable registration, not execution. End the current
+shared-room turn; the existing notification queue resumes the agent privately
+when it is idle. Progress, replies and new permission requests then belong to
+that private turn. The note is explicitly identified as the agent's own handoff,
+not a human instruction or approval. Pending approvals and existing background
+registrations keep their original scope; uncertain actions must be reconciled,
+not repeated. No peer is started and no peer credit is consumed.
+
+Only one continuation may be requested per turn. Reuse its delivery ID to inspect
+the same receipt; `action=status` reports the registration receipt, whose outer
+`sent` state means the queueing request was recorded and whose result is `queued`.
+Use the returned `continuation_id` with `background_tasks` in the private chat
+to inspect or cancel the pending continuation. An explicit cancellation of the
+still-running source turn also cancels its queued continuation. A connector restart
+preserves the notice; an interrupted continuation resumes with a warning to inspect
+existing effects. Session replacement invalidates the pending notice.
 
 ## Shared-room attachments
 

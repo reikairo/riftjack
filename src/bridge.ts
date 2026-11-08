@@ -80,7 +80,7 @@ type Options = {
   publish?: (input: unknown, signal: AbortSignal, interact: Interact, authorize: () => Promise<void>) => Promise<string>;
   github?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
   background?: (input: unknown, context: { room: string; event: MatrixEvent; key: string }, signal: AbortSignal) => Promise<string>;
-  roomMessages?: (request: MessageRequest, context: { room: string; event: MatrixEvent; key: string; sent: (room: string, eventId: string) => void }, signal: AbortSignal) => Promise<string>;
+  roomMessages?: (request: MessageRequest, context: { room: string; event: MatrixEvent; key: string; sent: (room: string, eventId: string) => void; onCancel: (cancel: () => void) => void }, signal: AbortSignal) => Promise<string>;
   // Account usage and limits of the engine.
   usage?: (signal: AbortSignal) => Promise<string>;
   report: (error: unknown) => void;
@@ -111,6 +111,7 @@ type Active = {
   key: string; backendKey: string; sender: string; controller: AbortController; running: boolean; failed: boolean;
   ready: Promise<void>; markReady: () => void; steering: Promise<void>; buffered: number; followups: Followup[];
   inputIds: string[]; cancelled?: boolean;
+  cancelContinuations?: (() => void)[];
   interactions: Interactions; publication?: boolean; typing?: ReturnType<typeof taskTyping>;
 };
 
@@ -546,7 +547,8 @@ export class Bridge {
           return o.receipts!.scoped(target, kind);
         } : undefined;
         const messages = o.roomMessages && roomMessageDelivery((request, signal) =>
-          o.roomMessages!(request, { room, event: requestEvent, key: backendKey, sent }, signal), receipts ? () => receipts('rooms') : undefined, o.maxMediaBytes);
+          o.roomMessages!(request, { room, event: requestEvent, key: backendKey, sent,
+            onCancel: cancel => { (current.cancelContinuations ??= []).push(cancel); } }, signal), receipts ? () => receipts('rooms') : undefined, o.maxMediaBytes);
         const hooks: BackendHooks = {
           deliveryReceipts: receipts ? () => receipts('attachments') : undefined,
           detached: o.detached ? async (input, callSignal) => {
@@ -734,6 +736,9 @@ export class Bridge {
         : errorMessage(error) + (current.followups.length ? ' Pending follow-ups were not run; please resend them.' : ''));
     } finally {
       if (current.cancelled || !o.isAuthorized(current.sender)) {
+        for (const cancel of current.cancelContinuations ?? []) {
+          try { cancel(); } catch (error) { o.report(error); }
+        }
         background?.completed?.(true);
         if (o.recoverMessages) o.state.completeMessages(o.botId, current.inputIds);
         for (const id of current.inputIds) this.retained.delete(id);
