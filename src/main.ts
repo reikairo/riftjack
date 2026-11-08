@@ -8,7 +8,7 @@ import { requestConfirmation } from './confirmation-mcp.js';
 import { checkPi } from './pi-backend.js';
 import { matrixTyping } from './matrix-typing.js';
 import { GitHubSubscriptions, githubReader, loadGitHubPolicies } from './github-subscriptions.js';
-import { linkedRoomMessages } from './room-messages.js';
+import { linkedRoomMessages, roomMessageDelivery } from './room-messages.js';
 import { sendCompactionNotice } from './compaction-notices.js';
 import { sendOwnerDiagnostic } from './owner-diagnostics.js';
 import { withEngineSettings } from './engine-settings.js';
@@ -26,7 +26,8 @@ import { StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import { loadConfig, type Config } from './config.js';
 import { State } from './state.js';
 import { TurnReaction } from './turn-reaction.js';
-import { WorkerBridge } from './worker-bridge.js';
+import { prepareWorkerReply } from './worker-replies.js';
+import { WorkerBridge, workerTaskAllowed } from './worker-bridge.js';
 import { WorkerMatrixClient } from './worker-matrix-client.js';
 import { MessageMatrixClient } from './message-matrix-client.js';
 import { RateLimitedMatrixClient } from './rate-limited-matrix-client.js';
@@ -222,8 +223,7 @@ async function main() {
     const crypto = new RustSdkCryptoStorageProvider(join(dir, 'crypto'), StoreType.Sqlite);
     if (account.kind === 'grok' && !config.workerPort) throw new PublicError('Set WORKER_PORT to enable the Grok worker connection.');
     const recoverMessages = account.kind === 'codex' || account.kind === 'claude' || account.kind === 'pi';
-    const client = account.kind === 'grok' ? new WorkerMatrixClient(config.homeserver, account.accessToken, storage, crypto)
-      : recoverMessages ? new MessageMatrixClient(config.homeserver, account.accessToken, storage, crypto)
+    const client = recoverMessages || account.kind === 'grok' ? new MessageMatrixClient(config.homeserver, account.accessToken, storage, crypto)
       : new RateLimitedMatrixClient(config.homeserver, account.accessToken, storage, crypto);
     const media = new MatrixMedia(client, { workspace: botConfig.workspace, homeserver: config.homeserver,
       accessToken: account.accessToken, maxBytes: config.maxMediaBytes, scope: account.userId,
@@ -235,7 +235,7 @@ async function main() {
     if (me.user_id !== account.userId || !me.device_id) throw new PublicError('Bot ' + account.userId + ' needs its own device-bound Matrix access token.');
     const authorized = (sender: string) => access.has(sender, account.kind === 'manager' ? undefined : account.userId);
     const linkedAgent = links.agent(account.userId);
-    const since = recoverMessages ? state.messageSince(account.userId, Date.now()) : Date.now();
+    const since = recoverMessages || account.kind === 'grok' ? state.messageSince(account.userId, Date.now()) : Date.now();
     if (client instanceof MessageMatrixClient) client.history = { since,
       heads: () => state.roomHeads(account.userId), save: heads => state.saveRoomHeads(account.userId, heads) };
     const privateRoom = async (room: string, sender: string) => linkedAgent
@@ -311,27 +311,60 @@ async function main() {
       if (!existsSync(tokenFile)) writeFileSync(tokenFile, randomBytes(32).toString('base64url') + '\n', { flag: 'wx', mode: 0o600 });
       const token = readFileSync(tokenFile, 'utf8').trim();
       if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new PublicError('Invalid Grok worker token file.');
+      const workerLinks = linkedAgent ? links : undefined;
+      const receipts = new DeliveryReceipts(join(workerDir, 'room-receipts.json'));
+      const workerAllowed = (task: import('./worker-queue.js').WorkerTask) => workerTaskAllowed(task, {
+        bot: account.userId, links: workerLinks, state, stopping: () => stopping || restart.pending, allowed: privateRoom,
+      });
       const service = new WorkerService(queue, join(workerDir, 'uploads'), config.maxMediaBytes, {
         transcribe: (file, signal) => audio ? audio.transcribe(file, signal) : Promise.resolve(file),
-        allowed: task => privateRoom(task.room, task.event.sender!),
+        allowed: workerAllowed,
+        prompt: workerLinks ? task => workerLinks.prompt(account.userId, task.room, task.event, task.event.content?.body ?? '') : undefined,
+        prompted: workerLinks ? () => workerLinks.acknowledge(account.userId) : undefined,
+        roomAllowed: workerLinks ? (task, room) => privateRoom(room, task.event.sender!) : undefined,
+        rooms: workerLinks ? async (task, input, signal, guard, outbox) => {
+          const context = { room: task.room, event: task.event, key: task.context!.key };
+          const roomAccess = async (room: string, sender: string) => {
+            await guard();
+            const allowed = await privateRoom(room, sender);
+            queue.checkLease(task.id, task.lease!);
+            return allowed;
+          };
+          const action = linkedRoomMessages(workerLinks, account.userId, context, {
+            stopping: () => stopping || restart.pending,
+            allowed: roomAccess,
+            send: async (room, content) => {
+              if (!(await roomAccess(room, task.event.sender!))) throw new PublicError('Worker room message withheld because access changed.');
+              return client.sendMessage(room, content);
+            },
+            read: async (room, id) => {
+              if (!(await roomAccess(room, task.event.sender!))) throw new PublicError('Worker attachment withheld because access changed.');
+              return reactionTarget(room, id);
+            },
+            receive: (event, key, signal, authorize) => media.receive(event.content!, key, signal, async () => { await guard(); await authorize(); }),
+            maxBytes: config.maxMediaBytes,
+            sendFiles: (room, files, signal, authorize) => media.send(room, files, undefined, signal, async () => { await guard(); await authorize(); }),
+          });
+          const relation = task.event.content?.['m.relates_to'];
+          return roomMessageDelivery(action, () => receipts.scoped({ room: task.room, sender: task.event.sender!,
+            key: context.key, session: task.context!.session, thread: relation?.rel_type === 'm.thread' ? relation.event_id : undefined }, 'rooms'),
+            config.maxMediaBytes)(input, signal, outbox);
+        } : undefined,
         receive: task => task.event.content?.file ? media.receive(task.event.content, task.conversation, AbortSignal.timeout(60_000), async () => {
-          if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker attachment withheld because access or room privacy changed.');
+          if (!(await workerAllowed(task))) throw new PublicError('Worker attachment withheld because access or room privacy changed.');
         }) : Promise.resolve(undefined),
         prepare: async task => {
           const authorize = async () => {
-            if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
+            if (!(await workerAllowed(task))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
           };
-          const contents: Record<string, unknown>[] = task.response!.text ? replyContent(task.response!.text, true, false, 'm.text') : [];
-          for (const file of task.response!.files) contents.push(await media.prepareAttachment({ ...file, root: join(workerDir, 'uploads') }, AbortSignal.timeout(config.mediaUploadTimeoutMs), authorize));
-          const encrypted: unknown[] = [];
-          for (const content of contents) {
-            await authorize();
-            encrypted.push(await client.crypto.encryptRoomEvent(task.room, 'm.room.message', { ...content, 'm.relates_to': threadRelation(task.event) }));
-          }
-          return encrypted;
+          return prepareWorkerReply(task, account.userId, workerLinks, {
+            authorize,
+            file: file => media.prepareAttachment({ ...file, root: join(workerDir, 'uploads') }, AbortSignal.timeout(config.mediaUploadTimeoutMs), authorize),
+            encrypt: content => client.crypto.encryptRoomEvent(task.room, 'm.room.message', content),
+          });
         },
         send: async (task, transaction, encrypted) => {
-          if (stopping || !(await privateRoom(task.room, task.event.sender!))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
+          if (!(await workerAllowed(task))) throw new PublicError('Worker reply withheld because access or room privacy changed.');
           const result = await client.doRequest('PUT', '/_matrix/client/v3/rooms/' + encodeURIComponent(task.room) + '/send/m.room.encrypted/' + encodeURIComponent(transaction), null, encrypted);
           return result.event_id as string;
         },
@@ -341,7 +374,7 @@ async function main() {
         report: diagnostics,
       });
       workers.set(account.userId, service); workerServer.add(account.userId, token, service);
-      bridge = new WorkerBridge({ botId: account.userId, authorized, privateRoom, queue, service, state, reactionTarget,
+      bridge = new WorkerBridge({ botId: account.userId, authorized, privateRoom, queue, service, state, reactionTarget, links: workerLinks, since,
         reply: async (room, event, text) => {
           if (!(await privateRoom(room, event.sender!))) throw new PublicError('Worker control reply withheld.');
           await client.sendMessage(room, { msgtype: 'm.notice', body: text, 'm.relates_to': threadRelation(event) });
@@ -582,7 +615,7 @@ async function main() {
       incoming = incoming.catch(() => {}).then(() => prepareIncoming(room, event));
       return incoming;
     };
-    if (client instanceof MessageMatrixClient) {
+    if (client instanceof MessageMatrixClient && bridge instanceof Bridge) {
       client.inbox = async (room, event) => { await inbox(room, event); };
       client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
     } else if (account.kind !== 'grok') client.on('room.message', (room, event) => { void inbox(room, event).catch(diagnostics); });

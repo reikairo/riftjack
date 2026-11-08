@@ -25,13 +25,16 @@ def main():
     parser.add_argument('--token-file', default=os.getenv('RIFTJACK_WORKER_TOKEN_FILE'))
     sub = parser.add_subparsers(dest='command', required=True)
     wait = sub.add_parser('wait'); wait.add_argument('--seconds', type=int, default=300)
-    for name in ['status', 'renew', 'release', 'reply', 'attachment']:
+    for name in ['status', 'renew', 'release', 'reply', 'attachment', 'rooms']:
         cmd = sub.add_parser(name)
         cmd.add_argument('task', help='Task JSON file saved from wait')
         if name == 'reply':
             cmd.add_argument('--text-file', help='UTF-8 reply text')
             cmd.add_argument('--file', action='append', default=[], help='Attach a local file; repeat up to 10 times')
         if name == 'attachment': cmd.add_argument('--output', required=True)
+        if name == 'rooms':
+            cmd.add_argument('--request-file', required=True, help='Room operation JSON; send_files uses local path/name entries')
+            cmd.add_argument('--output', help='Save a received attachment here (exclusive create)')
     args = parser.parse_args()
     url = urllib.parse.urlsplit(args.url)
     if url.username or url.password or url.query or url.fragment or url.scheme not in ('https', 'http'):
@@ -47,7 +50,7 @@ def main():
         req = urllib.request.Request(endpoint + path,
             data=None if body is None else json.dumps(body).encode(),
             headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
-        with opener.open(req, timeout=650 if args.command == 'attachment' else 45) as response:
+        with opener.open(req, timeout=650 if args.command in ('attachment', 'rooms') else 45) as response:
             return json.load(response)
 
     if args.command == 'wait':
@@ -64,9 +67,19 @@ def main():
     if args.command == 'reply':
         body['text'] = Path(args.text_file).read_text() if args.text_file else ''
         body['files'] = [{'name': Path(p).name, 'data': base64.b64encode(Path(p).read_bytes()).decode()} for p in args.file]
+    if args.command == 'rooms':
+        operation = json.loads(Path(args.request_file).read_text())
+        if operation.get('action') == 'receive_attachment' and not args.output:
+            parser.error('rooms receive_attachment requires --output')
+        if operation.get('action') == 'send_files':
+            operation['files'] = [{'name': f.get('name') or Path(f['path']).name,
+                                   'data': base64.b64encode(Path(f['path']).read_bytes()).decode()}
+                                  for f in operation['files']]
+        body['request'] = operation
     path = '/' + task_id + ('' if args.command == 'status' else '/' + args.command)
     result = request(path, None if args.command == 'status' else body)
-    if args.command == 'attachment':
+    if args.command == 'attachment' or (args.command == 'rooms' and args.output and 'file' in result):
+        if args.command == 'rooms': result = result['file']
         output = Path(args.output)
         with output.open('xb') as file:
             os.chmod(output, 0o600)

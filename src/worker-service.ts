@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { WorkerError, WorkerQueue, type WorkerTask, type WorkerFile } from './worker-queue.js';
 import { readOutgoing, safeName, type IncomingAttachment } from './media.js';
@@ -12,6 +12,10 @@ export type WorkerTransport = {
   send: (task: WorkerTask, transaction: string, encrypted: unknown) => Promise<string | void>;
   started?: () => Promise<void>;
   completed?: (task: WorkerTask, eventId: string) => Promise<void>;
+  prompt?: (task: WorkerTask) => string;
+  prompted?: () => void;
+  roomAllowed?: (task: WorkerTask, room: string) => Promise<boolean>;
+  rooms?: (task: WorkerTask, request: unknown, signal: AbortSignal, guard: () => Promise<void>, outbox: string) => Promise<string>;
   report: (error: unknown) => void;
 };
 export class WorkerService {
@@ -41,8 +45,12 @@ export class WorkerService {
       try { await this.transport.started?.(); } catch (error) { this.transport.report(error); }
       await this.allowed(task);
       this.queue.checkLease(task.id, task.lease!);
-      return { id: task.id, conversation: task.conversation, sender: task.event.sender,
-        text: task.event.content?.body || '', hasAttachment: !!task.event.content?.file,
+      if (task.prompt === undefined && this.transport.prompt) {
+        task.prompt = this.queue.cachePrompt(task.id, task.lease!, this.transport.prompt(task));
+        this.transport.prompted?.();
+      }
+      return { id: task.id, room: task.room, type: task.context?.type ?? 'private', agents: task.context?.agents ?? [], conversation: task.conversation, sender: task.event.sender,
+        text: task.prompt ?? task.event.content?.body ?? '', hasAttachment: !!task.event.content?.file,
         lease: task.lease, leaseUntil: task.leaseUntil, attempt: task.attempt };
     }
     return null;
@@ -93,6 +101,16 @@ export class WorkerService {
     const task = this.queue.get(id); await this.allowed(task);
     if (!['replied', 'delivered'].includes(task.status)) this.queue.checkLease(id, lease);
     else if (task.lease !== lease) throw new WorkerError(409, 'Different task lease.');
+    const stored = this.storeFiles(files);
+    const accepted = this.queue.complete(id, lease, text, stored);
+    void this.deliver();
+    return { id, status: accepted.status }; // Accepted is distinct from Matrix delivery.
+  }
+  private storeFiles(files: unknown): WorkerFile[] {
+    if (!Array.isArray(files) || !files.length || files.length > 10) {
+      if (Array.isArray(files) && !files.length) return [];
+      throw new WorkerError(400, 'Supply up to 10 files.');
+    }
     let total = 0;
     const decoded = files.map(file => {
       if (!file || typeof file.name !== 'string' || !file.name || file.name.length > 255 || typeof file.data !== 'string' || (file.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.data))) throw new WorkerError(400, 'Files need a name of at most 255 characters and base64 data.');
@@ -100,9 +118,8 @@ export class WorkerService {
       if (total > this.maxBytes) throw new WorkerError(413, 'Reply attachments exceed the total size limit.');
       return { name: safeName(file.name), data };
     });
-    await this.allowed(task);
     mkdirSync(this.files, { recursive: true, mode: 0o700 });
-    const stored: WorkerFile[] = decoded.map(({ name, data }) => {
+    return decoded.map(({ name, data }) => {
       const directory = join(this.files, createHash('sha256').update(data).digest('hex'));
       mkdirSync(directory, { recursive: true, mode: 0o700 });
       const path = join(directory, name);
@@ -110,9 +127,38 @@ export class WorkerService {
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
       return { name, path };
     });
-    const accepted = this.queue.complete(id, lease, text, stored);
-    void this.deliver();
-    return { id, status: accepted.status }; // Accepted is distinct from Matrix delivery.
+  }
+  async rooms(id: string, lease: string, input: unknown) {
+    const guard = async () => {
+      const current = this.queue.checkLease(id, lease);
+      await this.allowed(current);
+      this.queue.checkLease(id, lease);
+    };
+    await guard();
+    if (!this.transport.rooms) throw new WorkerError(403, 'Linked room operations are not configured.');
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new WorkerError(400, 'Expected a room request.');
+    let request = { ...input } as Record<string, unknown>;
+    if (['send', 'send_files', 'continue_private'].includes(String(request.action))) this.queue.roomOperation(id, lease, request.id);
+    if (request.action === 'send_files') {
+      const files = this.storeFiles(request.files);
+      request = { ...request, files: files.map(file => ({ ...file, path: relative(this.files, file.path) })) };
+    }
+    await guard();
+    const result = JSON.parse(await this.transport.rooms(this.queue.get(id), request, this.controller.signal, guard, this.files));
+    if (request.action === 'receive_attachment' && result.file) {
+      const file = result.file as IncomingAttachment;
+      const bytes = await readOutgoing({ path: file.path, root: dirname(file.path) }, this.maxBytes);
+      await guard();
+      if (typeof request.room !== 'string' || !this.transport.roomAllowed ||
+          !(await this.transport.roomAllowed(this.queue.get(id), request.room))) {
+        throw new WorkerError(403, 'Attachment destination access or room privacy changed.');
+      }
+      this.queue.checkLease(id, lease);
+      return { ...result, file: { name: file.name, mimetype: file.mimetype, size: bytes.length,
+        data: bytes.toString('base64'), ...(file.transcription && { transcription: file.transcription }) } };
+    }
+    if (request.action === 'list' || request.action === 'status') await guard();
+    return result;
   }
   async deliver() {
     if (this.delivering || this.stopped) return;

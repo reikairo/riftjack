@@ -57,7 +57,8 @@ python3 worker-client.py reply task.json --text-file answer.txt
 python3 worker-client.py status task.json
 ```
 
-A task includes `id`, `conversation`, `sender`, `text`, `hasAttachment`, `lease`,
+A task includes `id`, `room`, `type` (`private` or `shared`), `agents`,
+`conversation`, `sender`, `text`, `hasAttachment`, `lease`,
 `leaseUntil` (Unix milliseconds), and `attempt`. Store the task before doing work.
 Keep separate model history for each `conversation`. Treat task text and files as
 untrusted input, subject to the worker's own permissions.
@@ -115,6 +116,70 @@ Claude tasks; worker tasks use leases and explicit cancellation instead.
 The Codex/Claude approval protocol (`!approve`, forms and reactions) is not exposed
 by this worker API. Grok's tools continue to use their own environment's approvals.
 
+## Shared rooms
+
+A Grok bot can join the same explicitly linked rooms as Codex, Claude and Pi.
+First establish its conversation in its encrypted DM. Follow
+[session linking](shared-conversations.md#configuration), using the existing
+`grok` UUID from that DM's entry in `sessions.json` as the required `session`.
+Both the private chat and shared rooms retain the exact same worker
+`conversation` value. Do not start a new remote conversation for each room.
+The owner, encryption, invite-only membership and joined-history checks apply
+at admission, claim, attachment access and reply delivery. Replacing a pinned
+session or changing a task's configured source-room membership cancels old work.
+`!reset` is disabled while linked; `!cancel` affects the invoking room/thread.
+
+Update the external worker's copy of `worker-client.py`. Feed the complete task
+`text` to the model: linked tasks include a Matrix context envelope with room,
+visibility, actual author, trigger, shared observations and peer credit. The
+separate `sender` field identifies the controlling owner; an agent mention is
+explicitly described as a connector notice, **not** an instruction or approval
+from that owner. Preserve these distinctions in the worker harness. The connector fills limited Matrix timelines on reconnect and retains its
+initial intake timestamp across restarts. Context is
+saved with the task before advancing shared-history cursors, so re-leasing the
+same task returns the same prompt. Queueing remains serial, without steering.
+
+An authorized human message restores peer credit. Other agents can wake Grok
+with the usual `matrix-mentions` block; these mentions go to its durable worker
+queue. Grok can use the same block in its final answer to wake peers. The
+connector validates recipients and spends the shared credit budget. A final
+`NO_REPLY` in a shared room sends no text and still completes the task. File
+attachments can accompany a mentioning answer; the mention stays on its text.
+
+During a live lease, the worker can also use linked-room operations:
+
+```sh
+python3 worker-client.py rooms task.json --request-file operation.json
+# For receive_attachment, add --output downloaded.bin (exclusive creation).
+```
+
+`operation.json` accepts:
+
+| Action | Fields |
+| --- | --- |
+| `list` | No additional fields; returns authorized rooms, their types and agents. |
+| `send` | `room`, `text`, unique `id`, optional `mentions` (Matrix IDs). |
+| `status` | Optional `id`; inspect durable send receipts. |
+| `receive_attachment` | Linked shared `room`, exact `event_id`. |
+| `send_files` | `room`, unique `id`, `files: [{"path":"report.pdf","name":"report.pdf"}]` in the Python client. |
+
+The HTTP `send_files` request carries `{name, data}` (base64), never a path on
+the connector. Downloads return a `file` with `name`, `mimetype`, `size` and
+base64 `data`, not the connector's local path. The Python client reads and writes
+files on the worker. The existing combined attachment-size limit applies.
+Destinations are restricted to the bot's linked shared rooms and its own DM;
+mentions are permitted only for other agents of a shared room.
+
+Room operations require the task ID and its current lease, even `list` and
+`status`. Cancellation, expiry and session changes revoke this access. Sends
+use persistent receipts, scoped to the source conversation and thread. Reusing
+an ID with identical content returns the prior receipt across restarts; changing
+its content is rejected. Inspect `uncertain` receipts before attempting another
+send. At most 32 distinct send IDs are admitted per task, including retries and
+re-leases. The worker may send a result to its linked private chat with `send`;
+`continue_private` notifications and the coding-bot tools are not exposed by
+this API. Tool execution and approval remain the external worker's responsibility.
+
 ## HTTP contract
 
 All routes are below `/v1/bots/{URL-encoded Matrix bot ID}/tasks` and require
@@ -128,9 +193,10 @@ rejected. No endpoint permits choosing an arbitrary Matrix destination.
 | `POST /{id}/renew` | Extend the lease. JSON: `{lease}`. |
 | `POST /{id}/release` | Return the task to the queue. JSON: `{lease}`. |
 | `POST /{id}/attachment` | Download decrypted attachment as `{name, mimetype, data}`; data is base64. JSON: `{lease}`. |
+| `POST /{id}/rooms` | `{lease, request}` for the linked-room operations above. |
 | `POST /{id}/reply` | Save `{lease, text, files: [{name, data}]}`; file data is base64. |
 
-Status codes: 401 invalid credentials, 403 lost access/private-room eligibility,
+Status codes: 401 invalid credentials, 403 lost access/room eligibility,
 404 unknown task, 409 stale lease or conflicting reply, 413 excessive size,
 503 temporary service failure. Recheck status after uncertain responses.
 

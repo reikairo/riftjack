@@ -91,3 +91,51 @@ test('worker service failures expose a safe cause without leaking exception text
   assert.match(body, /ENOSPC.*write/);
   assert.doesNotMatch(body, /private database|token/);
 });
+
+test('worker room endpoint and Python client keep operations scoped to a live lease and transfer file bytes', async t => {
+  const dir = realpathSync(directory(t)), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const seen: any[] = []; let allowed = true;
+  const incoming = join(dir, 'incoming.txt'); writeFileSync(incoming, 'download');
+  const service = new WorkerService(queue, join(dir, 'files'), 100, {
+    allowed: async () => allowed, receive: async () => undefined, prepare: async () => [], send: async () => {}, report: () => {},
+    roomAllowed: async () => allowed,
+    rooms: async (_task, request, _signal, guard, outbox) => {
+      await guard(); const r = request as any; seen.push(r);
+      if (r.action === 'send_files') {
+        assert.equal(readFileSync(join(outbox, r.files[0].path), 'utf8'), 'upload');
+        return JSON.stringify({ files: [{ status: 'sent' }] });
+      }
+      if (r.action === 'receive_attachment') return JSON.stringify({ file: { path: incoming, name: 'incoming.txt', mimetype: 'text/plain' } });
+      return JSON.stringify({ rooms: [{ room: '!team:test', type: 'shared', agents: ['@grok:test', '@peer:test'] }] });
+    },
+  });
+  const server = new WorkerServer(); server.add('@grok:test', 'a'.repeat(43), service);
+  const port = await server.start(0);
+  t.after(async () => { service.stop(); await server.stop(); queue.close(); });
+  const task = queue.claim(queue.enqueue('!team:test', event(), 'conversation').id)!;
+  const url = `http://127.0.0.1:${port}/v1/bots/%40grok%3Atest/tasks/${task.id}/rooms`;
+  const request = (lease: string, token = 'a'.repeat(43), operation: unknown = { action: 'list' }) => fetch(url, {
+    method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ lease, request: operation }),
+  });
+  assert.equal((await request(task.lease!, 'b'.repeat(43))).status, 401);
+  assert.equal((await request('stale')).status, 409); assert.equal(seen.length, 0);
+  assert.equal((await request(task.lease!)).status, 200);
+  assert.equal((await request(task.lease!, undefined, { action: 'send_files', room: '!team:test', id: 'bad', files: [{ path: incoming }] })).status, 400);
+  const tokenFile = join(dir, 'token'), taskFile = join(dir, 'task.json'), operationFile = join(dir, 'operation.json');
+  writeFileSync(tokenFile, 'a'.repeat(43), { mode: 0o600 }); writeFileSync(taskFile, JSON.stringify(task));
+  const cli = (...args: string[]) => promisify(execFile)('python3', [fileURLToPath(new URL('../../scripts/worker-client.py', import.meta.url)),
+    '--url', `http://127.0.0.1:${port}`, '--bot', '@grok:test', '--token-file', tokenFile, 'rooms', taskFile, '--request-file', operationFile, ...args]);
+  writeFileSync(operationFile, JSON.stringify({ action: 'list' }));
+  assert.equal(JSON.parse((await cli()).stdout).rooms[0].type, 'shared');
+  const upload = join(dir, 'upload.txt'); writeFileSync(upload, 'upload');
+  writeFileSync(operationFile, JSON.stringify({ action: 'send_files', room: '!team:test', id: 'upload', files: [{ path: upload }] }));
+  assert.equal(JSON.parse((await cli()).stdout).files[0].status, 'sent');
+  assert.notEqual(seen.at(-1).files[0].path, upload);
+  writeFileSync(operationFile, JSON.stringify({ action: 'receive_attachment', room: '!team:test', event_id: '$file' }));
+  const output = join(dir, 'download.txt');
+  assert.equal(JSON.parse((await cli('--output', output)).stdout).saved, output);
+  assert.equal(readFileSync(output, 'utf8'), 'download');
+  await assert.rejects(cli('--output', output)); // No overwrite of local files.
+  allowed = false; assert.equal((await request(task.lease!)).status, 403);
+  assert.equal(queue.get(task.id).status, 'cancelled');
+});

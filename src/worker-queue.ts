@@ -16,6 +16,8 @@ export type WorkerTask = {
   response?: { text: string; files: WorkerFile[] };
   delivery?: { events: unknown[]; next: number };
   attachment?: IncomingAttachment;
+  context?: { room: string; type: 'private' | 'shared'; agents: string[]; key: string; session: string; binding: string };
+  prompt?: string; roomOperations?: string[];
 };
 
 // One database per bot; only the connector opens it. A committed enqueue precedes
@@ -42,13 +44,26 @@ export class WorkerQueue {
     if (!row) throw new WorkerError(404, 'Task not found.');
     return JSON.parse(row.body as string);
   }
-  enqueue(room: string, event: MatrixEvent, conversation: string, control = false): WorkerTask {
+  enqueue(room: string, event: MatrixEvent, conversation: string, control = false, context?: WorkerTask['context']): WorkerTask {
     const existing = this.db.prepare('SELECT body FROM jobs WHERE event_id = ?').get(event.event_id!);
     if (existing) return JSON.parse(existing.body as string);
-    const task: WorkerTask = { id: randomUUID(), room, event, conversation, created: this.now(), status: control ? 'control' : 'queued', attempt: 0 };
+    const task: WorkerTask = { id: randomUUID(), room, event, conversation, created: this.now(), status: control ? 'control' : 'queued', attempt: 0, ...(context && { context }) };
     this.db.prepare('INSERT INTO jobs VALUES (?, ?, ?, ?)').run(task.id, event.event_id!, task.status, JSON.stringify(task));
     return task;
   }
+  roomOperation(id: string, lease: string, operation: unknown) {
+    if (typeof operation !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(operation)) throw new WorkerError(400, 'Invalid room operation id.');
+    const task = this.checkLease(id, lease), previous = task.roomOperations ?? [];
+    if (previous.includes(operation)) return;
+    if (previous.length >= 32) throw new WorkerError(400, 'Room message limit reached for this task.');
+    task.roomOperations = [...previous, operation]; this.save(task);
+  }
+  cachePrompt(id: string, lease: string, prompt: string) {
+    const task = this.checkLease(id, lease);
+    if (task.prompt === undefined) { task.prompt = prompt; this.save(task); }
+    return task.prompt;
+  }
+  hasEvent(eventId: string) { return !!this.db.prepare('SELECT id FROM jobs WHERE event_id = ?').get(eventId); }
   candidate(): WorkerTask | undefined {
     // Keep idle long polls independent of completed conversation history.
     if (this.db.prepare("SELECT id FROM jobs WHERE status = 'leased' AND json_extract(body, '$.leaseUntil') > ? LIMIT 1").get(this.now())) return;
@@ -90,7 +105,7 @@ export class WorkerQueue {
   prepare(id: string, events: unknown[]) {
     const task = this.get(id);
     if (task.status !== 'replied') throw new WorkerError(409, 'Task is not awaiting delivery.');
-    if (!task.delivery) { task.delivery = { events, next: 0 }; this.save(task); }
+    if (!task.delivery) { task.delivery = { events, next: 0 }; if (!events.length) task.status = 'delivered'; this.save(task); }
   }
   deliveredPart(id: string) {
     const task = this.get(id);

@@ -29,7 +29,7 @@ export class WorkerServer {
     try {
       if (request.headers.origin) throw new WorkerError(403, 'Browser requests are not supported.');
       const url = new URL(request.url || '/', 'http://localhost');
-      const match = /^\/v1\/bots\/([^/]+)\/(tasks)(?:\/([a-f0-9-]{36})(?:\/(renew|release|reply|attachment))?)?$/.exec(url.pathname);
+      const match = /^\/v1\/bots\/([^/]+)\/(tasks)(?:\/([a-f0-9-]{36})(?:\/(renew|release|reply|attachment|rooms))?)?$/.exec(url.pathname);
       const selected = match && this.bots.get(decodeURIComponent(match[1]));
       const bearer = request.headers.authorization?.replace(/^Bearer /, '') || '';
       if (!selected || Buffer.byteLength(bearer) !== Buffer.byteLength(selected.token) || !timingSafeEqual(Buffer.from(bearer), Buffer.from(selected.token))) throw new WorkerError(401, 'Invalid bot credentials.');
@@ -68,6 +68,7 @@ export class WorkerServer {
       const result = action === 'renew' ? await service.renew(id, body.lease)
         : action === 'release' ? await service.release(id, body.lease)
         : action === 'attachment' ? await service.attachment(id, body.lease)
+        : action === 'rooms' ? await service.rooms(id, body.lease, body.request)
         : await service.complete(id, body.lease, body);
       send(200, result);
     } catch (error) {

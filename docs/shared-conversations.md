@@ -111,13 +111,16 @@ to arbitrary users or the manager.
 
 ## Session linking
 
-A linked agent continues one existing Codex or Claude session from its private
+A linked agent continues one existing Codex, Claude, Pi or Grok conversation from its private
 chat and an explicitly allowed shared room. No history is copied into a new
 session. Each agent keeps its own session and processes one task at a time;
 different agents can work concurrently.
 
 This is opt-in. Ordinary bots retain their separate DM/thread conversations.
-Grok workers and the manager do not support session links.
+The manager does not support session links. Grok uses the logical `grok` UUID
+already stored in `sessions.json` for its original DM; its worker keeps the
+corresponding remote model conversation. The `session` field remains required.
+See [Grok shared-room operations](grok.md#shared-rooms) for the worker contract.
 
 ## Configuration
 
