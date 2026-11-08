@@ -36,8 +36,12 @@ knocking member blocks the conversation. Rooms with `shared`, `invited` or
 joined” in the Matrix client, or use a new DM created by the bot manager.
 
 [Configured shared rooms](shared-conversations.md) are an explicit exception to
-the two-person rule: they require exactly the linked human and two bots, with
-the same encryption, join and history settings and no extra invitations.
+the two-person rule: they require the configured human, agents and observers
+to have joined, with the same encryption, join and history settings. Additional
+joined, invited or knocking participants do not block shared-room processing.
+They may read replies, but do not gain control, observation or peer-mention
+permissions merely by joining. Configure those roles explicitly. Ordinary DMs
+still enforce the strict two-person rule.
 
 These checks do not retract messages or encryption keys already delivered to
 other devices. Matrix membership changes and sends are separate server requests;

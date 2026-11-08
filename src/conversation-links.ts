@@ -58,15 +58,15 @@ export function mentionText(text: string, mentions: string[], name: (id: string)
   return [text, mentions.map(id => `[${markdownText(name(id))}](https://matrix.to/#/${encodeURI(id)})`).join(' ')].filter(Boolean).join('\n\n');
 }
 
-// Room membership is an explicit allowlist, including invited and knocking users.
+// Configured participants must be present. Additional room members do not
+// block shared conversations; routing permissions still come from configuration.
 export function isSharedRoomState(state: RoomState, members: string[]): boolean {
   const content = (type: string) => state.find(e => e.type === type && e.state_key === '')?.content;
   if (content('m.room.encryption')?.algorithm !== 'm.megolm.v1.aes-sha2' ||
       content('m.room.join_rules')?.join_rule !== 'invite' ||
       content('m.room.history_visibility')?.history_visibility !== 'joined') return false;
   const users = state.filter(e => e.type === 'm.room.member');
-  return !users.some(e => ['join', 'invite', 'knock'].includes(String(e.content?.membership)) && !members.includes(e.state_key!)) &&
-    members.every(id => users.find(e => e.state_key === id)?.content?.membership === 'join');
+  return members.every(id => users.find(e => e.state_key === id)?.content?.membership === 'join');
 }
 
 export class ConversationLinks {

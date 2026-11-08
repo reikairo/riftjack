@@ -43,7 +43,7 @@ function admit(links: ConversationLinks, recipient: string, event: MatrixEvent) 
   return links.mention(recipient, room, event);
 }
 
-test('three agents retain separate sessions and exact room membership', async t => {
+test('three agents retain separate sessions and routing permissions when another participant is invited', async t => {
   const f = fixture(t);
   for (const bot of bots) {
     assert.equal(f.links.key(bot, room, message()), sessionKey(home(bot), message()));
@@ -59,7 +59,16 @@ test('three agents retain separate sessions and exact room membership', async t 
     state.at(-1)!.content = { membership };
     assert.equal(isSharedRoomState(state, [owner, ...bots]), false);
   }
-  assert.equal(isSharedRoomState([...roomState(), { type: 'm.room.member', state_key: '@extra:test', content: { membership: 'invite' } }], [owner, ...bots]), false);
+  assert.equal(isSharedRoomState([...roomState(), { type: 'm.room.member', state_key: '@extra:test', content: { membership: 'invite' } }], [owner, ...bots]), true);
+  const newcomer = '@extra:test';
+  const expanded = [...roomState(), { type: 'm.room.member', state_key: newcomer, content: { membership: 'join' } }];
+  for (const bot of bots) {
+    assert.equal(await f.links.allowed(bot, room, owner, async () => expanded), true);
+    assert.equal(await f.links.allowed(bot, room, newcomer, async () => expanded), false);
+    assert.equal(f.links.observe(bot, room, message(newcomer, '$newcomer')), false);
+    f.links.credit(bot);
+    assert.equal(f.links.reserveMentions(bot, room, [newcomer]), undefined);
+  }
   for (const invalid of [[bots[0]], [bots[0], bots[1], bots[1]], [bots[0], bots[1], owner]]) {
     writeFileSync(f.path, JSON.stringify({ ...f.config, rooms: [{ room, owner, bots: invalid }] }));
     assert.throws(f.load, invalid.length === 1 ? /requires a configured executor/ : /distinct agents/);

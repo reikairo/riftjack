@@ -148,8 +148,11 @@ Matrix thread. Never guess a session ID or replace it with another agent's ID.
 Create the shared Matrix room with encryption, invite-only access and history
 visibility **joined**, then invite the owner and all configured bots. A room needs
 at least two agents, or one agent and a configured executor (see below). Restart the
-connector. Shared-room processing requires all configured participants to have joined
-and no extra joined, invited or knocking participant. An optional `observers` array
+connector. Shared-room processing requires all configured participants to have joined.
+Additional joined, invited or knocking participants do not block the existing
+agents. They may read room replies under Matrix's membership and encryption rules.
+Their messages do not become agent instructions or shared observations until they
+are registered in the room configuration. An optional `observers` array
 on a room lists additional exact Matrix IDs, such as a command executor and its
 host owner. These participants must also have joined. Their text and attachments
 are available as observations, but they cannot control the agents, provide
@@ -159,8 +162,9 @@ notifications from the [model-free command executor](executor.md), including
 explicitly requested progress wakes. Only the agent that sent the recorded job
 request is resumed; raw log text is not treated as a request. Adding observers
 changes the membership boundary and resets that room's observation history.
-Configure the list locally before inviting them; an unlisted participant still
-blocks room processing.
+Configure additional bots on every relevant Riftjack instance to enable their
+peer mentions, and link each bot's existing conversation on its own instance.
+Inviting an unconfigured bot alone does not activate that routing.
 
 The initial connector owner controls these links. Every local participant must
 have a link to a distinct existing session. A missing or different session causes
@@ -320,7 +324,9 @@ A received mention starts a separate turn for the mentioned agent:
 ## Privacy
 
 Room membership and privacy settings are rechecked before processing and outgoing
-delivery. Peer bots are never added to human access lists.
+delivery. Extra participants are allowed in shared rooms; the configured
+`participants` prompt field is not a complete list of everyone who may read an
+answer. Peer bots are never added to human access lists.
 
 The same model session knows both private and shared conversations. Routing
 instructions tell it where it is replying, but this is **not strict information

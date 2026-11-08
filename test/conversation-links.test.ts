@@ -218,14 +218,14 @@ test('outbound room messages enforce destination privacy and session binding wit
   for (const room of [home, '!unlisted:test']) await assert.rejects(send(room));
   for (const membership of ['join', 'invite', 'knock']) {
     live = [...roomState(), { type: 'm.room.member', state_key: '@extra:test', content: { membership } }];
-    await assert.rejects(send());
-    assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)), { rooms: [] });
+    assert.equal(JSON.parse(await send()).event_id, '$sent');
+    assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)), { rooms: [{ room: group, type: 'shared', agents: [bot, peer] }] });
   }
   live = roomState(); Object.assign(live[2].content, { history_visibility: 'shared' });
   await assert.rejects(send());
   live = roomState(); stopping = true; await assert.rejects(send());
   stopping = false; resetDuringCheck = true; await assert.rejects(send());
-  assert.equal(calls, 1);
+  assert.equal(calls, 4);
 });
 
 test('an agent can return a result to its own private chat, but not mention anyone there', async t => {
@@ -353,12 +353,12 @@ function fixture(t: { after(fn: () => void): void }) {
   return { dir, file, path, state, config, load, links: load() };
 }
 
-test('shared rooms require encryption, restrictive history and exactly the configured participants', () => {
+test('shared rooms require encryption, restrictive history and configured participants but permit additional members', () => {
   assert.equal(isSharedRoomState(roomState(), [human, bot, peer]), true);
   for (const membership of ['join', 'invite', 'knock']) {
     const state = roomState();
     state.push({ type: 'm.room.member', state_key: '@extra:test', content: { membership } });
-    assert.equal(isSharedRoomState(state, [human, bot, peer]), false);
+    assert.equal(isSharedRoomState(state, [human, bot, peer]), true);
   }
   const sharedHistory = roomState(); Object.assign(sharedHistory[2].content, { history_visibility: 'shared' });
   assert.equal(isSharedRoomState(sharedHistory, [human, bot, peer]), false);
@@ -1323,7 +1323,7 @@ test('shared turns carry a usable mention example after private turns and across
   assert.deepEqual(links.mentions(bot, group, bare), { text: bare, mentions: [] });
 });
 
-test('one agent and an executor require the exact joined membership and preserve the private session', async t => {
+test('one agent and an executor must be joined but additional participants do not block their room', async t => {
   const f = fixture(t), executor = '@executor:test';
   f.config.rooms[0].bots = [bot];
   Object.assign(f.config.rooms[0], { observers: [executor], executors: [executor] });
@@ -1333,7 +1333,7 @@ test('one agent and an executor require the exact joined membership and preserve
   state.push({ type: 'm.room.member', state_key: executor, content: { membership: 'join' } });
   assert.equal(await links.allowed(bot, group, human, async () => state), true);
   assert.equal(await links.allowed(bot, group, human, async () => state.filter(e => e.state_key !== executor)), false);
-  assert.equal(await links.allowed(bot, group, human, async () => [...state, { type: 'm.room.member', state_key: peer, content: { membership: 'join' } }]), false);
+  assert.equal(await links.allowed(bot, group, human, async () => [...state, { type: 'm.room.member', state_key: peer, content: { membership: 'join' } }]), true);
   assert.equal(links.key(bot, group, message('Inspect')), canonical);
   assert.equal(links.key(bot, home, message('Inspect')), canonical);
   links.credit(bot);
