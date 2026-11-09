@@ -15,7 +15,7 @@ import { routingInstructions } from './routing-instructions.js';
 import { attachmentDelivery } from './attachment-delivery.js';
 
 
-function piEnvironment(): NodeJS.ProcessEnv {
+export function piEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const name of ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL', 'SYSTEMROOT']) if (process.env[name]) env[name] = process.env[name];
   return env;
@@ -75,6 +75,7 @@ export function createPiBackend(configuration: Config | (() => Config), state: S
         '--no-extensions', '--no-mcp', '--no-skills', '--no-prompt-templates', '--no-themes',
         '--extension', fileURLToPath(new URL('./pi-extension.mjs', import.meta.url)), '--append-system-prompt', instructions];
       if (config.piModel) args.push('--model', config.piModel);
+      if (config.piReasoningEffort) args.push('--thinking', config.piReasoningEffort);
       const answer = await new Promise<string>((resolve, reject) => {
         const child = spawn(config.piPath, args, { cwd: config.workspace, env, stdio: 'pipe', detached: process.platform !== 'win32' });
         let buffer = '', ready = false, initialized = false, completed = false, settled = false, failed: unknown;

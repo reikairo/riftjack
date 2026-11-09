@@ -321,3 +321,13 @@ test('unknown RPCs have no approval path; escalation policy accepts only on-requ
   assert.equal(loadConfig({ ...env, CODEX_APPROVAL_POLICY: 'never' }).codexApprovalPolicy, 'never');
   assert.throws(() => loadConfig({ ...env, CODEX_APPROVAL_POLICY: 'always' }), /CODEX_APPROVAL_POLICY/);
 });
+
+test('Codex reviewer defaults to the user and validates the explicit automatic-review choice', () => {
+  const env = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: process.cwd() };
+  assert.equal(loadConfig(env).codexApprovalsReviewer, 'user');
+  assert.equal(loadConfig({ ...env, CODEX_APPROVALS_REVIEWER: ' auto_review ' }).codexApprovalsReviewer, 'auto_review');
+  assert.equal(loadConfig({ ...env, CODEX_APPROVALS_REVIEWER: ' ' }).codexApprovalsReviewer, 'user');
+  for (const value of ['never', 'always', 'guardian_subagent', 'auto']) {
+    assert.throws(() => loadConfig({ ...env, CODEX_APPROVALS_REVIEWER: value }), /user or auto_review/);
+  }
+});

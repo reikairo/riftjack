@@ -78,6 +78,7 @@ export function botStatus(kind: 'codex' | 'claude' | 'pi', config: Config, sessi
     tools,
     `- Workspace: ${display(config.workspace, 'unknown')}`,
     `- Configured model: ${display(config.piModel, 'CLI default')}`,
+    `- Configured reasoning: ${display(config.piReasoningEffort, 'CLI default')}`,
     `- Last reported model: ${display(session.piReport?.model, 'not reported')}`,
     `- Reported at: ${display(session.piReport?.reportedAt, 'not reported')}`,
     `- Shell/file writes: ${config.sandbox === 'read-only' || config.piApprovalPolicy === 'never' ? 'disabled' : 'Matrix confirmation per call'}`,
@@ -93,6 +94,7 @@ export function botStatus(kind: 'codex' | 'claude' | 'pi', config: Config, sessi
     row('Model', codex ? config.codexModel : config.claudeModel, configured),
     row('Reasoning', codex ? config.codexReasoningEffort : config.claudeReasoningEffort, configured),
     row('Service tier', codex ? config.codexServiceTier : config.claudeServiceTier, configured),
+    ...(codex ? [row('Approval policy', config.codexApprovalPolicy), row('Approval reviewer', config.codexApprovalsReviewer)] : []),
   ].join('\n');
   const reported = report ? [
     row('Reported at', report.reportedAt),

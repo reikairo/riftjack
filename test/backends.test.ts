@@ -12,6 +12,7 @@ import { Bridge, type MatrixEvent } from '../src/bridge.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { codexUsage } from '../src/codex-usage.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
+import { codexModelOptions } from '../src/codex-models.js';
 import { OwnerDiagnosticError } from '../src/errors.js';
 
 function setup(t: { after(fn: () => void): void }, accountType = 'chatgpt') {
@@ -50,6 +51,20 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     return respond(id, {config: {sandbox_mode:'workspace-write', sandbox_workspace_write:{network_access:true}, features:{network_proxy:proxy}}});
   }
   if (method === 'account/read') return respond(id, { account: { type: ${JSON.stringify(accountType)} } });
+  if (method === 'model/list') {
+    const fixture = path.join(__dirname, 'catalog.json');
+    if (fs.existsSync(fixture)) {
+      const pages = JSON.parse(fs.readFileSync(fixture, 'utf8'));
+      const page = pages[p.cursor || 'first'];
+      if (page === 'wait') return;
+      if (page === 'error') return send({id, error: {code:-32601, message:'Unsupported model/list'}});
+      return respond(id, page);
+    }
+    const model = name => ({ model: name, isDefault: !p.cursor, defaultReasoningEffort: 'medium',
+      supportedReasoningEfforts: [{reasoningEffort:'low'}, {reasoningEffort:'medium'}],
+      serviceTiers: [{id:'default'}], defaultServiceTier: 'default' });
+    return respond(id, {data: [model(p.cursor ? 'second-model' : 'first-model')], nextCursor: p.cursor ? null : 'page2'});
+  }
   if (method === 'account/rateLimits/read') return respond(id, { rateLimits: { primary: { usedPercent: 18, windowDurationMins: 10080, resetsAt: Date.now() / 1000 + 86400 } } });
   if (method === 'plugin/read') return respond(id, { plugin: {
     marketplaceName: 'openai-curated-remote', description: 'Test GitHub integration',
@@ -151,6 +166,86 @@ process.stdin.on('end', () => process.exit(0));
   return { dir, state, backend, calls, config };
 }
 const signal = () => new AbortController().signal;
+
+test('automatic reviewer is explicit on process, thread and turn; changing it refreshes resumed instructions', async t => {
+  const f = setup(t);
+  for (const reviewer of ['auto_review', 'user'] as const) {
+    const backend = createBackend({ ...f.config, codexApprovalsReviewer: reviewer }, f.state);
+    await backend('codex', 'hello', 'key', signal(), '@owner:test', [], async () => { throw new Error('Unexpected interaction'); });
+    const calls = f.calls();
+    const args = calls.filter(c => c.args).at(-1).args;
+    assert.ok(args.includes(`approvals_reviewer="${reviewer}"`));
+    assert.ok(args.includes('approval_policy="on-request"'));
+    assert.ok(args.includes('sandbox_mode="workspace-write"'));
+    const thread = calls.filter(c => c.method === 'thread/start' || c.method === 'thread/resume').at(-1);
+    assert.equal(thread.params.approvalsReviewer, reviewer);
+    assert.equal(thread.method, reviewer === 'auto_review' ? 'thread/start' : 'thread/resume');
+    assert.equal(calls.filter(c => c.method === 'turn/start').at(-1).params.approvalsReviewer, reviewer);
+  }
+  const start = f.calls().find(c => c.method === 'thread/start').params.developerInstructions;
+  assert.match(start, /automatic approval review rejects/);
+  assert.match(start, /publication, detached-run, and explicit confirmation tools retain/);
+  const injection = f.calls().find(c => c.method === 'thread/inject_items');
+  assert.ok(injection.params.items[0].content[0].text.includes(approvalInstructions('codex', 'user')));
+});
+
+test('automatic review does not enable approvals for noninteractive metadata or never-policy tasks', async t => {
+  const f = setup(t);
+  const backend = createBackend({ ...f.config, codexApprovalsReviewer: 'auto_review', codexApprovalPolicy: 'never' }, f.state);
+  await backend('codex', 'hello', 'key', signal(), '@owner:test', [], async () => { throw new Error('Unexpected interaction'); });
+  assert.equal(f.calls().find(c => c.method === 'thread/start').params.approvalPolicy, 'never');
+  await backend('codex', 'hello', 'key', signal(), '@owner:test');
+  const resumed = f.calls().find(c => c.method === 'thread/resume').params;
+  assert.equal(resumed.approvalPolicy, 'never');
+  assert.equal(resumed.approvalsReviewer, 'user');
+});
+
+test('model discovery follows all catalog pages without a model turn or approval requests', async t => {
+  const f = setup(t);
+  const text = await codexModelOptions({ ...f.config, codexModel: 'second-model' }, signal());
+  assert.match(text, /first-model/);
+  assert.match(text, /second-model.*configured/);
+  assert.match(text, /reasoning:.*low.*medium/);
+  assert.match(text, /default reasoning:.*medium/);
+  assert.deepEqual(f.calls().filter(c => c.method === 'model/list').map(c => c.params.cursor), [undefined, 'page2']);
+  assert.equal(f.calls().some(c => /^(thread|turn)\//.test(c.method ?? '')), false);
+  assert.equal(existsSync(join(f.dir, 'active.lock')), false);
+});
+
+test('model discovery rejects unavailable login, malformed catalogs and incomplete pagination', async t => {
+  const f = setup(t);
+  for (const pages of [
+    {first: null}, {first: {data: [null]}}, {first: {data: [], nextCursor: 1}},
+    {first: {data: [{}]}}, {first: 'error'},
+    {first: {data: [], nextCursor: 'repeat'}, repeat: {data: [], nextCursor: 'repeat'}},
+    {first: {data: [], nextCursor: 'last'}, last: 'error'},
+  ]) {
+    writeFileSync(join(f.dir, 'catalog.json'), JSON.stringify(pages));
+    await assert.rejects(codexModelOptions(f.config, signal()));
+    assert.equal(existsSync(join(f.dir, 'active.lock')), false);
+  }
+  const loggedOut = setup(t, 'apiKey');
+  await assert.rejects(codexModelOptions(loggedOut.config, signal()), /Sign in.*ChatGPT/);
+  assert.equal(loggedOut.calls().some(c => c.method === 'model/list'), false);
+});
+
+test('model discovery supports absent tier metadata, empty catalogs and cancellation', async t => {
+  const f = setup(t);
+  const fixture = join(f.dir, 'catalog.json');
+  writeFileSync(fixture, JSON.stringify({first: {data: []}}));
+  assert.match(await codexModelOptions(f.config, signal()), /no selectable models/);
+  writeFileSync(fixture, JSON.stringify({first: {data: [{model: 'example', defaultReasoningEffort: 'high',
+    supportedReasoningEfforts: [{reasoningEffort: 'high'}]}]}}));
+  assert.match(await codexModelOptions(f.config, signal()), /tier: not reported/);
+  writeFileSync(fixture, JSON.stringify({first: 'wait'}));
+  const controller = new AbortController();
+  const pending = codexModelOptions(f.config, controller.signal);
+  const rejected = assert.rejects(pending);
+  const timer = setTimeout(() => controller.abort(), 100);
+  try { await rejected; } finally { clearTimeout(timer); }
+  assert.equal(existsSync(join(f.dir, 'active.lock')), false);
+  assert.equal(f.calls().some(c => /^(thread|turn)\//.test(c.method ?? '')), false);
+});
 
 test('Codex starts and resumes with unavailable connector MCP tools explicitly disabled', async t => {
   const f = setup(t);

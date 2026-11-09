@@ -150,10 +150,11 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       }
       const session = state.session(key);
       const saved = session.codex;
-      const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex') + tools.instructions;
+      const reviewer = interact ? config.codexApprovalsReviewer : 'user';
+      const instructions = routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('codex', reviewer) + tools.instructions;
       const instructionsHash = createHash('sha256').update(instructions).digest('hex');
       const options = {
-        cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: 'user', modelProvider: 'openai', model: config.codexModel,
+        cwd: config.workspace, sandbox: config.sandbox, approvalPolicy: interact ? config.codexApprovalPolicy : 'never', approvalsReviewer: reviewer, modelProvider: 'openai', model: config.codexModel,
         serviceTier: config.codexServiceTier,
         // New threads need their initial developer message. Resumed threads already
         // contain it; changed instructions are persisted explicitly below.
@@ -229,6 +230,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
         threadId: current.threadId, input: input(prompt + (initialCheckpoint ? '\n\n' + initialCheckpoint.text : ''), attachments),
         // Explicit settings also override values persisted in resumed threads.
         model: config.codexModel, effort: config.codexReasoningEffort, serviceTier: config.codexServiceTier,
+        approvalsReviewer: reviewer,
       });
       if (initialCheckpoint) checkpoint.delivered(initialCheckpoint.id);
       state.update(key, { codexInstructionsHash: instructionsHash });

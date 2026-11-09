@@ -198,6 +198,7 @@ does not manage shared resource leases. Read-only bots do not receive the tool.
 ## Further reading
 
 - [Installation and configuration](docs/setup.md)
+- [Configuration values, defaults and model options](docs/configuration.md)
 - [Bots, workspaces, and access](docs/manager.md)
 - [Working through Matrix](docs/chat.md)
 - [Claude Code](docs/claude.md)

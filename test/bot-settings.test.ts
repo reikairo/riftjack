@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Accounts } from '../src/accounts.js';
 import { loadConfig } from '../src/config.js';
-import { manageBotSettings, parseBotSettingsRequest } from '../src/bot-settings.js';
+import { manageBotSettings, parseBotSettingsRequest, showBotOptions } from '../src/bot-settings.js';
 import { withEngineSettings } from '../src/engine-settings.js';
 import { botStatus } from '../src/bot-status.js';
 
@@ -14,7 +14,7 @@ function setup(t: { after(fn: () => void): void }) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const file = join(dir, 'accounts.json');
   const accounts = new Accounts(file);
-  for (const kind of ['codex', 'claude', 'grok', 'manager'] as const) accounts.add({
+  for (const kind of ['codex', 'claude', 'grok', 'manager', 'pi'] as const) accounts.add({
     userId: `@${kind}:test`, name: kind, kind, accessToken: 'test-token', inviteUserId: '@creator:test',
   });
   const config = loadConfig({ MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test',
@@ -38,6 +38,7 @@ test('settings persist per bot, inherit defaults, reset one field and appear in 
   f.run('set model bot codex to personal-model', '@creator:test');
   f.run('set reasoning bot codex to medium');
   f.run('set tier bot codex to priority');
+  f.run('set model bot claude to sonnet[1m]');
   f.run('set model bot claude to personal-claude');
   const accounts = new Accounts(f.file);
   const codex = accounts.list()[0];
@@ -160,4 +161,60 @@ test('Claude shared reasoning validates levels and defaults to CLI inheritance',
     assert.equal(loadConfig({ ...env, CLAUDE_REASONING_EFFORT: ' ' + level + ' ' }).claudeReasoningEffort, level);
   }
   assert.throws(() => loadConfig({ ...env, CLAUDE_REASONING_EFFORT: 'invalid' }), /CLAUDE_REASONING_EFFORT/);
+});
+
+
+test('option discovery resolves and authorizes the bot before reading its catalog, without changing settings', async t => {
+  const f = setup(t), signal = new AbortController().signal;
+  const workspace = join(f.config.workspace, 'project');
+  mkdirSync(workspace);
+  f.accounts.add({userId: '@project:test', kind: 'codex', name: 'Project', workspace,
+    accessToken: 'test-token', inviteUserId: '@creator:test', engineSettings: {model: 'project-model'}});
+  const before = readFileSync(f.file, 'utf8');
+  const options = {...f, owner: '@owner:test', sender: '@creator:test', signal};
+  let reads = 0;
+  const read = async (config: typeof f.config, received: AbortSignal) => {
+    reads++;
+    assert.equal(config.workspace, workspace);
+    assert.equal(config.codexModel, 'project-model');
+    assert.equal(received, signal);
+    return 'model catalog';
+  };
+  const readers = {codex: read, claude: async () => 'claude-catalog', pi: async () => 'pi-catalog'};
+  const text = await showBotOptions('Project', options, readers);
+  assert.match(text, /model catalog/);
+  assert.match(text, /set reasoning.*EFFORT/);
+  assert.match(text, /reset model/);
+  assert.match(text, /auto_review/);
+  await assert.rejects(showBotOptions('Project', {...options, sender: '@other:test'}, readers), /Only/);
+  for (const target of ['grok', 'manager']) await assert.rejects(showBotOptions(target, {...options, sender: '@owner:test'}, readers), /supported/);
+  assert.equal(reads, 1);
+  assert.match(await showBotOptions('claude', options, readers), /claude-catalog/);
+  assert.match(await showBotOptions('pi', options, readers), /pi-catalog/);
+  assert.equal(reads, 1);
+  assert.equal(readFileSync(f.file, 'utf8'), before);
+});
+
+test('options command accepts names and IDs and settings point to discovery', t => {
+  const f = setup(t);
+  assert.deepEqual(parseBotSettingsRequest('show options bot "Ready to work"'), {action:'options', target:'Ready to work'});
+  assert.deepEqual(parseBotSettingsRequest('show options bot @codex:test'), {action:'options', target:'@codex:test'});
+  assert.throws(() => parseBotSettingsRequest('show options bot'), /Use/);
+  assert.match(f.run('show settings bot codex'), /show options bot @codex:test/);
+  assert.match(botStatus('codex', {...f.config, codexApprovalsReviewer: 'auto_review'}, {}), /Approval reviewer: auto\\_review/);
+});
+
+
+test('Pi reasoning supports per-bot overrides, inheritance and reset while tiers remain unavailable', t => {
+  const f = setup(t);
+  for (const level of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+    f.run('set reasoning bot pi to ' + level);
+    assert.equal(withEngineSettings(f.config, f.accounts.list().find(x => x.kind === 'pi')!).piReasoningEffort, level);
+  }
+  assert.throws(() => f.run('set reasoning bot pi to wrong'));
+  assert.throws(() => f.run('set tier bot pi to default'));
+  assert.match(f.run('reset reasoning bot pi'), /reasoning: automatic/);
+  const env = {MATRIX_HOMESERVER:'https://example.org', MATRIX_OWNER_ID:'@owner:example.org', RIFTJACK_WORKSPACE:f.config.workspace};
+  assert.equal(loadConfig({...env, PI_REASONING_EFFORT:' high '}).piReasoningEffort,'high');
+  assert.throws(() => loadConfig({...env, PI_REASONING_EFFORT:'wrong'}), /PI_REASONING_EFFORT/);
 });

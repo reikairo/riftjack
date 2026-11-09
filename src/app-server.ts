@@ -14,7 +14,7 @@ export type RequestHandler = (request: ServerRequest, signal: AbortSignal) => Pr
 export type CodexInput = { type: 'text'; text: string; text_elements: [] } | { type: 'localImage'; path: string };
 
 // Only connector-owned operation names may appear in diagnostics, never RPC parameters.
-const operations = new Set(['initialize', 'account/read', 'account/rateLimits/read', 'thread/start',
+const operations = new Set(['initialize', 'account/read', 'account/rateLimits/read', 'model/list', 'thread/start',
   'thread/resume', 'thread/inject_items', 'turn/start', 'turn/steer', 'turn/interrupt', 'plugin/read', 'plugin/install']);
 const operationName = (method: string) => operations.has(method) ? method : 'request';
 
@@ -50,6 +50,7 @@ export class AppServer {
     const args = ['app-server', '--listen', 'stdio://',
       '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"',
       '-c', `approval_policy="${onRequest ? config.codexApprovalPolicy : 'never'}"`, '-c', `sandbox_mode="${config.sandbox}"`,
+      '-c', `approvals_reviewer="${onRequest ? config.codexApprovalsReviewer : 'user'}"`,
       ...codexNetworkArgs(config.codexNetworkAllow), '-c', 'web_search="disabled"'];
     this.child = spawn(config.codexPath, args, { cwd: config.workspace, env, stdio: 'pipe' });
     const fail = (error: Error) => {

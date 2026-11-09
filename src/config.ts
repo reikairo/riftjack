@@ -31,8 +31,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (codexNetworkAllow.length && sandbox !== 'workspace-write') throw new Error('CODEX_NETWORK_ALLOW currently requires CODEX_SANDBOX=workspace-write.');
   const codexApprovalPolicy = env.CODEX_APPROVAL_POLICY?.trim() || 'on-request';
   if (codexApprovalPolicy !== 'on-request' && codexApprovalPolicy !== 'never') throw new Error('CODEX_APPROVAL_POLICY must be on-request or never.');
+  const codexApprovalsReviewer = env.CODEX_APPROVALS_REVIEWER?.trim() || 'user';
+  if (!['user', 'auto_review'].includes(codexApprovalsReviewer)) throw new Error('CODEX_APPROVALS_REVIEWER must be user or auto_review.');
   const piApprovalPolicy = env.PI_APPROVAL_POLICY?.trim() || 'on-request';
   if (!['on-request', 'never'].includes(piApprovalPolicy)) throw new Error('PI_APPROVAL_POLICY must be on-request or never.');
+  const piReasoningEffort = env.PI_REASONING_EFFORT?.trim() || undefined;
+  if (piReasoningEffort && !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(piReasoningEffort)) throw new Error('PI_REASONING_EFFORT must be off, minimal, low, medium, high, xhigh, max or blank.');
   const claudeApprovalPolicy = env.CLAUDE_APPROVAL_POLICY?.trim() || 'on-request';
   if (claudeApprovalPolicy !== 'on-request' && claudeApprovalPolicy !== 'never') throw new Error('CLAUDE_APPROVAL_POLICY must be on-request or never.');
   const claudeReasoningEffort = env.CLAUDE_REASONING_EFFORT?.trim() || undefined;
@@ -72,6 +76,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     claudeModel: env.CLAUDE_MODEL?.trim() || undefined,
     claudeReasoningEffort,
     claudeServiceTier,
+    piReasoningEffort,
     piApprovalPolicy: piApprovalPolicy as 'on-request' | 'never',
     piPath: env.PI_PATH?.trim() || 'pi',
     piModel: env.PI_MODEL?.trim() || undefined,
@@ -80,6 +85,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     workspace,
     sandbox: sandbox as 'workspace-write' | 'read-only',
     codexApprovalPolicy: codexApprovalPolicy as 'on-request' | 'never',
+    codexApprovalsReviewer: codexApprovalsReviewer as 'user' | 'auto_review',
     dataDir: resolve(env.DATA_DIR || './data'),
     timeoutMs,
     turnCompletionReactions: turnCompletionReactions === 'true',

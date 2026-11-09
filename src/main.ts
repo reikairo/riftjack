@@ -12,7 +12,7 @@ import { linkedRoomMessages, roomMessageDelivery } from './room-messages.js';
 import { sendCompactionNotice } from './compaction-notices.js';
 import { sendOwnerDiagnostic } from './owner-diagnostics.js';
 import { withEngineSettings } from './engine-settings.js';
-import { parseBotSettingsRequest, manageBotSettings } from './bot-settings.js';
+import { parseBotSettingsRequest, manageBotSettings, showBotOptions } from './bot-settings.js';
 import { BackgroundTasks } from './background-tasks.js';
 import { RunJournal } from './run-journal.js';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
@@ -495,6 +495,7 @@ async function main() {
           },
         });
         const settingsRequest = parseBotSettingsRequest(prompt);
+        if (settingsRequest?.action === 'options') return showBotOptions(settingsRequest.target, { accounts, owner: access.owner, sender, config, signal });
         if (settingsRequest) return manageBotSettings(settingsRequest, { accounts, owner: access.owner, sender, config });
         const userCreation = parseUserCreation(prompt);
         if (userCreation) {

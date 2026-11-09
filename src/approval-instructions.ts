@@ -1,8 +1,15 @@
 import { SAVE_INTENT } from './approval-intent.js';
 
 // Guidance for the agent's decision before it asks for approval. This is not
-// a command classifier or an enforcement boundary; the user still approves.
-export function approvalInstructions(engine: 'codex' | 'claude'): string {
+// a command classifier or an enforcement boundary.
+export function approvalInstructions(engine: 'codex' | 'claude', reviewer: 'user' | 'auto_review' = 'user'): string {
+  if (engine === 'codex' && reviewer === 'auto_review') return '\nEligible Codex approval requests use automatic review. '
+    + 'Request required permissions through the normal tool approval mechanism and explain their scope. '
+    + 'Automatic review can approve or reject a request; it does not remove sandbox or managed restrictions. '
+    + 'If automatic approval review rejects an action, tell the human which action was rejected and the stated reason. '
+    + 'Do not bypass a rejection with another tool, wrapper, permission rule, or reviewer setting. '
+    + 'Riftjack publication, detached-run, and explicit confirmation tools retain their own human confirmations. '
+    + 'Forms, authentication, and other requests that still reach Matrix need the human response; do not answer them yourself.\n';
   const common = '\nBefore each command approval request, assess whether a persistent permission would be appropriate, '
     + 'not just whether the current invocation is acceptable. Consider future matching arguments, executable resolution through PATH, '
     + 'configuration, hooks, plugins and other code the command may load. A stable command name or script path does not make its behavior immutable. '

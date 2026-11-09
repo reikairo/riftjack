@@ -148,3 +148,34 @@ Restart Riftjack after editing these settings. Explicit values apply to both new
 To let Codex and Claude render draw.io diagrams as editable PNGs, install draw.io
 Desktop and set `DRAWIO_PATH`. See [editable diagrams](diagrams.md) for configuration,
 supported input and limits. This optional tool is disabled by default.
+
+
+## Configuration values and automatic approval
+
+See [Configuration reference](configuration.md) for the allowed values, ranges,
+defaults and empty-value behavior of every option in `.env.example`. In the
+manager DM, `show options bot Builder` lists model choices and their supported
+reasoning efforts; [model settings](manager.md#model-settings) explains selection.
+
+Codex defaults to human review. To request Codex's automatic approval reviewer
+("Approve for me"), set these host options and restart Riftjack when it is idle:
+
+```dotenv
+CODEX_APPROVAL_POLICY=on-request
+CODEX_APPROVALS_REVIEWER=auto_review
+```
+
+`CODEX_APPROVALS_REVIEWER=user` restores Matrix review. `never` still denies
+escalations, whichever reviewer is configured. This uses Codex's own reviewer;
+Riftjack does not answer approval prompts automatically. Sandbox and managed
+policies remain in effect. Support depends on the installed CLI and account
+policy; unsupported configuration is reported by the CLI. The protocol fields
+were checked against Codex CLI `0.166.0-alpha.6`.
+
+Explicit reviewer selection applies to new and resumed threads and each new
+turn. Agent instructions distinguish automatic rejection from human denial.
+`!status` shows the configured policy and reviewer, not proof of a particular
+approval decision. Connector-owned publication, detached-run and explicit
+confirmation tools still require their normal human confirmation. Questions,
+authentication and other Matrix prompts remain interactive. Model catalog and
+usage queries do not start model turns or permit escalations.

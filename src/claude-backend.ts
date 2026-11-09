@@ -41,7 +41,7 @@ function combineReplies(replies: (string | BackendReply)[]): string | BackendRep
   return attachments.length ? { text, attachments } : text;
 }
 
-function claudeEnvironment(): NodeJS.ProcessEnv {
+export function claudeEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const name of ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'SYSTEMROOT']) {
     if (process.env[name]) env[name] = process.env[name];

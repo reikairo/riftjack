@@ -89,20 +89,38 @@ the manager does not assign it a directory on the connector host.
 
 ## Model settings
 
-The connector owner or a bot’s creator can give each Codex or Claude bot its own model. Send these commands to the manager; select the bot by name, short ID or full Matrix ID. Quote names containing ` to `.
+The connector owner or a bot’s creator can give each Codex, Claude or Pi bot its own model. Send these commands to the manager; select the bot by name, short ID or full Matrix ID. Quote names containing ` to `.
 
 ```text
 set model bot Builder to MODEL
 set reasoning bot Builder to high
 set tier bot Builder to default
 set tier bot Research to fast
+show options bot Builder
 show settings bot Builder
 reset model bot Builder
 reset reasoning bot Builder
 reset tier bot Builder
 ```
 
-Replace `MODEL` with an identifier accepted by that bot’s CLI and account. Model selection works for both Codex and Claude. Reasoning overrides work for both engines. Claude accepts `low`, `medium`, `high`, `xhigh` or `max`, passed as `--effort` to Claude Code. `reset reasoning bot Research` restores inheritance from `CLAUDE_REASONING_EFFORT`, or from CLI settings when blank. This requires a Claude Code version and model supporting the selected effort. For Codex tiers, `default` requests standard service and `priority` requests priority processing. For Claude tiers, `fast` requests fast mode and `default` explicitly turns it off. `reset tier bot Research` restores inheritance from `CLAUDE_SERVICE_TIER`, or from CLI settings when that shared value is blank. Grok’s model belongs to its external worker.
+`show options bot Builder` explains the allowed values without changing settings.
+For Codex, it reads all pages of the installed CLI's `model/list` catalog using
+the selected bot's workspace and shared ChatGPT login. Each model lists supported
+reasoning efforts and its default effort, and service tiers when the CLI supplies
+them. Catalog defaults and the configured model are marked separately. This is a
+metadata query with a 30-second deadline, not a model turn. If discovery fails,
+no incomplete list is presented; check login, CLI support and connectivity.
+
+For Claude, it reads the CLI initialization catalog: aliases, resolved model IDs,
+model-specific effort levels and Fast mode support when reported. Older CLIs may
+omit capability fields; these are shown as unknown. For Pi, it reads configured
+models and the selected model's exact thinking levels. To inspect another Pi
+model's levels, select it and query options again. These requests do not send a
+model prompt or create a saved conversation. All engines use a 30-second catalog
+deadline, close the metadata process on cancellation and report failures instead
+of showing a hard-coded fallback. `show settings bot` links to discovery.
+
+Replace `MODEL` with an identifier accepted by that bot’s CLI and account. Model and reasoning selection work for Codex, Claude and Pi. Pi accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`, passed as `--thinking`; use discovery for the selected model’s subset. `reset reasoning bot Builder` restores `PI_REASONING_EFFORT` for a Pi bot, or CLI inheritance when blank. Pi has no service tier. Claude accepts `low`, `medium`, `high`, `xhigh` or `max`, passed as `--effort` to Claude Code. `reset reasoning bot Research` restores inheritance from `CLAUDE_REASONING_EFFORT`, or from CLI settings when blank. This requires a Claude Code version and model supporting the selected effort. For Codex tiers, `default` requests standard service and `priority` requests priority processing. For Claude tiers, `fast` requests fast mode and `default` explicitly turns it off. `reset tier bot Research` restores inheritance from `CLAUDE_SERVICE_TIER`, or from CLI settings when that shared value is blank. Grok’s model belongs to its external worker.
 
 Each field inherits its corresponding `.env` default until explicitly set for the bot. Resetting a field removes just that override. If the shared value is blank, Riftjack leaves that option to the CLI. `show settings bot` labels overrides and inherited values; `!status` in the bot chat shows the effective configuration separately from the last CLI session report.
 

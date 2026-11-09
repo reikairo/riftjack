@@ -116,3 +116,15 @@ Matrix conversation have not yet been verified. Protocol references:
 
 Implementation was compared with upstream source commit
 `6c384aa30f619d7b28963f2bab24d8dacbe73cb6` (package version 1.4.0).
+
+
+## Model and thinking discovery
+
+Use `show options bot Builder` in the manager DM to query Pi's configured models
+and the selected model's available thinking levels. No prompt is sent and no
+saved conversation is created. Select a model with `set model bot Builder to
+PROVIDER/MODEL`, then query again for that model's levels. Set effort with
+`set reasoning bot Builder to high`; reset it with `reset reasoning bot Builder`.
+The shared default is `PI_REASONING_EFFORT`, blank for CLI inheritance. The
+adapter accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max`; Pi
+validates the selected model's support. Pi does not expose a service tier here.
