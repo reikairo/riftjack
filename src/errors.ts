@@ -42,7 +42,7 @@ export function safeErrorSummary(error: unknown): string {
     if (typeof e.name === 'string' && names.has(e.name)) parts.add(e.name);
     for (const code of [e.code, e.errcode]) if (typeof code === 'string' && codes.has(code)) parts.add(code);
     if (e.code === 'ERR_SQLITE_ERROR' && typeof e.errcode === 'number' && Number.isInteger(e.errcode) && e.errcode >= 1 && e.errcode <= 26) parts.add(`SQLite ${e.errcode}`);
-    if (typeof e.code === 'number' && Number.isInteger(e.code) && e.code >= 0 && e.code <= 255) parts.add(`exit ${e.code}`);
+    if (!(item instanceof DOMException) && typeof e.code === 'number' && Number.isInteger(e.code) && e.code >= 0 && e.code <= 255) parts.add(`exit ${e.code}`);
     if (typeof e.signal === 'string' && signals.has(e.signal)) parts.add(e.signal);
     if (e.killed === true) parts.add('process killed');
     if (typeof e.syscall === 'string' && syscalls.has(e.syscall)) parts.add(`operation ${e.syscall}`);

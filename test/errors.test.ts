@@ -39,3 +39,9 @@ test('process and filesystem causes retain safe details across public wrappers',
 test('SQLite diagnostics retain the bounded engine code without database contents', () => {
   assert.equal(safeErrorSummary({ code: 'ERR_SQLITE_ERROR', errcode: 13, message: 'secret database path' }), 'ERR_SQLITE_ERROR, SQLite 13');
 });
+
+test('DOM exception codes are not reported as process exit codes', () => {
+  assert.equal(safeErrorSummary(new DOMException('private details', 'TimeoutError')), 'TimeoutError');
+  assert.equal(safeErrorSummary(new DOMException('private details', 'AbortError')), 'AbortError');
+  assert.equal(safeErrorSummary({ code: 23 }), 'exit 23');
+});

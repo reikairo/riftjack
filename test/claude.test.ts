@@ -15,7 +15,7 @@ import type { BackendReply } from '../src/media.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
 
-function setup(t: { after(fn: () => void): void }, options: { auth?: string; authExit?: number; malformed?: boolean; legacy?: boolean; replay?: boolean; snapshot?: boolean; auto?: boolean } = {}) {
+function setup(t: { after(fn: () => void): void }, options: { auth?: string; authExit?: number; malformed?: boolean; legacy?: boolean; replay?: boolean; snapshot?: boolean; hangCheck?: string; auto?: boolean } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matrix-claude-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const executable = join(dir, 'claude.cjs');
@@ -25,6 +25,10 @@ const path = require('node:path');
 const args = process.argv.slice(2);
 const record = value => fs.appendFileSync(__filename + '.calls', JSON.stringify(value) + '\\n');
 record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
+if (args[0] === ${JSON.stringify(options.hangCheck)}) {
+  process.on('SIGTERM', () => { fs.writeFileSync(__filename + '.terminated', 'yes'); process.exit(0); });
+  setInterval(() => {}, 1000); return;
+}
 if (args.includes('--help')) {
   console.log(${JSON.stringify(options.legacy ? '--help' : '--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume' + (options.auto ? ' choices: "acceptEdits", "auto"' : '') + (options.replay ? ' --replay-user-messages' : '') + (options.snapshot ? ' --system-prompt-snapshot' : ''))}); process.exit(0);
 }
@@ -863,4 +867,60 @@ test('Claude auto sessions retain Matrix decisions for remaining prompts', async
   assert.match(run.args[run.args.indexOf('--append-system-prompt') + 1], /do not bypass/);
   const response = f.calls().find(call => call.response?.response?.response?.behavior);
   assert.equal(response.response.response.response.behavior, 'deny');
+});
+
+for (const command of ['--help', 'auth']) test(`Claude readiness timeout identifies ${command} and reaps the child`, async t => {
+  const f = setup(t, { hangCheck: command });
+  const deadlines: { limit: number; controller: AbortController }[] = [];
+  t.mock.method(AbortSignal, 'timeout', (limit: number) => {
+    const controller = new AbortController(); deadlines.push({ limit, controller }); return controller.signal;
+  });
+  const pending = checkClaude(f.config);
+  const rejected = assert.rejects(pending, error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /startup check failed during/);
+    assert.ok(error.message.includes(command === 'auth' ? 'auth status --json' : '--help'));
+    assert.match(error.message, /after \d+ ms.*stage limit 60000 ms/);
+    assert.match(error.message, /No model turn was started/);
+    return true;
+  });
+  await until(() => f.calls().some(call => call.args[0] === command));
+  assert.ok(deadlines.every(d => d.limit === 60_000));
+  deadlines.at(-1)!.controller.abort(new DOMException('private timeout details', 'TimeoutError'));
+  await rejected;
+  assert.equal(existsSync(join(f.dir, 'claude.cjs.terminated')), true);
+  assert.ok(f.calls().every(call => !call.args.includes('--print')));
+});
+
+test('readiness stages have separate budgets and preserve caller cancellation', async t => {
+  const f = setup(t, { hangCheck: 'auth' });
+  const deadlines: AbortController[] = [];
+  t.mock.method(AbortSignal, 'timeout', () => {
+    const controller = new AbortController(); deadlines.push(controller); return controller.signal;
+  });
+  const caller = new AbortController();
+  const reason = new DOMException('caller deadline', 'TimeoutError');
+  let settled = false;
+  const pending = checkClaude(f.config, caller.signal).finally(() => { settled = true; });
+  const rejected = assert.rejects(pending, error => error === reason);
+  await until(() => f.calls().some(call => call.args[0] === 'auth'));
+  assert.equal(deadlines.length, 2);
+  deadlines[0].abort(new DOMException('old deadline', 'TimeoutError'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(settled, false);
+  caller.abort(reason);
+  await rejected;
+});
+
+test('unexpected Claude failures identify their stage without exposing exception text', async t => {
+  const f = setup(t);
+  t.mock.method(f.state, 'session', () => { throw new DOMException('private token', 'TimeoutError'); });
+  await assert.rejects(f.backend('claude', 'hello', 'key', signal(), '@owner:test'), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /input preparation after \d+ ms/);
+    assert.doesNotMatch(error.message, /private token/);
+    assert.ok(error.cause instanceof DOMException);
+    return true;
+  });
+  assert.ok(f.calls().every(call => !call.args?.includes('--print')));
 });

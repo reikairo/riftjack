@@ -115,11 +115,29 @@ async function capture(config: Config, args: string[], signal: AbortSignal, allo
   return { output, code };
 }
 
+const CLAUDE_CHECK_TIMEOUT_MS = 60_000;
+
+async function checkStep(config: Config, args: string[], stage: string, signal: AbortSignal, allowedExitCodes = [0]) {
+  signal.throwIfAborted();
+  const started = performance.now();
+  const deadline = AbortSignal.timeout(CLAUDE_CHECK_TIMEOUT_MS);
+  try {
+    return await capture(config, args, AbortSignal.any([signal, deadline]), allowedExitCodes);
+  } catch (error) {
+    // Caller cancellation (including its shorter deadline) must remain distinguishable.
+    if (signal.aborted) throw signal.reason;
+    const elapsed = Math.round(performance.now() - started);
+    const details = `Claude Code startup check failed during ${stage} after ${elapsed} ms (stage limit ${CLAUDE_CHECK_TIMEOUT_MS} ms). No model turn was started.`;
+    if (deadline.aborted) throw new PublicError(details + ' Check host load and whether this CLI command completes on the host.', { cause: error });
+    if (error instanceof PublicError) throw new PublicError(details + ' ' + error.message, { cause: error.cause });
+    throw new PublicError(details, { cause: error });
+  }
+}
+
 // Returns whether the CLI can acknowledge user messages written during a turn
 // (--replay-user-messages), which live steering requires.
-export async function checkClaude(config: Config, signal = AbortSignal.timeout(15_000)): Promise<{ replay: boolean; systemPromptSnapshot: boolean; hookEvents: boolean }> {
-  const checkSignal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
-  const { output: help } = await capture(config, ['--help'], checkSignal);
+export async function checkClaude(config: Config, signal = new AbortController().signal): Promise<{ replay: boolean; systemPromptSnapshot: boolean; hookEvents: boolean }> {
+  const { output: help } = await checkStep(config, ['--help'], '--help', signal);
   for (const flag of ['--input-format', '--output-format', '--permission-mode', '--permission-prompt-tool', '--append-system-prompt', '--tools', '--settings', '--resume']) {
     if (!help.includes(flag)) throw new PublicError('This Claude Code version lacks required headless options. Update Claude Code on the host.');
   }
@@ -127,7 +145,7 @@ export async function checkClaude(config: Config, signal = AbortSignal.timeout(1
     throw new PublicError('This Claude Code version does not advertise auto permission mode. Update Claude Code or select CLAUDE_PERMISSION_MODE=acceptEdits.');
   }
   // The CLI returns exit 1 with valid JSON when no account is signed in.
-  const auth = await capture(config, ['auth', 'status', '--json'], checkSignal, [0, 1]);
+  const auth = await checkStep(config, ['auth', 'status', '--json'], 'auth status --json', signal, [0, 1]);
   let status: { loggedIn?: boolean; authMethod?: string };
   try { status = JSON.parse(auth.output); }
   catch (error) {
@@ -239,13 +257,20 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
   // Live steering into the running turn of each conversation key.
   const live = new Map<string, (prompt: string, attachments: IncomingAttachment[], signal: AbortSignal) => Promise<boolean>>();
   const run: Backend = async (...args) => {
-    try { return await turn(...args); } catch (error) { checked = false; throw error; }
+    const diagnostic = { stage: 'startup checks', started: performance.now() };
+    try { return await turn(diagnostic, ...args); } catch (error) {
+      checked = false;
+      if (args[3].aborted || error instanceof PublicError) throw error;
+      throw new PublicError(`Claude task failed during ${diagnostic.stage} after ${Math.round(performance.now() - diagnostic.started)} ms in this stage.`, { cause: error });
+    }
   };
-  const turn: Backend = async (mode, prompt, key, signal, sender, attachments = [], interact, publish, hooks) => {
+  const turn = async (diagnostic: { stage: string; started: number }, ...[mode, prompt, key, signal, sender, attachments = [], interact, publish, hooks]: Parameters<Backend>) => {
+    const stage = (name: string) => { diagnostic.stage = name; diagnostic.started = performance.now(); };
     const config = { ...(typeof configuration === 'function' ? configuration() : configuration) };
     if (mode !== 'claude') throw new Error('Claude backend received the wrong bot kind.');
     signal.throwIfAborted();
     if (!checked) { ({ replay, systemPromptSnapshot, hookEvents } = await checkClaude(config, signal)); checked = true; }
+    stage('input preparation');
     const outbox = await outboxDirectory(config.workspace, 'claude:' + key);
     const savedSession = state.session(key).claude;
     let currentReport: EngineReport | undefined;
@@ -312,13 +337,16 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       unconfirmed(); mediaLifetime.abort(); close(); stdinRef?.end();
     };
     try {
+      stage('tool server startup');
       tools = await startBackendTools({ kind: 'claude', config, outbox, hooks, publish,
         allowPublication: !!interact, signal: AbortSignal.any([signal, mediaLifetime.signal]), beforeAttachments: () => progress });
       ({ detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media } = tools);
+      stage('CLI startup (before first protocol message)');
       await runClaude(config, claudeArguments(config, savedSession, interactive,
         routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude', claudeAutoReview(config, !!interact) ? 'auto_review' : 'user') + tools.instructions, publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
+      if (diagnostic.stage === 'CLI startup (before first protocol message)') stage('model execution and tool handling');
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
         if (savedSession && message.session_id !== savedSession) throw new PublicError('Claude resumed a different session. The saved history was not replaced.');
         if (sessionId !== message.session_id) {
@@ -443,6 +471,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     signal.throwIfAborted();
     if (!results.length || !sessionId) throw new PublicError('Claude exited without a complete result and session ID. Please retry after checking its installed version.');
     // A confirmed update that started one more turn adds that turn's answer.
+    stage('output preparation');
     const reply = combineReplies(results.map(text => parseMediaReply(text, outbox)));
     return delivery ? delivery.final(reply) : reply;
   };
