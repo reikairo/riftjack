@@ -63,5 +63,9 @@ export async function showBotOptions(target: string, options: {
     + '\n\nApproval policy (host setting): `on-request`, `never`; default `on-request`. '
     + 'Approval reviewer (host setting): `user`, `auto_review`; default `user`. '
     + `Configured reviewer: ${inlineCode(config.codexApprovalsReviewer)}. These are configured in the host .env, not by model-setting commands.`;
+  if (bot.kind === 'claude') return catalog + '\n\n' + reset
+    + '\n\nPermission mode (host setting): `acceptEdits`, `auto`; default `acceptEdits`. '
+    + `Configured mode: ${inlineCode(config.claudePermissionMode)}. Approval policy: ${inlineCode(config.claudeApprovalPolicy)}. `
+    + 'Configure these in the host .env; auto requires writable mode, on-request policy and CLI/account support. Read-only and never remain restrictive.';
   return catalog + '\n\n' + reset;
 }

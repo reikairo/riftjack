@@ -179,3 +179,27 @@ approval decision. Connector-owned publication, detached-run and explicit
 confirmation tools still require their normal human confirmation. Questions,
 authentication and other Matrix prompts remain interactive. Model catalog and
 usage queries do not start model turns or permit escalations.
+
+
+### Claude automatic review
+
+Set these host options, then restart Riftjack when idle:
+
+```dotenv
+CLAUDE_APPROVAL_POLICY=on-request
+CLAUDE_PERMISSION_MODE=auto
+```
+
+This requests Claude Code's `auto` permission mode, not permission bypass.
+Riftjack keeps sandboxing enabled and removes only its own blanket `Bash` ask
+rule for these sessions so eligible calls reach the classifier. Existing user
+and managed ask/deny rules remain in force. Prompts that still reach Matrix,
+including fallback prompts, require the human response. Publication, detached
+runs and explicit confirmations keep their own human decisions.
+
+The CLI must advertise `auto`; account, model and organization support are
+checked by Claude Code. Use `!status` after a task to compare the requested mode
+with the CLI's reported mode. Selecting the setting alone does not prove the
+classifier ran. Read-only mode, `never`, and calls without a confirmation channel
+do not enable automatic review. Set `CLAUDE_PERMISSION_MODE=acceptEdits` to restore
+the default. See [Claude permission modes](https://code.claude.com/docs/en/permission-modes).

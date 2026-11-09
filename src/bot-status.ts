@@ -94,7 +94,7 @@ export function botStatus(kind: 'codex' | 'claude' | 'pi', config: Config, sessi
     row('Model', codex ? config.codexModel : config.claudeModel, configured),
     row('Reasoning', codex ? config.codexReasoningEffort : config.claudeReasoningEffort, configured),
     row('Service tier', codex ? config.codexServiceTier : config.claudeServiceTier, configured),
-    ...(codex ? [row('Approval policy', config.codexApprovalPolicy), row('Approval reviewer', config.codexApprovalsReviewer)] : []),
+    ...(codex ? [row('Approval policy', config.codexApprovalPolicy), row('Approval reviewer', config.codexApprovalsReviewer)] : [row('Approval policy', config.claudeApprovalPolicy), row('Requested permission mode', config.claudePermissionMode)]),
   ].join('\n');
   const reported = report ? [
     row('Reported at', report.reportedAt),

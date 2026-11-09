@@ -85,3 +85,10 @@ Categories contain no account identifiers, paths, tokens or response bodies.
 There is no automatic retry, token refresh, logout or conversation reset.
 After recovery, the original cause may remain unknown if the CLI message was
 not recognized. A restart restoring service is not proof of a permanent fix.
+
+
+With `CLAUDE_PERMISSION_MODE=auto`, writable Claude sessions using `on-request`
+and a confirmation channel delegate eligible actions to Claude Code's classifier.
+The sandbox and existing user/managed permission rules still apply. Riftjack
+omits its own blanket Bash ask rule only in this mode. It does not automatically
+answer remaining permission prompts or connector-owned confirmations.

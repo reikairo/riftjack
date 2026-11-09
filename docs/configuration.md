@@ -74,6 +74,7 @@ These are host settings, not per-bot model commands.
 | `CODEX_SANDBOX` | `workspace-write`, `read-only`; shared access intent, applied by each backend's own permission mechanism | `workspace-write` |
 | `CODEX_APPROVAL_POLICY` | `on-request` (permit escalation requests), `never` (deny escalations) | `on-request` |
 | `CODEX_APPROVALS_REVIEWER` | `user` (Matrix review), `auto_review` (Codex automatic review / “Approve for me”) | `user` |
+| `CLAUDE_PERMISSION_MODE` | `acceptEdits` (default edits + Matrix permissions), `auto` (Claude classifier) | `acceptEdits` |
 | `CLAUDE_APPROVAL_POLICY` | `on-request` (Matrix permissions in writable mode), `never` (deny requests beyond existing sandbox/edit permissions) | `on-request` |
 | `PI_APPROVAL_POLICY` | `on-request` (Matrix confirmation for shell/file writes), `never` (disable those tools) | `on-request` |
 | `CODEX_NETWORK_ALLOW` | Up to 32 exact public DNS hostnames, separated by whitespace; no URLs, IPs, wildcards or ports; normalized to lowercase | Sandbox command network disabled |
@@ -87,8 +88,12 @@ explains limits. Pi does not provide an OS sandbox.
 `never` still denies escalations. Connector-owned publication, detached-run and
 explicit confirmation tools retain their human approval. Questions and login
 prompts remain interactive. [Automatic approval setup](setup.md#configuration-values-and-automatic-approval)
-explains how to select it. Claude Code's `auto` permission mode is not currently
-exposed by Riftjack; `CLAUDE_APPROVAL_POLICY=never` is not an auto-review setting.
+explains how to select it. `CLAUDE_PERMISSION_MODE=auto` requests Claude Code's classifier with writable
+mode, `CLAUDE_APPROVAL_POLICY=on-request`, and a confirmation channel. Read-only
+bots keep `dontAsk`; `never` and calls without a confirmation channel keep the
+existing restricted behavior. Explicit user/managed ask and deny rules still
+apply. `!status` separates the requested mode from the last CLI-reported mode;
+account, model or organization restrictions may prevent auto mode from starting.
 
 ## Matrix, storage and limits
 

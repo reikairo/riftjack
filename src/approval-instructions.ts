@@ -10,6 +10,12 @@ export function approvalInstructions(engine: 'codex' | 'claude', reviewer: 'user
     + 'Do not bypass a rejection with another tool, wrapper, permission rule, or reviewer setting. '
     + 'Riftjack publication, detached-run, and explicit confirmation tools retain their own human confirmations. '
     + 'Forms, authentication, and other requests that still reach Matrix need the human response; do not answer them yourself.\n';
+  if (engine === 'claude' && reviewer === 'auto_review') return '\nEligible Claude Code actions use its auto permission mode and classifier. '
+    + 'Sandbox, explicit permission rules, and managed restrictions still apply. '
+    + 'When a required command fails because of the sandbox, request a retry with dangerouslyDisableSandbox: true and explain the scope in the Bash description. '
+    + 'If automatic review rejects an action, report the action and stated reason to the human; do not bypass it with another tool, wrapper, permission rule, or mode. '
+    + 'Any permission prompt that still reaches Matrix needs the human response; do not answer it yourself. '
+    + 'Riftjack publication, detached-run, and explicit confirmation tools retain their own human confirmations.\n';
   const common = '\nBefore each command approval request, assess whether a persistent permission would be appropriate, '
     + 'not just whether the current invocation is acceptable. Consider future matching arguments, executable resolution through PATH, '
     + 'configuration, hooks, plugins and other code the command may load. A stable command name or script path does not make its behavior immutable. '

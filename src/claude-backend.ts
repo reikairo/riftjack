@@ -123,6 +123,9 @@ export async function checkClaude(config: Config, signal = AbortSignal.timeout(1
   for (const flag of ['--input-format', '--output-format', '--permission-mode', '--permission-prompt-tool', '--append-system-prompt', '--tools', '--settings', '--resume']) {
     if (!help.includes(flag)) throw new PublicError('This Claude Code version lacks required headless options. Update Claude Code on the host.');
   }
+  if (claudeAutoReview(config) && !/--permission-mode[\s\S]{0,250}["']auto["']/.test(help)) {
+    throw new PublicError('This Claude Code version does not advertise auto permission mode. Update Claude Code or select CLAUDE_PERMISSION_MODE=acceptEdits.');
+  }
   // The CLI returns exit 1 with valid JSON when no account is signed in.
   const auth = await capture(config, ['auth', 'status', '--json'], checkSignal, [0, 1]);
   let status: { loggedIn?: boolean; authMethod?: string };
@@ -163,20 +166,27 @@ export function claudeApprovals(config: Config): boolean {
   return config.sandbox !== 'read-only' && config.claudeApprovalPolicy === 'on-request';
 }
 
+export function claudeAutoReview(config: Config, interactive = true): boolean {
+  return interactive && claudeApprovals(config) && config.claudePermissionMode === 'auto';
+}
+
 export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection, media?: PublishConnection, rooms?: PublishConnection,
   replay = false, systemPromptSnapshot = false, web?: PublishConnection, hookEvents = false, github?: PublishConnection, diagram?: PublishConnection, confirmation?: PublishConnection, detached?: PublishConnection): string[] {
   const readOnly = config.sandbox === 'read-only';
+  const automatic = claudeAutoReview(config, interactive);
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
     ...(config.claudeServiceTier !== undefined && { fastMode: config.claudeServiceTier === 'fast' }),
     hooks: claudeCheckpointHooks(config.workspace),
     // Sandboxed Bash skips this blanket ask rule in auto-allow mode. Outside the
     // sandbox it takes precedence over saved allow rules, including exclusions.
-    permissions: { ask: ['Bash'] },
+    // In auto mode Claude's classifier reviews eligible calls. Keep user and
+    // managed ask/deny rules; only omit Riftjack's blanket human-review rule.
+    ...(!automatic && { permissions: { ask: ['Bash'] } }),
     sandbox: { enabled: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: interactive && claudeApprovals(config) },
   };
   const args = ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
-    '--permission-mode', readOnly ? 'dontAsk' : 'acceptEdits', '--tools', tools,
+    '--permission-mode', readOnly ? 'dontAsk' : automatic ? 'auto' : 'acceptEdits', '--tools', tools,
     '--settings', JSON.stringify(settings)];
   const allowed = readOnly ? ['Read', 'Glob', 'Grep'] : [];
   const servers: Record<string, object> = {};
@@ -306,7 +316,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         allowPublication: !!interact, signal: AbortSignal.any([signal, mediaLifetime.signal]), beforeAttachments: () => progress });
       ({ detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media } = tools);
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude') + tools.instructions, publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached), signal, (line, stdin) => {
+        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude', claudeAutoReview(config, !!interact) ? 'auto_review' : 'user') + tools.instructions, publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {

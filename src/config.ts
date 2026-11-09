@@ -37,6 +37,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (!['on-request', 'never'].includes(piApprovalPolicy)) throw new Error('PI_APPROVAL_POLICY must be on-request or never.');
   const piReasoningEffort = env.PI_REASONING_EFFORT?.trim() || undefined;
   if (piReasoningEffort && !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(piReasoningEffort)) throw new Error('PI_REASONING_EFFORT must be off, minimal, low, medium, high, xhigh, max or blank.');
+  const claudePermissionMode = env.CLAUDE_PERMISSION_MODE?.trim() || 'acceptEdits';
+  if (!['acceptEdits', 'auto'].includes(claudePermissionMode)) throw new Error('CLAUDE_PERMISSION_MODE must be acceptEdits or auto.');
   const claudeApprovalPolicy = env.CLAUDE_APPROVAL_POLICY?.trim() || 'on-request';
   if (claudeApprovalPolicy !== 'on-request' && claudeApprovalPolicy !== 'never') throw new Error('CLAUDE_APPROVAL_POLICY must be on-request or never.');
   const claudeReasoningEffort = env.CLAUDE_REASONING_EFFORT?.trim() || undefined;
@@ -81,6 +83,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     piPath: env.PI_PATH?.trim() || 'pi',
     piModel: env.PI_MODEL?.trim() || undefined,
     claudePath: env.CLAUDE_PATH?.trim() || 'claude',
+    claudePermissionMode: claudePermissionMode as 'acceptEdits' | 'auto',
     claudeApprovalPolicy: claudeApprovalPolicy as 'on-request' | 'never',
     workspace,
     sandbox: sandbox as 'workspace-write' | 'read-only',

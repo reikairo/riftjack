@@ -15,7 +15,7 @@ import type { BackendReply } from '../src/media.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
 
-function setup(t: { after(fn: () => void): void }, options: { auth?: string; authExit?: number; malformed?: boolean; legacy?: boolean; replay?: boolean; snapshot?: boolean } = {}) {
+function setup(t: { after(fn: () => void): void }, options: { auth?: string; authExit?: number; malformed?: boolean; legacy?: boolean; replay?: boolean; snapshot?: boolean; auto?: boolean } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matrix-claude-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const executable = join(dir, 'claude.cjs');
@@ -26,7 +26,7 @@ const args = process.argv.slice(2);
 const record = value => fs.appendFileSync(__filename + '.calls', JSON.stringify(value) + '\\n');
 record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
 if (args.includes('--help')) {
-  console.log(${JSON.stringify(options.legacy ? '--help' : '--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume' + (options.replay ? ' --replay-user-messages' : '') + (options.snapshot ? ' --system-prompt-snapshot' : ''))}); process.exit(0);
+  console.log(${JSON.stringify(options.legacy ? '--help' : '--input-format --output-format --permission-mode --permission-prompt-tool --append-system-prompt --tools --settings --resume' + (options.auto ? ' choices: "acceptEdits", "auto"' : '') + (options.replay ? ' --replay-user-messages' : '') + (options.snapshot ? ' --system-prompt-snapshot' : ''))}); process.exit(0);
 }
 if (args[0] === 'auth') {
   console.log(${JSON.stringify(options.malformed ? 'not json' : JSON.stringify({ loggedIn: options.auth !== 'none', authMethod: options.auth || 'claude.ai', apiProvider: 'firstParty' }))}); process.exit(${options.authExit ?? (options.auth === 'none' ? 1 : 0)});
@@ -48,7 +48,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   if (started) { record({ response: message }); onResponse?.(message); return; }
   started = true; record({ input: message });
   const prompt = message.message.content[0].text;
-  output({ type: 'system', subtype: 'init', session_id: 'claude-session-1', ...(prompt.includes('[missing-status]') ? {} : { model: 'resolved-claude', cwd: process.cwd(), permissionMode: 'acceptEdits', fast_mode_state: 'off', ...(prompt.includes('[fast-') ? { fast_mode_disabled_reason: 'preference' } : {}) }) });
+  output({ type: 'system', subtype: 'init', session_id: 'claude-session-1', ...(prompt.includes('[missing-status]') ? {} : { model: 'resolved-claude', cwd: process.cwd(), permissionMode: args[args.indexOf('--permission-mode') + 1], fast_mode_state: 'off', ...(prompt.includes('[fast-') ? { fast_mode_disabled_reason: 'preference' } : {}) }) });
   const finish = result => output({ type: 'result', subtype: 'success', is_error: false, result, session_id: 'claude-session-1' });
   if (prompt.includes('[fast-')) {
     const fast = prompt.includes('[fast-on]') ? { fast_mode_state: 'on' }
@@ -813,4 +813,54 @@ test('Claude final fast-mode reason survives errors and restart, and later on or
   report = f.state.session('key').claudeReport!;
   assert.equal(report.fastMode, 'off');
   assert.equal(report.fastModeDisabledReason, undefined);
+});
+
+
+test('Claude auto setting accepts only supported modes', () => {
+  const env = { MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: process.cwd() };
+  assert.equal(loadConfig(env).claudePermissionMode, 'acceptEdits');
+  assert.equal(loadConfig({ ...env, CLAUDE_PERMISSION_MODE: 'auto' }).claudePermissionMode, 'auto');
+  assert.throws(() => loadConfig({ ...env, CLAUDE_PERMISSION_MODE: 'bypassPermissions' }), /CLAUDE_PERMISSION_MODE/);
+});
+
+test('Claude auto mode preserves restrictive policies and human fallback', t => {
+  const f = setup(t);
+  for (const sandbox of ['workspace-write', 'read-only'] as const) {
+    for (const claudeApprovalPolicy of ['on-request', 'never'] as const) {
+      for (const interactive of [false, true]) {
+        const config = { ...f.config, sandbox, claudeApprovalPolicy, claudePermissionMode: 'auto' as const };
+        const args = claudeArguments(config, 'existing-session', interactive);
+        const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+        const enabled = sandbox === 'workspace-write' && claudeApprovalPolicy === 'on-request' && interactive;
+        assert.equal(args[args.indexOf('--permission-mode') + 1], sandbox === 'read-only' ? 'dontAsk' : enabled ? 'auto' : 'acceptEdits');
+        assert.equal(settings.sandbox.enabled, true);
+        assert.equal(settings.sandbox.allowUnsandboxedCommands, enabled);
+        assert.deepEqual(settings.permissions, enabled ? undefined : { ask: ['Bash'] });
+        assert.equal(args.includes('--permission-prompt-tool'), interactive);
+        assert.equal(args[args.indexOf('--resume') + 1], 'existing-session');
+        assert.ok(!args.some(arg => /skip-permissions|bypassPermissions/.test(arg)));
+      }
+    }
+  }
+});
+
+test('Claude auto preflight rejects unsupported CLI without starting a model', async t => {
+  const f = setup(t);
+  await assert.rejects(checkClaude({ ...f.config, claudePermissionMode: 'auto' }), /does not advertise auto/);
+  assert.equal(f.calls().length, 1);
+});
+
+test('Claude auto sessions retain Matrix decisions for remaining prompts', async t => {
+  const f = setup(t, { auto: true });
+  const backend = createBackend({ ...f.config, claudePermissionMode: 'auto' }, f.state);
+  let requested = false;
+  const interact: Interact = async request => { requested = true; return request.deny; };
+  await backend('claude', '[permission]', 'auto-key', signal(), '@owner:test', [], interact);
+  assert.ok(requested);
+  const run = f.calls().find(call => call.args?.includes('--print'));
+  assert.equal(run.args[run.args.indexOf('--permission-mode') + 1], 'auto');
+  assert.match(run.args[run.args.indexOf('--append-system-prompt') + 1], /classifier/);
+  assert.match(run.args[run.args.indexOf('--append-system-prompt') + 1], /do not bypass/);
+  const response = f.calls().find(call => call.response?.response?.response?.behavior);
+  assert.equal(response.response.response.response.behavior, 'deny');
 });
