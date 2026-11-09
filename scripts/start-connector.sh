@@ -1,6 +1,12 @@
 #!/bin/sh
 # Start on macOS from the instance directory, or set RIFTJACK_HOME.
 set -eu
+# Replacing the supervisor from one of its agent turns can terminate this
+# launcher before it starts the replacement. Use an independent owner terminal.
+if [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CLAUDECODE:-}" ]; then
+    echo 'Cannot start or restart Riftjack from an agent turn. No processes were stopped. Ask the owner to send !restart in Matrix after all agent turns finish, or to run this command from an independent terminal. Do not unset agent environment markers or stop connector processes to bypass this check.' >&2
+    exit 1
+fi
 mode=${1:---background}
 case "$mode" in --foreground|--background) ;; *) echo "Usage: $0 [--foreground|--background]" >&2; exit 1 ;; esac
 umask 077

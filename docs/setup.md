@@ -17,6 +17,8 @@ Commands below are run from the instance directory. `npm --prefix riftjack …` 
 
 To run updated code, update the checkout in `riftjack/`, install dependencies if the lockfile changed, and send `!restart` in Matrix when the bots are idle. The supervisor loads code from the repository, snapshots it once it proves stable and rolls back on a failed start; a rollback changes files in the working tree, so `git status` shows exactly what was restored.
 
+Run `scripts/start-connector.sh` and `scripts/restart-supervisor.sh` from an independent terminal. They replace the supervisor itself and refuse to run when `CODEX_THREAD_ID` or `CLAUDECODE` identifies an agent turn. Restarting from that turn can terminate its command before the replacement starts. This check prevents accidental self-interruption; it is not a security boundary. Keep these markers intact when running commands from an agent.
+
 ## Accounts and first startup
 
 Requires Node.js 24+, Python 3, `lsof`, your Synapse server, and at least one engine: Codex with a ChatGPT login or Claude Code with a Claude login. Either engine is sufficient; the other provider’s account is not required. A [Grok worker](grok.md) is another option and requires neither CLI. Set `MATRIX_HOMESERVER` to your own server; `https://matrix.example.org` in the template is a placeholder. No OpenAI API key is needed.

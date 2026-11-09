@@ -21,6 +21,20 @@ import { join } from 'node:path';
 const execute = promisify(execFile);
 const source = fileURLToPath(new URL('..', import.meta.url));
 
+test('agent start and restart are rejected before preflight or process inspection', () => {
+  for (const key of ['CODEX_THREAD_ID', 'CLAUDECODE']) {
+    for (const script of ['start-connector.sh', 'restart-supervisor.sh']) {
+      const env = { ...process.env, PATH: '/usr/bin:/bin' };
+      delete env.CODEX_THREAD_ID;
+      delete env.CLAUDECODE;
+      env[key] = 'test-agent';
+      const result = spawnSync('/bin/sh', [join(source, 'scripts', script)], { env, encoding: 'utf8' });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /Cannot start or restart Riftjack from an agent turn/);
+    }
+  }
+});
+
 test('start, restart and npm entry point replace a real supervisor and locked child', { timeout: 60_000 }, async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'riftjack-start-e2e-')));
   const code = join(root, 'code with spaces');
@@ -54,6 +68,9 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
 }
 `);
   const env = { ...process.env, RIFTJACK_HOME: root, PYTHONDONTWRITEBYTECODE: '1' };
+  // This fixture is an independent, disposable instance, not the host connector.
+  delete env.CODEX_THREAD_ID;
+  delete env.CLAUDECODE;
   delete env.DATA_DIR;
   delete env.BAD_CONFIG;
   // Cleanup only processes whose command and cwd identify this test's temporary instance.
@@ -69,6 +86,13 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   const first = events();
   assert.equal(first.length, 1);
   assert.match(first[0], /^start \d+$/);
+  for (const key of ['CODEX_THREAD_ID', 'CLAUDECODE']) {
+    await assert.rejects(execute('sh', [join(code, 'scripts/restart-supervisor.sh')], {
+      cwd: root, env: { ...env, [key]: 'test-agent' }, timeout: 5000,
+    }), error => error.code === 1 && /independent terminal/.test(error.stderr));
+    assert.deepEqual(events(), first);
+    process.kill(Number(first[0].split(' ')[1]), 0);
+  }
   // Failed preflight must leave the working instance alive and holding its lock.
   writeFileSync(join(root, '.env'), 'DATA_DIR=./runtime\nBAD_CONFIG=1\n');
   await assert.rejects(run('start-connector.sh'), error => error.code === 78);

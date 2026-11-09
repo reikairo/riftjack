@@ -109,7 +109,16 @@ def stop_processes(processes, timeout=30):
         time.sleep(0.1)
 
 
+def reject_agent_turn():
+    if os.environ.get('CODEX_THREAD_ID') or os.environ.get('CLAUDECODE'):
+        raise RuntimeError('Cannot start or restart Riftjack from an agent turn. No processes were stopped. '
+                           'Ask the owner to send !restart in Matrix after all agent turns finish, '
+                           'or to run this command from an independent terminal. '
+                           'Do not unset agent environment markers or stop connector processes to bypass this check.')
+
+
 def replace_instance(root, node):
+    reject_agent_turn()
     existing = instance_processes(root, node)
     # Stop supervision first so it cannot respawn a connector we are stopping.
     # Its own shutdown waits for its connector and handles an unresponsive child.
@@ -136,6 +145,7 @@ def startup_lock(data):
 
 
 def launch(root, node, directory, code, tsx, foreground=False):
+    reject_agent_turn()
     data = Path(directory)
     log = data / 'connector-supervisor.log'
     child = None

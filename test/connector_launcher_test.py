@@ -18,6 +18,12 @@ NODE = os.environ.get('LAUNCHER_TEST_NODE') or shutil.which('node')
 
 class LauncherTests(unittest.TestCase):
     def setUp(self):
+        # Manual-launch tests operate only on their temporary instance.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for key in ('CODEX_THREAD_ID', 'CLAUDECODE'):
+            os.environ.pop(key, None)
         self.temp = tempfile.TemporaryDirectory(prefix='riftjack-launcher-')
         self.addCleanup(self.temp.cleanup)
         self.root = os.path.realpath(self.temp.name)
@@ -32,6 +38,21 @@ class LauncherTests(unittest.TestCase):
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=5)
+
+    def test_agent_turn_cannot_stop_processes_or_start_replacement(self):
+        for key in ('CODEX_THREAD_ID', 'CLAUDECODE'):
+            with self.subTest(key=key), patch.dict(os.environ, {key: 'test-agent'}), \
+                    patch.object(launcher, 'instance_processes') as inspect, \
+                    patch.object(launcher, 'stop_processes') as stop, \
+                    patch.object(launcher.subprocess, 'Popen') as spawn:
+                with self.assertRaisesRegex(RuntimeError, 'independent terminal'):
+                    launcher.replace_instance(self.root, NODE)
+                with self.assertRaisesRegex(RuntimeError, 'independent terminal'):
+                    launcher.launch(self.root, NODE, str(self.data), str(self.code), 'tsx')
+                inspect.assert_not_called()
+                stop.assert_not_called()
+                spawn.assert_not_called()
+                self.assertFalse(self.data.exists())
 
     def start(self, name, script, cwd=None):
         path = self.code / 'src' / f'{name}.ts'
