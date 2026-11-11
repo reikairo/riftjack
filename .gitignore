@@ -52,6 +52,9 @@ device-recovery.json
 # Keys, certificates and exports (including public keys identifying an instance).
 *.key
 *.pem
+# Public self-signed identity used only by local transport tests.
+!test/fixtures/matrix-transport-cert.pem
+!test/fixtures/matrix-transport-key.pem
 *.p12
 *.pfx
 *.jks

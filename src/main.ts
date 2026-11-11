@@ -1,3 +1,4 @@
+import { installMatrixTransport } from './matrix-transport.js';
 import { DeliveryReceipts } from './delivery-receipts.js';
 import type { ApprovalJobOptions } from './approval-jobs.js';
 import { createConfirmationJobs, createRunApprovalJobs } from './decision-jobs.js';
@@ -68,6 +69,7 @@ process.umask(0o077);
 process.channel?.unref();
 const notifySupervisor = (message: SupervisorMessage) => { process.send?.(message, undefined, undefined, () => {}); };
 let tunnel: SshTunnel | undefined;
+let matrixTransport: ReturnType<typeof installMatrixTransport> | undefined;
 
 function diagnostics(error: unknown, bot?: string) {
   console.error(JSON.stringify({ time: new Date().toISOString(), event: 'connector-error', bot, message: errorMessage(error) }));
@@ -101,6 +103,8 @@ async function main() {
     process.exitCode = CONFIG_EXIT_CODE;
     return;
   }
+  const transport = installMatrixTransport(config.matrixHttpVersion, [config.homeserver, config.adminUrl]);
+  matrixTransport = transport;
   if (config.sshTunnel) tunnel = new SshTunnel(config.sshTunnel, { report: message => console.log(message) });
   const accounts = new Accounts(join(config.dataDir, 'accounts.json'));
   const audioWarnings = new AudioConfigurationWarnings();
@@ -121,7 +125,7 @@ async function main() {
   const access = new Access(join(config.dataDir, 'allowed-users.json'), config.owner);
   if (process.argv.includes('--bootstrap-codex') || process.argv.includes('--bootstrap-claude') || process.argv.includes('--bootstrap-grok') || process.argv.includes('--bootstrap-pi')) {
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => {
-      void (tunnel?.stop() ?? Promise.resolve()).finally(() => process.exit(0));
+      void Promise.all([tunnel?.stop(), transport.destroy()]).finally(() => process.exit(0));
     });
     tunnel?.start();
     try {
@@ -132,12 +136,12 @@ async function main() {
       for (const kind of kinds) {
         if (accounts.list().some(a => a.kind === kind)) continue;
         await tunnel?.waitUntilReady();
-        const account = await provision(config, kind, kind === 'pi' ? 'Pi' : kind === 'manager' ? 'Bot Manager' : kind === 'claude' ? 'Claude' : kind === 'grok' ? 'Grok' : 'Codex');
+        const account = await provision(config, kind, kind === 'pi' ? 'Pi' : kind === 'manager' ? 'Bot Manager' : kind === 'claude' ? 'Claude' : kind === 'grok' ? 'Grok' : 'Codex', undefined, transport.fetch);
         accounts.add(account);
         console.log('Created ' + kind + ': ' + account.userId);
       }
       console.log('Initial accounts saved. Start the connector to bring them online and receive DM invitations.');
-    } finally { await tunnel?.stop(); }
+    } finally { await Promise.all([tunnel?.stop(), transport.destroy()]); }
     return;
   }
   if (!accounts.list().length) throw new PublicError('No bot accounts configured. Run bootstrap:codex, bootstrap:claude, bootstrap:pi or bootstrap:grok first (see README).');
@@ -188,7 +192,7 @@ async function main() {
     clearInterval(workerTimer); clearInterval(discoveryTimer);
     clearInterval(backgroundTimer); clearInterval(githubTimer); githubLifetime.abort();
     for (const { client, bridge } of clients.values()) { bridge.stop(); client.stop(); }
-    void Promise.all([tunnel?.stop(), workerServer.stop(), new Promise(resolve => setTimeout(resolve, 1500))])
+    void Promise.all([tunnel?.stop(), transport.destroy(), workerServer.stop(), new Promise(resolve => setTimeout(resolve, 1500))])
       .then(() => process.exit(code));
   };
   const restart = new RestartController({
@@ -232,7 +236,7 @@ async function main() {
     const media = new MatrixMedia(client, { workspace: botConfig.workspace, homeserver: config.homeserver,
       accessToken: account.accessToken, maxBytes: config.maxMediaBytes, scope: account.userId,
       uploadTimeoutMs: config.mediaUploadTimeoutMs,
-      reportUpload: measurement => console.log(JSON.stringify({ time: new Date().toISOString(), ...measurement })) });
+      reportUpload: measurement => console.log(JSON.stringify({ time: new Date().toISOString(), ...measurement })) }, transport.fetch);
     phase('storage');
     const me = await client.getWhoAmI();
     phase('whoami');
@@ -410,7 +414,7 @@ async function main() {
         }),
       queuedUpdateMessage: account.kind === 'pi' ? 'Your update is queued for Pi after the current task.' : account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
       since, recoverMessages, timeoutMs: config.timeoutMs, state, report: error => diagnostics(error, account.userId),
-      typing: matrixTyping({ homeserver: config.homeserver, userId: account.userId, accessToken: account.accessToken }),
+      typing: matrixTyping({ homeserver: config.homeserver, userId: account.userId, accessToken: account.accessToken }, transport.fetch),
       typingMeasurement: (room, measurement) => console.log(JSON.stringify({ time: new Date().toISOString(),
         bot: account.userId, room, ...measurement })),
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
@@ -505,7 +509,7 @@ async function main() {
           creating = true;
           try {
             return await createMatrixUser(config, userCreation, {
-              sender, signal, interact, ready: () => tunnel?.waitUntilReady(signal) ?? Promise.resolve(),
+              sender, signal, interact, fetcher: transport.fetch, ready: () => tunnel?.waitUntilReady(signal) ?? Promise.resolve(),
             });
           } finally { creating = false; }
         }
@@ -537,7 +541,7 @@ async function main() {
           if (request.kind === 'pi') await checkPi(requestedConfig, signal);
           if (request.kind === 'claude') await checkClaude(requestedConfig, signal);
           await tunnel?.waitUntilReady(signal);
-          const created = await provision(config, request.kind, request.name, signal);
+          const created = await provision(config, request.kind, request.name, signal, transport.fetch);
           if (workspace !== undefined) created.workspace = workspace;
           created.inviteUserId = sender;
           accounts.add(created);
@@ -788,4 +792,4 @@ async function main() {
   await notifyRestart();
 }
 
-main().catch(async error => { diagnostics(error); await tunnel?.stop(); process.exitCode = 1; });
+main().catch(async error => { diagnostics(error); await Promise.all([tunnel?.stop(), matrixTransport?.destroy()]); process.exitCode = 1; });

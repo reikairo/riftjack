@@ -100,6 +100,7 @@ account, model or organization restrictions may prevent auto mode from starting.
 | Option | Accepted values | Default / blank |
 | --- | --- | --- |
 | `MATRIX_HOMESERVER` | HTTPS URL without credentials, query or fragment | Required |
+| `MATRIX_HTTP_VERSION` | `auto` or `1.1`; Matrix transport protocol policy | `auto` |
 | `MATRIX_OWNER_ID` | Full Matrix ID, e.g. `@alice:example.com` | Required |
 | `SYNAPSE_ADMIN_URL` | HTTPS URL, or loopback HTTP URL; no credentials, query or fragment | `MATRIX_HOMESERVER` |
 | `SYNAPSE_ADMIN_TOKEN` | Synapse administrator access token | No token; account creation needs this or shared-secret registration |
@@ -151,3 +152,19 @@ sub-options are unused when `FETCH_ALLOW` is blank. Its helper rejects non-publi
 addresses; token files must be kept outside agent-readable locations. See
 [fetch tool](security.md), [GitHub policy format](github-subscriptions.md),
 [diagrams](diagrams.md) and [audio transcription](audio-transcription.md).
+
+### Matrix HTTP version
+
+`MATRIX_HTTP_VERSION=auto` preserves the SDK and Node fetch defaults. To work
+around an HTTP/2 connection that stops recovering behind a proxy, set
+`MATRIX_HTTP_VERSION=1.1` and restart the connector. This forces HTTP/1.1 for
+Matrix SDK traffic and direct Matrix requests (typing, media, account creation)
+to `MATRIX_HOMESERVER` and `SYNAPSE_ADMIN_URL`. TLS verification remains enabled.
+Other HTTP clients and the global dispatcher are unchanged.
+
+In `1.1` mode, long-running `/sync` requests have a separate connection pool so
+they cannot exhaust the pool used for messages. Idle keep-alive is 10 seconds,
+capped at 30 seconds by the client; these are not deadlines for active requests.
+Existing request timeouts and cancellation still apply. The transport does not
+replay failed writes automatically. This is a proxy workaround, not a diagnosis
+of every timeout or of failures from the separate `gh` process.

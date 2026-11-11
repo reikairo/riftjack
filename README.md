@@ -73,6 +73,7 @@ Edit `.env` and set:
 | Setting | Value |
 | --- | --- |
 | `MATRIX_HOMESERVER` | Your server’s HTTPS URL. |
+| `MATRIX_HTTP_VERSION` | `auto` (default), or `1.1` to disable HTTP/2 for Matrix requests. Restart after changing it. |
 | `MATRIX_OWNER_ID` | Your full Matrix ID, such as `@you:example.org`. |
 | `SYNAPSE_ADMIN_TOKEN` | The provisioning administrator’s token. Alternatively use `SYNAPSE_REGISTRATION_SHARED_SECRET`. |
 | `RIFTJACK_WORKSPACE` | Default local working directory; also used for attachment storage. |

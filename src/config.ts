@@ -5,6 +5,7 @@ import { loadTunnelConfig } from './ssh-tunnel.js';
 import { loadFetchConfig } from './fetch.js';
 import { optionalAudioConfig } from './audio-transcription.js';
 import { codexNetworkDomains } from './codex-network.js';
+import type { MatrixHttpVersion } from './matrix-transport.js';
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const required = (name: string) => {
@@ -13,6 +14,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     return value;
   };
   const homeserver = new URL(required('MATRIX_HOMESERVER'));
+  const matrixHttpVersion = env.MATRIX_HTTP_VERSION?.trim() || 'auto';
+  if (matrixHttpVersion !== 'auto' && matrixHttpVersion !== '1.1') throw new Error('MATRIX_HTTP_VERSION must be auto or 1.1.');
   if (homeserver.protocol !== 'https:' || homeserver.username || homeserver.password || homeserver.search || homeserver.hash) {
     throw new Error('MATRIX_HOMESERVER must be an HTTPS URL without credentials, query, or fragment.');
   }
@@ -71,6 +74,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     workerInitiativeIntervalMs,
     githubSubscriptionsFile: env.GITHUB_SUBSCRIPTIONS_CONFIG?.trim() || undefined,
     homeserver: homeserver.toString().replace(/\/$/, ''),
+    matrixHttpVersion: matrixHttpVersion as MatrixHttpVersion,
     adminUrl: adminUrl.toString().replace(/\/$/, ''),
     sshTunnel: loadTunnelConfig(env, adminUrl),
     owner,
