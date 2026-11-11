@@ -111,6 +111,7 @@ account, model or organization restrictions may prevent auto mode from starting.
 | `MAX_MEDIA_BYTES` | Integer 1–536870912 bytes | `536870912` (512 MiB) |
 | `MEDIA_UPLOAD_TIMEOUT_SECONDS` | 1–86400 seconds, representable as whole milliseconds | `1800` |
 | `WORKER_PORT` | Integer `0` (disabled), or listening port 1–65535, e.g. `8788`; loopback only | `0` |
+| `WORKER_INITIATIVE_INTERVAL_SECONDS` | `0` disables worker-created background turns; integer 60–86400 enables them with this minimum interval per bot, and at most one pending initiative per bot | `0` |
 
 Do not share administrator credentials with agents. See [setup](setup.md),
 [attachments](chat.md) and [external workers](grok.md) for the corresponding behavior.

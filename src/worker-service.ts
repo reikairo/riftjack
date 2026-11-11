@@ -5,6 +5,7 @@ import { WorkerError, WorkerQueue, type WorkerTask, type WorkerFile } from './wo
 import { readOutgoing, safeName, type IncomingAttachment } from './media.js';
 
 export type WorkerTransport = {
+  initiative?: { intervalMs: number; prepare: (source: WorkerTask, text: string, eventId: string) => WorkerTask };
   allowed: (task: WorkerTask) => Promise<boolean>;
   receive: (task: WorkerTask) => Promise<IncomingAttachment | undefined>;
   transcribe?: (file: IncomingAttachment, signal: AbortSignal) => Promise<IncomingAttachment>;
@@ -28,12 +29,35 @@ export class WorkerService {
   stop() { this.stopped = true; this.controller.abort(); }
   private async allowed(task: WorkerTask) {
     if (this.stopped) throw new WorkerError(503, 'Connector is stopping.');
-    const allowed = await this.transport.allowed(task);
+    const allowed = (!task.initiative || !!this.transport.initiative) && await this.transport.allowed(task);
     if (this.stopped) throw new WorkerError(503, 'Connector is stopping.');
     if (!allowed) {
       this.queue.cancel(task.id);
       throw new WorkerError(403, 'Task access or room privacy changed.');
     }
+  }
+  async initiate(sourceId: string, input: unknown) {
+    const option = this.transport.initiative;
+    if (!option || !Number.isSafeInteger(option.intervalMs) || option.intervalMs < 60_000) {
+      throw new WorkerError(403, 'Worker initiative is disabled by the owner.');
+    }
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new WorkerError(400, 'Expected an initiative request.');
+    const { id, text } = input as { id?: unknown; text?: unknown };
+    if (Object.keys(input).some(key => !['id', 'text'].includes(key)) ||
+        typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(id) ||
+        typeof text !== 'string' || !text.trim() || text.length > 16_000) {
+      throw new WorkerError(400, 'Supply an initiative id (1-80 letters, digits, _ or -) and text (1-16000 characters).');
+    }
+    const source = this.queue.get(sourceId);
+    await this.allowed(source);
+    const eventId = '$worker-initiative-' + createHash('sha256').update(JSON.stringify([source.conversation, id])).digest('hex');
+    const task = option.prepare(source, text, eventId);
+    // The destination is the conversation's home, which may differ from the
+    // source task's shared room. Revalidate both after asynchronous checks.
+    if (!(await this.transport.allowed(task))) throw new WorkerError(403, 'Worker initiative destination is no longer allowed.');
+    await this.allowed(source);
+    const accepted = this.queue.enqueueInitiative(task, option.intervalMs);
+    return { id: accepted.id, status: accepted.status, conversation: accepted.conversation };
   }
   async claim() {
     const candidate = this.queue.candidate();

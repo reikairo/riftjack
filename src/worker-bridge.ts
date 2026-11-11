@@ -1,6 +1,6 @@
 import type { ConversationLinks } from './conversation-links.js';
 import { randomUUID } from 'node:crypto';
-import { AGENT_TRIGGER, sessionKey, type MatrixEvent } from './bridge.js';
+import { AGENT_TRIGGER, NOTICE, sessionKey, type MatrixEvent } from './bridge.js';
 import { isMedia } from './media.js';
 import type { State } from './state.js';
 import { WorkerError, type WorkerQueue, type WorkerTask } from './worker-queue.js';
@@ -88,6 +88,21 @@ export class WorkerBridge {
 // Snapshot configuration, not live Matrix state (which is checked on every use).
 export function workerBinding(links: ConversationLinks | undefined, bot: string, room: string): string {
   return JSON.stringify([links?.agent(bot) ?? null, links?.room(bot, room) ?? null]);
+}
+
+// Only a previous task can select a conversation. No caller-controlled owner,
+// room, thread or session, and no creation of a new session.
+export function workerInitiative(source: WorkerTask, text: string, eventId: string,
+  bot: string, links?: ConversationLinks): WorkerTask {
+  const key = source.context?.key ?? sessionKey(source.room, source.event);
+  const [room, sender, thread] = JSON.parse(key) as [string, string, string | null];
+  const event: MatrixEvent = { type: 'm.room.message', event_id: eventId, sender, origin_server_ts: Date.now(),
+    content: { msgtype: 'm.text', [NOTICE]: 'background',
+      body: 'The external worker requested this background turn in an existing conversation. This is not a new human message or approval.\n\nWorker note:\n' + text,
+      ...(thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: thread } }) } };
+  return { id: '', room, event, conversation: source.conversation, created: 0, status: 'queued', attempt: 0, initiative: true,
+    ...(source.context && { context: { ...source.context, room, type: 'private', agents: [],
+      binding: workerBinding(links, bot, room) } }) };
 }
 
 export async function workerTaskAllowed(task: WorkerTask, options: {

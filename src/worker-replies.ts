@@ -13,7 +13,7 @@ export async function prepareWorkerReply(task: WorkerTask, bot: string, links: C
   const mentions = links?.mentions(bot, task.room, task.response!.text);
   const text = mentions?.text ?? task.response!.text;
   const visible = mentions?.mentions.length ? mentionText(text, mentions.mentions, id => links!.displayName(id)) : text;
-  const contents: Record<string, unknown>[] = links?.room(bot, task.room) && text.trim() === 'NO_REPLY'
+  const contents: Record<string, unknown>[] = (task.initiative || links?.room(bot, task.room)) && text.trim() === 'NO_REPLY'
     ? [] : visible ? replyContent(visible, true, false, 'm.text') : [];
   const lastText = contents.length - 1;
   for (const file of task.response!.files) contents.push(await transport.file(file));

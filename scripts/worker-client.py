@@ -25,6 +25,10 @@ def main():
     parser.add_argument('--token-file', default=os.getenv('RIFTJACK_WORKER_TOKEN_FILE'))
     sub = parser.add_subparsers(dest='command', required=True)
     wait = sub.add_parser('wait'); wait.add_argument('--seconds', type=int, default=300)
+    initiate = sub.add_parser('initiate', help='Queue a background turn in an existing conversation (owner opt-in)')
+    initiate.add_argument('task', help='Saved task JSON from the existing conversation; no live lease required')
+    initiate.add_argument('--id', required=True, help='Stable request ID; reuse it on retries')
+    initiate.add_argument('--text-file', required=True, help='UTF-8 worker note for the background turn')
     for name in ['status', 'renew', 'release', 'reply', 'attachment', 'rooms']:
         cmd = sub.add_parser(name)
         cmd.add_argument('task', help='Task JSON file saved from wait')
@@ -63,7 +67,8 @@ def main():
         print(json.dumps({'timeout': True})); return
     task = json.loads(Path(args.task).read_text())
     task_id = urllib.parse.quote(task['id'], safe='')
-    body = {'lease': task['lease']}
+    body = ({'id': args.id, 'text': Path(args.text_file).read_text(encoding='utf-8')}
+            if args.command == 'initiate' else {'lease': task['lease']})
     if args.command == 'reply':
         body['text'] = Path(args.text_file).read_text() if args.text_file else ''
         body['files'] = [{'name': Path(p).name, 'data': base64.b64encode(Path(p).read_bytes()).decode()} for p in args.file]

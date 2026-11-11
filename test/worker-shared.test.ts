@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { WorkerBridge, workerTaskAllowed } from '../src/worker-bridge.js';
+import { WorkerBridge, workerTaskAllowed, workerInitiative } from '../src/worker-bridge.js';
 import { WorkerQueue } from '../src/worker-queue.js';
 import { prepareWorkerReply } from '../src/worker-replies.js';
 import { WorkerService } from '../src/worker-service.js';
@@ -30,6 +30,7 @@ function fixture(t: { after(fn: () => void): void }) {
   let receipts = new DeliveryReceipts(join(dir, 'receipts.json'));
   const authorize = async () => allowed;
   const service = () => new WorkerService(queue, join(dir, 'uploads'), 1000, {
+    initiative: { intervalMs: 60_000, prepare: (source, text, id) => workerInitiative(source, text, id, bot, links) },
     allowed: task => workerTaskAllowed(task, { bot, links, state, stopping: () => stopping, allowed: authorize }),
     receive: async () => undefined,
     prompt: task => links.prompt(bot, task.room, task.event, task.event.content?.body ?? ''),
@@ -64,6 +65,26 @@ function fixture(t: { after(fn: () => void): void }) {
       receipts = new DeliveryReceipts(join(dir, 'receipts.json')); worker = service(); inbox = bridge(); },
   };
 }
+
+test('worker initiative returns to the pinned home and can send to linked rooms without new peer credit', async t => {
+  const f = fixture(t);
+  await f.inbox.handle(room, event('$human', 'question'));
+  const source = (await f.worker.claim())!;
+  await f.worker.complete(source.id, source.lease!, { text: 'NO_REPLY' });
+  while (f.worker.busy) await new Promise(r => setTimeout(r, 1));
+  const credit = f.links.peerCredit(bot);
+  const receipt = await f.worker.initiate(source.id, { id: 'report', text: 'Share the result.' });
+  const task = (await f.worker.claim())!;
+  assert.equal(task.id, receipt.id); assert.equal(task.room, home);
+  assert.equal(task.conversation, source.conversation);
+  const context = JSON.parse(task.text.split('\n')[1]);
+  assert.equal(context.author, 'connector'); assert.equal(context.trigger, 'background');
+  assert.equal(f.links.peerCredit(bot), credit);
+  await f.worker.rooms(task.id, task.lease!, { action: 'send', room, id: 'result', text: 'The work is complete.' });
+  assert.equal(f.sent, 1);
+  f.deny();
+  await assert.rejects(f.worker.rooms(task.id, task.lease!, { action: 'send', room, id: 'late', text: 'late' }), /privacy changed/);
+});
 
 test('Grok uses its pinned existing conversation across rooms, with durable contextual claims', async t => {
   const f = fixture(t);

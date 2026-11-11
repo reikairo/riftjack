@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { WorkerQueue } from '../../src/worker-queue.js';
 import { WorkerService } from '../../src/worker-service.js';
 import { WorkerServer } from '../../src/worker-server.js';
-import { WorkerBridge } from '../../src/worker-bridge.js';
+import { WorkerBridge, workerInitiative, workerTaskAllowed } from '../../src/worker-bridge.js';
 import { State } from '../../src/state.js';
 
 const event = (id = '$one', body = 'hello') => ({ type: 'm.room.message', event_id: id, sender: '@alice:test', origin_server_ts: 1000, content: { msgtype: 'm.text', body } });
@@ -18,6 +18,58 @@ function directory(t: { after(fn: () => void): void }) {
   t.after(() => rmSync(dir, { recursive: true, force: true })); return dir;
 }
 const idle = async (service: WorkerService) => { while (service.busy) await new Promise(resolve => setTimeout(resolve, 1)); };
+
+test('Python client can initiate from a finished task without a lease, with per-bot HTTP authorization', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const state = new State(join(dir, 'state.json')), bot = '@grok:test';
+  const service = new WorkerService(queue, join(dir, 'files'), 100, {
+    initiative: { intervalMs: 60_000, prepare: (source, text, id) => workerInitiative(source, text, id, bot) },
+    allowed: task => workerTaskAllowed(task, { bot, state, stopping: () => false, allowed: async () => true }),
+    receive: async () => undefined, prepare: async () => [], send: async () => {}, report: () => {},
+  });
+  const bridge = new WorkerBridge({ botId: bot, state, queue, service, authorized: () => true,
+    privateRoom: async () => true, reply: async () => {} });
+  await bridge.handle('!home:test', event('$source'));
+  const source = (await service.claim())!;
+  await service.complete(source.id, source.lease!, { text: 'Done.' }); await idle(service);
+  const server = new WorkerServer(); server.add(bot, 'a'.repeat(43), service);
+  const otherQueue = new WorkerQueue(join(dir, 'other.sqlite'));
+  const other = new WorkerService(otherQueue, join(dir, 'other'), 100, {
+    initiative: { intervalMs: 60_000, prepare: (s, text, id) => workerInitiative(s, text, id, '@other:test') },
+    allowed: async () => true, receive: async () => undefined, prepare: async () => [], send: async () => {}, report: () => {},
+  });
+  server.add('@other:test', 'b'.repeat(43), other);
+  const port = await server.start(0);
+  t.after(async () => { service.stop(); other.stop(); await server.stop(); queue.close(); otherQueue.close(); });
+  const base = `http://127.0.0.1:${port}/v1/bots/%40grok%3Atest/tasks/${source.id}/initiate`;
+  const post = (url: string, token: string, body: unknown, origin?: string) => fetch(url, {
+    method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(origin && { Origin: origin }) },
+    body: JSON.stringify(body),
+  });
+  const request = { id: 'note', text: 'Work completed.' };
+  assert.equal((await post(base, 'b'.repeat(43), request)).status, 401);
+  assert.equal((await post(base.replace('grok', 'other'), 'b'.repeat(43), request)).status, 404);
+  assert.equal((await post(base, 'a'.repeat(43), request, 'https://example.org')).status, 403);
+  assert.equal((await post(base, 'a'.repeat(43), { ...request, room: '!other:test' })).status, 400);
+  const tokenFile = join(dir, 'token'), sourceFile = join(dir, 'source.json'), noteFile = join(dir, 'note.txt');
+  writeFileSync(tokenFile, 'a'.repeat(43), { mode: 0o600 });
+  writeFileSync(sourceFile, JSON.stringify({ id: source.id })); // No lease is required.
+  writeFileSync(noteFile, 'A durable background note.');
+  const cli = (...args: string[]) => promisify(execFile)('python3', [fileURLToPath(new URL('../../scripts/worker-client.py', import.meta.url)),
+    '--url', `http://127.0.0.1:${port}`, '--bot', bot, '--token-file', tokenFile, ...args]);
+  const receipt = JSON.parse((await cli('initiate', sourceFile, '--id', 'cli-note', '--text-file', noteFile)).stdout);
+  const retry = JSON.parse((await cli('initiate', sourceFile, '--id', 'cli-note', '--text-file', noteFile)).stdout);
+  assert.equal(receipt.id, retry.id); assert.equal(receipt.status, 'queued');
+  assert.equal((await post(base, 'a'.repeat(43), request)).status, 429);
+  const task = JSON.parse((await cli('wait', '--seconds', '1')).stdout);
+  assert.equal(task.id, receipt.id); assert.equal(task.conversation, source.conversation);
+  assert.match(task.text, /not a new human message or approval/);
+  assert.match(task.text, /A durable background note/);
+  assert.equal((await fetch(base.replace('/initiate', '/rooms').replace(source.id, task.id), {
+    method: 'POST', headers: { Authorization: 'Bearer ' + 'a'.repeat(43) },
+    body: JSON.stringify({ request: { action: 'list' } }),
+  })).status, 400);
+});
 
 test('worker HTTP API authenticates per bot, supports long polling, and validates replies', async t => {
   const dir = realpathSync(directory(t)), queue = new WorkerQueue(join(dir, 'queue.sqlite'));

@@ -83,6 +83,44 @@ breaks, retry the **same** reply with the saved task and lease. A different repl
 to an already completed task is rejected. Riftjack persists the encrypted events
 and reuses their Matrix transaction IDs across restarts, avoiding duplicate sends.
 
+## Start a background turn
+
+The instance owner can set `WORKER_INITIATIVE_INTERVAL_SECONDS=300` and restart
+the connector to allow external workers to request their own background turns.
+The default is `0` (disabled); enabled values are 60–86400 seconds. This applies
+to all external worker bots on that instance, with a separate cooldown for each
+bot and at most one pending initiative per bot.
+
+Keep a task JSON file from the conversation. Its lease may have expired or its
+reply may already be delivered. With an updated copy of the Python client:
+
+```sh
+python3 worker-client.py initiate previous-task.json --id report-2026-01-15 --text-file note.txt
+python3 worker-client.py wait --seconds 20 > task.json
+# Inspect and handle the task that wait actually returns, then renew/reply as usual.
+```
+
+`initiate` queues work; it does not claim a lease, launch the model or send a
+Matrix message. Earlier queued tasks retain their order. A scheduler or a running
+worker must perform the subsequent wait. Use the same request ID and text after
+an uncertain response: the same conversation/request ID returns the original
+task, even across restarts. Changed text returns 409. A cancelled initiative
+stays cancelled on retry; a new intention needs a new ID after the cooldown.
+
+The previous task selects an existing conversation, never an arbitrary recipient
+or a new session. For a linked conversation the initiative starts in its home DM,
+including its pinned thread. The claimed prompt identifies the note as worker
+initiative, not a human message or approval. It does not replenish peer credit.
+During its lease the worker can use `rooms send` for authorized linked rooms and
+finish with `reply --text-file` containing `NO_REPLY` if no DM reply is needed.
+
+Current access, room privacy and session bindings are checked again at initiation,
+claim and delivery. Reset/relink invalidates the old source. Disabling initiative
+also prevents outstanding initiative tasks from running or delivering replies.
+The cooldown and pending-task limit survive restart; 429 means wait for the
+cooldown, and 409 may mean an earlier initiative is still pending. This does not
+replace lease renewal during long work or provide persistent model context.
+
 ## Files and chat controls
 
 To download a task's attachment:
@@ -197,13 +235,14 @@ rejected. No endpoint permits choosing an arbitrary Matrix destination.
 | `GET /{id}` | Read task status. |
 | `POST /{id}/renew` | Extend the lease. JSON: `{lease}`. |
 | `POST /{id}/release` | Return the task to the queue. JSON: `{lease}`. |
+| `POST /{id}/initiate` | Queue an owner-enabled background turn using this existing task's conversation. JSON: `{id, text}`; request ID is 1–80 ASCII letters, digits, underscores or hyphens, note is 1–16000 characters. No lease required. |
 | `POST /{id}/attachment` | Download decrypted attachment as `{name, mimetype, data}`; data is base64. JSON: `{lease}`. |
 | `POST /{id}/rooms` | `{lease, request}` for the linked-room operations above. |
 | `POST /{id}/reply` | Save `{lease, text, files: [{name, data}]}`; file data is base64. |
 
 Status codes: 401 invalid credentials, 403 lost access/room eligibility,
 404 unknown task, 409 stale lease or conflicting reply, 413 excessive size,
-503 temporary service failure. Recheck status after uncertain responses.
+429 initiative cooldown, 503 temporary service failure. Recheck status after uncertain responses.
 
 The inbox lives in `DATA_DIR/bots/<bot hash>/worker/queue.sqlite`; the token and
 reply uploads are alongside it. Treat this directory as private conversation

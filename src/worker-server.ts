@@ -29,7 +29,7 @@ export class WorkerServer {
     try {
       if (request.headers.origin) throw new WorkerError(403, 'Browser requests are not supported.');
       const url = new URL(request.url || '/', 'http://localhost');
-      const match = /^\/v1\/bots\/([^/]+)\/(tasks)(?:\/([a-f0-9-]{36})(?:\/(renew|release|reply|attachment|rooms))?)?$/.exec(url.pathname);
+      const match = /^\/v1\/bots\/([^/]+)\/(tasks)(?:\/([a-f0-9-]{36})(?:\/(renew|release|reply|attachment|rooms|initiate))?)?$/.exec(url.pathname);
       const selected = match && this.bots.get(decodeURIComponent(match[1]));
       const bearer = request.headers.authorization?.replace(/^Bearer /, '') || '';
       if (!selected || Buffer.byteLength(bearer) !== Buffer.byteLength(selected.token) || !timingSafeEqual(Buffer.from(bearer), Buffer.from(selected.token))) throw new WorkerError(401, 'Invalid bot credentials.');
@@ -54,7 +54,7 @@ export class WorkerServer {
       }
       if (request.method === 'GET' && id && !action) { send(200, await service.status(id)); return; }
       if (request.method !== 'POST' || !id || !action) throw new WorkerError(404, 'Unknown worker endpoint.');
-      const limit = Math.ceil(service.maxBytes * 4 / 3) + 300_000;
+      const limit = action === 'initiate' ? 100_000 : Math.ceil(service.maxBytes * 4 / 3) + 300_000;
       let size = 0; const chunks: Buffer[] = [];
       for await (const chunk of request) {
         size += chunk.length;
@@ -64,6 +64,7 @@ export class WorkerServer {
       let body;
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
       catch { throw new WorkerError(400, 'Expected JSON.'); }
+      if (action === 'initiate') { send(200, await service.initiate(id, body)); return; }
       if (!body || typeof body.lease !== 'string') throw new WorkerError(400, 'Task lease is required.');
       const result = action === 'renew' ? await service.renew(id, body.lease)
         : action === 'release' ? await service.release(id, body.lease)

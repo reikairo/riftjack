@@ -18,6 +18,7 @@ export type WorkerTask = {
   attachment?: IncomingAttachment;
   context?: { room: string; type: 'private' | 'shared'; agents: string[]; key: string; session: string; binding: string };
   prompt?: string; roomOperations?: string[];
+  initiative?: boolean;
 };
 
 // One database per bot; only the connector opens it. A committed enqueue precedes
@@ -44,12 +45,31 @@ export class WorkerQueue {
     if (!row) throw new WorkerError(404, 'Task not found.');
     return JSON.parse(row.body as string);
   }
-  enqueue(room: string, event: MatrixEvent, conversation: string, control = false, context?: WorkerTask['context']): WorkerTask {
+  enqueue(room: string, event: MatrixEvent, conversation: string, control = false, context?: WorkerTask['context'], initiative = false): WorkerTask {
     const existing = this.db.prepare('SELECT body FROM jobs WHERE event_id = ?').get(event.event_id!);
     if (existing) return JSON.parse(existing.body as string);
-    const task: WorkerTask = { id: randomUUID(), room, event, conversation, created: this.now(), status: control ? 'control' : 'queued', attempt: 0, ...(context && { context }) };
+    const task: WorkerTask = { id: randomUUID(), room, event, conversation, created: this.now(), status: control ? 'control' : 'queued', attempt: 0, ...(context && { context }), ...(initiative && { initiative: true }) };
     this.db.prepare('INSERT INTO jobs VALUES (?, ?, ?, ?)').run(task.id, event.event_id!, task.status, JSON.stringify(task));
     return task;
+  }
+  enqueueInitiative(task: WorkerTask, intervalMs: number): WorkerTask {
+    // No await between deduplication, limits and insertion. The marker and the
+    // task are persisted together, so restart cannot lose the cooldown.
+    const row = this.db.prepare('SELECT body FROM jobs WHERE event_id = ?').get(task.event.event_id!);
+    if (row) {
+      const old: WorkerTask = JSON.parse(row.body as string);
+      if (!old.initiative || old.conversation !== task.conversation || old.room !== task.room ||
+          old.event.content?.body !== task.event.content?.body) throw new WorkerError(409, 'Initiative ID already used with different content.');
+      return old;
+    }
+    const last = this.db.prepare("SELECT body FROM jobs WHERE json_extract(body, '$.initiative') = 1 ORDER BY rowid DESC LIMIT 1").get();
+    if (last && this.now() - (JSON.parse(last.body as string) as WorkerTask).created < intervalMs) {
+      throw new WorkerError(429, 'Worker initiative cooldown is still active.');
+    }
+    if (this.db.prepare("SELECT id FROM jobs WHERE json_extract(body, '$.initiative') = 1 AND status IN ('queued', 'leased', 'replied') LIMIT 1").get()) {
+      throw new WorkerError(409, 'A worker initiative is already pending.');
+    }
+    return this.enqueue(task.room, task.event, task.conversation, false, task.context, true);
   }
   roomOperation(id: string, lease: string, operation: unknown) {
     if (typeof operation !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(operation)) throw new WorkerError(400, 'Invalid room operation id.');

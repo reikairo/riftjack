@@ -61,8 +61,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   }
   const workerPort = Number(env.WORKER_PORT || '0');
   if (!Number.isInteger(workerPort) || workerPort < 0 || workerPort > 65535) throw new Error('WORKER_PORT must be 0 (disabled) or a port from 1 to 65535.');
+  const workerInitiativeIntervalMs = Number(env.WORKER_INITIATIVE_INTERVAL_SECONDS || '0') * 1000;
+  if (!Number.isSafeInteger(workerInitiativeIntervalMs / 1000) || (workerInitiativeIntervalMs !== 0 &&
+      (workerInitiativeIntervalMs < 60_000 || workerInitiativeIntervalMs > 86_400_000))) {
+    throw new Error('WORKER_INITIATIVE_INTERVAL_SECONDS must be 0 (disabled) or between 60 and 86400.');
+  }
   return {
     workerPort,
+    workerInitiativeIntervalMs,
     githubSubscriptionsFile: env.GITHUB_SUBSCRIPTIONS_CONFIG?.trim() || undefined,
     homeserver: homeserver.toString().replace(/\/$/, ''),
     adminUrl: adminUrl.toString().replace(/\/$/, ''),

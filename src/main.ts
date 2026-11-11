@@ -27,7 +27,7 @@ import { loadConfig, type Config } from './config.js';
 import { State } from './state.js';
 import { TurnReaction } from './turn-reaction.js';
 import { prepareWorkerReply } from './worker-replies.js';
-import { WorkerBridge, workerTaskAllowed } from './worker-bridge.js';
+import { WorkerBridge, workerTaskAllowed, workerInitiative } from './worker-bridge.js';
 import { WorkerMatrixClient } from './worker-matrix-client.js';
 import { MessageMatrixClient } from './message-matrix-client.js';
 import { RateLimitedMatrixClient } from './rate-limited-matrix-client.js';
@@ -321,6 +321,8 @@ async function main() {
         bot: account.userId, links: workerLinks, state, stopping: () => stopping || restart.pending, allowed: privateRoom,
       });
       const service = new WorkerService(queue, join(workerDir, 'uploads'), config.maxMediaBytes, {
+        initiative: config.workerInitiativeIntervalMs ? { intervalMs: config.workerInitiativeIntervalMs,
+          prepare: (source, text, id) => workerInitiative(source, text, id, account.userId, workerLinks) } : undefined,
         transcribe: (file, signal) => audio ? audio.transcribe(file, signal) : Promise.resolve(file),
         allowed: workerAllowed,
         prompt: workerLinks ? task => workerLinks.prompt(account.userId, task.room, task.event, task.event.content?.body ?? '') : undefined,
