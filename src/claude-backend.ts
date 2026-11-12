@@ -5,6 +5,7 @@ import { startDrawioMcp, DRAWIO_SERVER, DRAWIO_TOOL } from './drawio-mcp.js';
 import { startGitHubMcp, GITHUB_SERVER, GITHUB_TOOL } from './github-mcp.js';
 import { routingInstructions } from './routing-instructions.js';
 import { claudeAuthenticationFailure } from './auth-diagnostics.js';
+import { ClaudeDiagnostics } from './claude-diagnostics.js';
 import { compactionNotices } from './compaction-notices.js';
 import { contextCheckpoints, checkpointDelivery, checkpointInstructions, claudeCheckpointHooks } from './context-checkpoints.js';
 import { startBackgroundMcp, BACKGROUND_SERVER, BACKGROUND_TOOL } from './background-mcp.js';
@@ -63,10 +64,12 @@ type ClaudeInput = { write: (message: object) => void; end: () => void };
 // keepOpen leaves stdin open after input so control responses and live updates
 // can be written; consume must call end(). started receives the input at once.
 function runClaude(config: Config, args: string[], signal: AbortSignal, consume: (line: string, stdin: ClaudeInput) => void, input?: string, keepOpen = false,
-  started?: (stdin: ClaudeInput) => void, allowedExitCodes: readonly number[] = [0]): Promise<number> {
+  started?: (stdin: ClaudeInput) => void, allowedExitCodes: readonly number[] = [0]): Promise<{ code: number; diagnostic: string }> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(config.claudePath, args, { cwd: config.workspace, env: claudeEnvironment(), stdio: 'pipe' });
+    const operation = args[0] === 'auth' ? 'auth' : args.includes('--help') ? 'help' : args[1] === '/usage' ? 'usage' : 'task';
+    const diagnostic = new ClaudeDiagnostics(config.dataDir, operation, child.pid);
     let failure: unknown;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const stop = () => {
@@ -86,19 +89,23 @@ function runClaude(config: Config, args: string[], signal: AbortSignal, consume:
       write: message => { if (!child.stdin.writableEnded) child.stdin.write(JSON.stringify(message) + '\n'); },
       end: () => { if (!child.stdin.writableEnded) child.stdin.end(); },
     };
-    // Claude diagnostics can contain prompts, paths and auth data; do not forward raw stderr.
-    child.stderr.resume();
+    // Raw diagnostics stay in a bounded owner-only host journal, never in chat.
+    child.stderr.on('data', (chunk: Buffer) => diagnostic.write(chunk));
     createInterface({ input: child.stdout }).on('line', line => {
       if (failure) return;
       try { consume(line, stdin); } catch (error) { failure = error; stop(); }
     });
     child.once('close', (code, killed) => {
+      diagnostic.finish(code, killed);
       signal.removeEventListener('abort', abort);
       if (killTimer) clearTimeout(killTimer);
       if (signal.aborted) reject(signal.reason);
-      else if (failure) reject(failure);
-      else if (code === null || !allowedExitCodes.includes(code) || killed) reject(new PublicError('Claude Code exited unsuccessfully. Check its login, installed version and permissions on the host.', { cause: { code, signal: killed } }));
-      else resolve(code);
+      else if (failure) {
+        if (failure instanceof PublicError) failure.message += diagnostic.hint();
+        reject(failure);
+      }
+      else if (code === null || !allowedExitCodes.includes(code) || killed) reject(new PublicError('Claude Code exited unsuccessfully. Check its login, installed version and permissions on the host.' + diagnostic.hint(), { cause: { code, signal: killed } }));
+      else resolve({ code, diagnostic: diagnostic.hint() });
     });
     if (signal.aborted) abort();
     if (keepOpen) child.stdin.write(input ?? ''); else child.stdin.end(input);
@@ -106,13 +113,13 @@ function runClaude(config: Config, args: string[], signal: AbortSignal, consume:
   });
 }
 
-async function capture(config: Config, args: string[], signal: AbortSignal, allowedExitCodes: readonly number[] = [0]): Promise<{ output: string; code: number }> {
+async function capture(config: Config, args: string[], signal: AbortSignal, allowedExitCodes: readonly number[] = [0]): Promise<{ output: string; code: number; diagnostic: string }> {
   let output = '';
-  const code = await runClaude(config, args, signal, line => {
+  const result = await runClaude(config, args, signal, line => {
     output += line + '\n';
     if (Buffer.byteLength(output) > 256 * 1024) throw new PublicError('Unexpectedly large Claude Code diagnostic response.');
   }, undefined, false, undefined, allowedExitCodes);
-  return { output, code };
+  return { output, ...result };
 }
 
 const CLAUDE_CHECK_TIMEOUT_MS = 60_000;
@@ -149,14 +156,14 @@ export async function checkClaude(config: Config, signal = new AbortController()
   let status: { loggedIn?: boolean; authMethod?: string };
   try { status = JSON.parse(auth.output); }
   catch (error) {
-    if (error instanceof SyntaxError) throw new PublicError('Claude Code did not return JSON authentication status. Update it and run claude auth login on the host.');
+    if (error instanceof SyntaxError) throw new PublicError('Claude Code did not return JSON authentication status. Update it and run claude auth login on the host.' + auth.diagnostic);
     throw error;
   }
   if (auth.code !== 0 && status?.loggedIn !== false) {
-    throw new PublicError('Claude Code authentication check failed. Check its login, installed version and permissions on the host.', { cause: { code: auth.code } });
+    throw new PublicError('Claude Code authentication check failed. Check its login, installed version and permissions on the host.' + auth.diagnostic, { cause: { code: auth.code } });
   }
   if (status?.loggedIn !== true || status.authMethod !== 'claude.ai') {
-    throw new PublicError('Sign in to Claude Code with your Claude account on the host (claude auth login). This connector does not use Anthropic API keys.');
+    throw new PublicError('Sign in to Claude Code with your Claude account on the host (claude auth login). This connector does not use Anthropic API keys.' + auth.diagnostic);
   }
   return { replay: help.includes('--replay-user-messages'), systemPromptSnapshot: help.includes('--system-prompt-snapshot'), hookEvents: help.includes('--include-hook-events') };
 }

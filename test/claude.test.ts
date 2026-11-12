@@ -15,7 +15,7 @@ import type { BackendReply } from '../src/media.js';
 import { configForWorkspace } from '../src/workspace.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
 
-function setup(t: { after(fn: () => void): void }, options: { auth?: string; authExit?: number; malformed?: boolean; legacy?: boolean; replay?: boolean; snapshot?: boolean; hangCheck?: string; auto?: boolean } = {}) {
+function setup(t: { after(fn: () => void): void }, options: { auth?: string; authExit?: number; malformed?: boolean; legacy?: boolean; replay?: boolean; snapshot?: boolean; hangCheck?: string; auto?: boolean; stderr?: string } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matrix-claude-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const executable = join(dir, 'claude.cjs');
@@ -23,6 +23,7 @@ function setup(t: { after(fn: () => void): void }, options: { auth?: string; aut
 const fs = require('node:fs');
 const path = require('node:path');
 const args = process.argv.slice(2);
+process.stderr.write(${JSON.stringify(options.stderr ?? '')});
 const record = value => fs.appendFileSync(__filename + '.calls', JSON.stringify(value) + '\\n');
 record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
 if (args[0] === ${JSON.stringify(options.hangCheck)}) {
@@ -185,7 +186,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
 });
 process.on('SIGTERM', () => { record({ stopped: true }); process.exit(0); });
 `, { mode: 0o700 });
-  const config = loadConfig({ MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: dir, CLAUDE_PATH: executable });
+  const config = loadConfig({ MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@owner:test', RIFTJACK_WORKSPACE: dir, DATA_DIR: join(dir, 'data'), CLAUDE_PATH: executable });
   const state = new State(join(dir, 'state.json'));
   const backend = createBackend(config, state);
   // The fixture writes concurrently; only newline-terminated records are complete.
@@ -228,6 +229,34 @@ async function until(check: () => boolean): Promise<void> {
 test('Claude readiness checks options and login without a model request', async t => {
   const f = setup(t);
   await checkClaude(f.config);
+  assert.deepEqual(f.calls().map(call => call.args), [['--help'], ['auth', 'status', '--json']]);
+});
+
+test('failed Claude auth keeps stderr on the host and exposes only its diagnostic reference', async t => {
+  const privateText = 'Keychain is locked; Authorization: Bearer fixture-secret\n';
+  const f = setup(t, { auth: 'none', stderr: privateText });
+  await assert.rejects(checkClaude(f.config), (error: any) => {
+    assert.match(error.message, /Sign in to Claude Code/);
+    assert.match(error.message, /Local Claude diagnostic ID:/);
+    assert.doesNotMatch(error.message, /fixture-secret|Keychain is locked/);
+    const records = readFileSync(join(f.config.dataDir, 'diagnostics/claude/stderr.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    const run = records.find(r => r.operation === 'auth').run;
+    assert.ok(error.message.includes(run));
+    assert.equal(records.filter(r => r.run === run && r.event === 'stderr').map(r => r.text).join(''), privateText);
+    assert.equal(records.find(r => r.run === run && r.event === 'exit').code, 1);
+    return true;
+  });
+});
+
+test('unavailable Claude journal does not stop execution or claim the diagnostic was saved', async t => {
+  const f = setup(t, { auth: 'none', stderr: 'private fixture' });
+  mkdirSync(f.config.dataDir); writeFileSync(join(f.config.dataDir, 'diagnostics'), 'not a directory');
+  await assert.rejects(checkClaude(f.config), (error: any) => {
+    assert.match(error.message, /Sign in to Claude Code/);
+    assert.match(error.message, /diagnostics could not be saved/);
+    assert.doesNotMatch(error.message, /private fixture|diagnostic ID/);
+    return true;
+  });
   assert.deepEqual(f.calls().map(call => call.args), [['--help'], ['auth', 'status', '--json']]);
 });
 

@@ -33,6 +33,25 @@ Claude supports the existing encrypted images, files and audio transport, `!rese
 
 Both engines use their bot’s configured workspace, defaulting to `RIFTJACK_WORKSPACE`. Bots can run tasks in parallel, including in the same directory; there is no shared execution lock. Their session IDs are stored separately as `claude` and `codex`; existing Codex sessions and bot credentials need no migration. The owner and globally allowed accounts can create Claude bots using the host’s Claude login. Access granted only to a specific bot does not include bot creation.
 
+## Local CLI diagnostics
+
+Riftjack saves Claude's raw stderr and process start/exit metadata in
+`DATA_DIR/diagnostics/claude/stderr.jsonl`. Each invocation has a diagnostic ID;
+authentication and process-failure messages include that ID and the host log
+location, never stderr contents. Prompts, command arguments, environment values
+and stdout are not added to this journal. However, Claude itself may write
+sensitive information to stderr, so treat these files as private credentials
+and conversation data when copying or backing them up.
+
+The directory is owner-only (`0700`), files are `0600`, and rotation retains the
+current file plus three archives (`.1` through `.3`), each at most 1 MiB. The
+oldest records expire as new data arrives, including during long-running tasks.
+Concurrent Claude processes share the journal and are distinguished by ID.
+Logging failures do not stop Claude; an affected failure message reports that
+local diagnostics could not be saved. No log contents are automatically posted
+to Matrix, even when a task fails. This journal does not enable Claude debug
+mode or change its login, Keychain access, or permissions.
+
 ## Permissions
 
 By default, Claude runs with `acceptEdits`, its own Bash sandbox enabled, and unsandboxed retries available with `CLAUDE_APPROVAL_POLICY=on-request`. Ordinary commands stay sandboxed. If a required command fails because of the sandbox, Claude can request `dangerouslyDisableSandbox: true`; every unsandboxed Bash command requires one-time confirmation, even if an existing rule allows the command. Riftjack supplies a blanket Bash ask rule, which sandboxed auto-allow skips but unsandboxed execution must obey. This also covers commands excluded from the sandbox. Available built-in tools are Read, Glob, Grep, Edit, Write and Bash.
