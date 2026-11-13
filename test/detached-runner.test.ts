@@ -4,6 +4,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { once } from 'node:events';
 import { DetachedRuns } from '../src/detached-runs.js';
 import { processes, selectProcessTable } from '../scripts/detached-runner.mjs';
 
@@ -45,16 +46,31 @@ async function fixture(code: string, timeout = 10) {
   };
   return { workspace, dir, run, manager, status, launch, stop };
 }
+async function terminal(f: Awaited<ReturnType<typeof fixture>>) {
+  try {
+    return await until(() => { const s = f.status(); return s?.finished_at ? s : undefined; });
+  } catch (error) {
+    let output = '';
+    try { output = readFileSync(join(f.dir, 'output.log'), 'utf8').slice(-4096); } catch { /* Launch may have failed before output. */ }
+    throw new Error(`Runner did not finish. Last status: ${JSON.stringify(f.status())}; output: ${output}`, { cause: error });
+  }
+}
 test('detached command survives launch-parent termination and observer reconstruction', async t => {
   if (!canObserve()) return t.skip('This environment refuses ps and kern.proc.all; run this process test with one-time approval.');
-  const f = await fixture('console.log("started"); setTimeout(() => console.log("finished"), 1500)');
+  const f = await fixture('const fs=require("node:fs"); console.log("started"); const tick=setInterval(()=>{if(fs.existsSync("finish")){clearInterval(tick);console.log("finished");}},25)', 30);
   t.after(f.stop);
   const parent = spawn(process.execPath, ['-e', `const {spawnSync}=require('node:child_process'); spawnSync(${JSON.stringify(f.run.launch_argv[0])},${JSON.stringify(f.run.launch_argv.slice(1))}); setInterval(()=>{},1000);`], { stdio: 'ignore' });
   t.after(() => { parent.kill('SIGKILL'); });
+  const parentExited = once(parent, 'exit');
   await until(() => f.status()?.status === 'running'); parent.kill('SIGKILL');
+  await parentExited;
+  // Keep the command alive until its launcher is gone; no fixed-duration race
+  // against the process-table helper or the load of the surrounding test suite.
+  writeFileSync(join(f.workspace, 'finish'), '');
   const notices: any[] = [];
   const observer = new DetachedRuns(join(f.workspace, 'runs'), f.workspace, { notify: (...args) => { notices.push(args); } });
-  const final = await until(() => f.status()?.status === 'succeeded' && f.status());
+  const final = await terminal(f);
+  assert.equal(final.status, 'succeeded', JSON.stringify(final));
   assert.equal(final.exit_code, 0);
   observer.pump(() => true); observer.pump(() => true); assert.equal(notices.length, 1);
   assert.match(notices[0][2], /finished/);

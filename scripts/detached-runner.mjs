@@ -250,7 +250,10 @@ export async function superviseCommand(child, observer, spec, dir, state, persis
       const root = table.find(p => p.pid === child.pid);
       if (!state.child && root && root.ppid === process.pid) state.child = root;
       if (state.child) observed.set(state.child.pid, state.child);
-      const alive = track(table, observed);
+      // The async snapshot may predate the root's exit event. A reaped root is
+      // known dead even if that snapshot still lists it; retain its identity for
+      // descendant discovery, but do not mistake the root itself for a survivor.
+      const alive = track(table, observed).filter(p => !exited || p.pid !== child.pid);
       state.descendants = alive.slice(0, 256);
       if (alive.length > 256) { uncertain = true; stop('descendant_tracking_limit'); }
       if (exited && alive.length) stop('descendants_after_exit');
