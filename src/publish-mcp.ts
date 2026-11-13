@@ -1,3 +1,4 @@
+import { conversationSchema, splitToolConversation } from './tool-conversation.js';
 import { startToolMcp } from './tool-mcp.js';
 import { publishInput } from './publish.js';
 
@@ -9,9 +10,9 @@ export const publicationInstructions = '\nFor Git publication, call the Riftjack
 
 const tool = {
   name: 'prepare_publish',
-  description: 'Register a publication operation, return its ID, and deliver a complete HTML review to the current Matrix conversation. After human approval, publish exactly the reviewed commits and deliver the saved result in a background turn. Rebased branches require explicit approval of history replacement, with outgoing and removed history shown and an exact remote-tip lease. A branches package publishes exact SHAs with one approval and one atomic push; unsupported atomic push fails without fallback. The operation outlives this call and model turn; it has its own deadline. A pending receipt is not publication success. Respect human declines and cancellations. After a technical interruption, verify the destination and that no previous request remains active before preparing a fresh review with fresh human approval. Do not repeat a completed push; clarify unresolved state before retrying.',
+  description: 'Register a publication operation, return its ID, and deliver a complete HTML review to the current or explicitly selected linked Matrix conversation. After human approval, publish exactly the reviewed commits and deliver the saved result in a background turn. Rebased branches require explicit approval of history replacement, with outgoing and removed history shown and an exact remote-tip lease. A branches package publishes exact SHAs with one approval and one atomic push; unsupported atomic push fails without fallback. The operation outlives this call and model turn; it has its own deadline. A pending receipt is not publication success. Respect human declines and cancellations. After a technical interruption, verify the destination and that no previous request remains active before preparing a fresh review with fresh human approval. Do not repeat a completed push; clarify unresolved state before retrying.',
   inputSchema: { type: 'object', additionalProperties: false,
-    properties: { repository: { type: 'string', description: 'Git repository path within the bot workspace.' }, remote: { type: 'string', description: 'Named Git remote, for example origin.' }, branch: { type: 'string', description: 'Destination branch for current HEAD, for example main.' },
+    properties: { conversation: conversationSchema, repository: { type: 'string', description: 'Git repository path within the bot workspace.' }, remote: { type: 'string', description: 'Named Git remote, for example origin.' }, branch: { type: 'string', description: 'Destination branch for current HEAD, for example main.' },
       review_base: { type: 'object', additionalProperties: false, description: 'Optional published upstream base for rebases onto a fork with a stale default branch. Its remote URL and branch SHA are shown and rechecked before publication.', properties: { remote: { type: 'string' }, branch: { type: 'string' } }, required: ['remote', 'branch'] },
       branches: { type: 'array', minItems: 1, maxItems: 20, description: 'Atomic package of exact destination branch/commit pairs. Do not also supply branch.',
         items: { type: 'object', additionalProperties: false, properties: {
@@ -21,7 +22,11 @@ const tool = {
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 };
 export function startPublishMcp(publish: PublishAction, signal: AbortSignal) {
-  return startToolMcp(tool, (input, callSignal) => publish(publishInput(input), callSignal), signal, {
+  return startToolMcp(tool, (input, callSignal) => {
+    const selected = splitToolConversation(input);
+    const request = publishInput(selected.input);
+    return publish(selected.conversation ? { ...request, conversation: selected.conversation } : request, callSignal);
+  }, signal, {
     server: 'riftjack-publish',
     cancelled: 'Publication tool call cancelled or interrupted. A registered operation may still be pending or completed: inspect !status and its background result before resubmitting. Closing this call does not cancel connector-owned publication; the human can use !cancel. An uncertain push must be checked at the destination. Expired approval is never reused.',
     failed: 'Publication failed. Check the destination before attempting another reviewed request.',

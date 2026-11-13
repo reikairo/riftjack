@@ -1,3 +1,4 @@
+import { conversationInstructions } from './tool-conversation.js';
 import type { BackendHooks } from './bridge.js';
 import type { Config } from './config.js';
 import { backendCapabilities, type CodingBackend } from './backend-capabilities.js';
@@ -47,7 +48,7 @@ export async function startBackendTools(options: {
       await options.beforeAttachments?.(); s.throwIfAborted(); return hooks.sendAttachments!(files, s);
     }, hooks.deliveryReceipts) : undefined;
     const media = delivery ? await add(ATTACHMENT_SERVER, startAttachmentMcp(delivery.action, signal)) : undefined;
-    const instructions = (detached ? detachedInstructions : '') + (confirmation ? confirmationInstructions : '') +
+    const instructions = (rooms ? conversationInstructions : '') + (detached ? detachedInstructions : '') + (confirmation ? confirmationInstructions : '') +
       (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') +
       (rooms ? roomMessageInstructions : '') + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '') +
       (diagram ? drawioInstructions : '');

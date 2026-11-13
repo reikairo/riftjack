@@ -1,3 +1,4 @@
+import { conversationSchema } from './tool-conversation.js';
 import { randomUUID } from 'node:crypto';
 import { PublicError } from './errors.js';
 import { confirmationDetails } from './confirmation-format.js';
@@ -55,6 +56,7 @@ export function startConfirmationMcp(action: ToolAction, signal: AbortSignal) {
   return startToolMcp({ name: 'request_confirmation',
     description: 'Ask the human to approve or decline a concrete proposal using Matrix reactions. Returns a request_id immediately; the saved decision arrives in a background turn. action=status retrieves the full proposal and result. Executes nothing and does not replace sandbox or publication approvals. Cancellation and delivery failure are errors, never human refusals. Pending questions survive the model turn but expire on connector restart.',
     inputSchema: { type: 'object', additionalProperties: false, properties: {
+      conversation: conversationSchema,
       action: { type: 'string', enum: ['status'], description: 'Retrieve a saved decision by id, or list recent requests when id is omitted.' },
       id: { type: 'string' },
       question: { type: 'string', minLength: 1, maxLength: 4000, description: 'Concrete proposal to approve.' },

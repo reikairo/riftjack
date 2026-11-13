@@ -1,5 +1,51 @@
 # One agent across private and shared rooms
 
+## Using tools from either conversation
+
+A linked agent can manage its own tasks from its private chat or a linked shared
+room. `background_tasks`, `github_subscriptions`, `run_detached`,
+`request_confirmation` and `prepare_publish` accept an optional `conversation`
+selector on every operation. Available tools still depend on the backend and
+the installation's configuration. Discover allowed rooms with `room_messages`
+`action=list`.
+
+For example, from a shared room, list existing private timers with:
+
+```json
+{"action":"list","conversation":{"room":"!home:example.com"}}
+```
+
+Use the same selector with `action=update` and the existing timer ID to change
+its schedule, or `action=cancel` to cancel it. Updating needs the complete reminder
+specification. No replacement registration is needed. For a new private question:
+
+```json
+{"question":"Apply the prepared change?","conversation":{"room":"!home:example.com"}}
+```
+
+Omitting `conversation` keeps the calling room and thread. When selecting another
+room, omitting `thread` uses the configured home thread for the private chat, or
+the room timeline for a shared room. Selecting the current room preserves the
+current thread. Set `thread` to an exact thread root event ID, or `null` for the
+room timeline, to choose a different scope explicitly.
+
+The selected conversation owns new registrations, approval requests and result
+notifications, including after restart. Existing records keep their original
+room and thread: select that scope to read or manage them. This does not move
+records or reuse consent across proposals. Publication still requires its full
+review and human approval; detached launch approval still prepares a launch for
+the ordinary command tool and sandbox. `!status`, `!approve` and `!cancel` stay
+in the operation's conversation. The model turn, progress and final reply remain
+in the calling conversation, so private tool results must not be quoted into a
+shared reply without the human's authorization.
+
+Both rooms must belong to the same linked agent, owner and pinned session, and
+pass the current membership and privacy checks. Another agent's home and
+unlinked rooms are rejected. Session reset or access revocation does not grant
+access to old records. Unlinked agents use their current conversation as before.
+Workspace tools such as fetch and drawio do not need a conversation selector;
+`room_messages` already selects destinations for messages and attachments.
+
 ## Sending a message to a shared room
 
 Linked Codex and Claude agents have a `room_messages` MCP tool. With `action=list`
