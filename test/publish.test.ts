@@ -306,13 +306,13 @@ test('history known only to another remote still counts towards the limit', asyn
   await assert.rejects(f.prepare(), /100 outgoing and removed/);
 });
 
-test('a published reference changing after review requires fresh approval', async t => {
+test('an unrelated published reference changing after review does not invalidate approval', async t => {
   const f = setup(t);
   f.git('push', 'origin', f.base + ':refs/heads/known');
   const r = await f.prepare();
   f.git('push', 'origin', f.head + ':refs/heads/known');
-  await assert.rejects(pushReviewed(r, signal()), /Published reference changed/);
-  assert.equal(f.remoteHead(), f.base);
+  await pushReviewed(r, signal());
+  assert.equal(f.remoteHead(), f.head);
 });
 
 function forkRebase(t: { after(fn: () => void): void }, large = false) {
@@ -400,4 +400,37 @@ test('explicit upstream does not bypass the limit for new unpublished changes', 
   f.git('add', '.'); f.git('commit', '-m', 'Oversized new change');
   await assert.rejects(preparePublish(f.input, f.root, signal()), /exceeds 8 MiB/);
   assert.equal(f.tip(), f.head);
+});
+
+test('review does not download thousands of unrelated remote branches', async t => {
+  const f = setup(t);
+  // Create an object only in the bare remote, so downloading it is observable.
+  const unrelated = f.git('--git-dir=' + f.remote, 'commit-tree', f.git('rev-parse', f.base + '^{tree}'), '-m', 'Unrelated remote history');
+  const refs = Array.from({ length: 2062 }, (_, i) => `create refs/heads/unrelated-${i} ${unrelated}\n`).join('');
+  execFileSync('git', ['--git-dir=' + f.remote, 'update-ref', '--stdin'], { input: refs, stdio: ['pipe', 'pipe', 'pipe'] });
+  assert.throws(() => f.git('cat-file', '-e', unrelated));
+  const r = await f.prepare();
+  assert.deepEqual(r.commits, [f.head]);
+  assert.throws(() => f.git('cat-file', '-e', unrelated), 'Unrelated history must not be fetched');
+  assert.deepEqual(r.publishedReferences, [{ ref: 'refs/heads/main', head: f.base }]);
+  await pushReviewed(r, signal());
+  assert.equal(f.remoteHead(), f.head);
+});
+
+test('commits published on an unrelated branch retain their full review patches', async t => {
+  const f = setup(t);
+  f.git('push', 'origin', f.head + ':refs/heads/other-feature');
+  const r = await f.prepare();
+  assert.deepEqual(r.commits, [f.head]);
+  assert.deepEqual(r.publishedHistory, []);
+  assert.deepEqual(r.history.map(commit => commit.oid), [f.head]);
+});
+
+test('explicit review base ignores a changing destination default branch', async t => {
+  const f = forkRebase(t);
+  const r = await preparePublish(f.input, f.root, signal());
+  assert.deepEqual(r.publishedReferences, [{ ref: 'refs/heads/feature', head: f.head }]);
+  f.git('push', 'origin', f.head + ':refs/heads/main');
+  await pushReviewed(r, signal());
+  assert.equal(f.tip(), f.rebased);
 });

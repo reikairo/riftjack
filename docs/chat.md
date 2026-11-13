@@ -345,7 +345,10 @@ removed history. One confirmation approves the entire immutable package. Moving
 a local branch or changing the checkout afterwards does not alter the reviewed
 SHAs. Without approval, no branch is published.
 
-Before pushing, Riftjack rechecks the destination and published branch tips.
+Preparation fetches only the destination branches and the selected review base.
+Unrelated fork branches are not downloaded; commits known only through those
+branches still appear with their full patches in the review. Before pushing,
+Riftjack rechecks the destination and review-base tips.
 It then sends one `git push --atomic` with a separate exact remote-tip lease for
 each destination, including an absence lease for a new branch. A concurrent update
 or server rejection prevents partial publication. If the server does not support

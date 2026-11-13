@@ -157,3 +157,15 @@ for (const changed of [false, true]) test(`atomic package with explicit upstream
     assert.equal(f.tip('lower'), f.first); assert.equal(f.tip('upper'), f.second);
   }
 });
+
+test('batch siblings do not hide outgoing history and unrelated ref changes do not block publication', async t => {
+  const f = setup(t);
+  f.git('push', 'origin', f.first + ':refs/heads/upper', f.base + ':refs/heads/unrelated');
+  const r = await f.prepare();
+  assert.deepEqual(r.branches[0].commits, [f.first]);
+  assert.deepEqual(r.branches[1].commits, [f.second]);
+  f.git('push', 'origin', f.second + ':refs/heads/unrelated');
+  await pushReviewedBatch(r, signal());
+  assert.equal(f.tip('lower'), f.first);
+  assert.equal(f.tip('upper'), f.second);
+});

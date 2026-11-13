@@ -164,6 +164,12 @@ review size limits still apply to the actual changes; reports are never truncate
 
 The same optional `review_base` applies to every branch of an atomic package.
 Without it, the destination’s advertised default branch remains the review base.
+Preparation fetches only the destination branches and the selected review base,
+without changing local tracking refs. Other fork branches are not downloaded or
+used to omit commit patches, and changes to them do not invalidate approval.
+A commit published only on another feature branch is still reviewed in full and
+counts towards the limit. Each branch in an atomic package follows the same rule;
+publication on a sibling branch does not hide its incoming patches.
 The report-only CLI includes `upstreamReference` in its metadata.
 
 ## Atomic publication packages
