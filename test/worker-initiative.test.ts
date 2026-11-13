@@ -33,6 +33,39 @@ function fixture(t: { after(fn: () => void): void }) {
       state = new State(join(dir, 'state.json')); queue = new WorkerQueue(join(dir, 'queue.sqlite'), () => now, 100); service = make(); } };
 }
 
+test('worker restart notices target an existing session, survive restart and deduplicate', async t => {
+  const f = fixture(t);
+  await f.inbox().handle(home, event('$human'));
+  const source = (await f.service.claim())!; f.queue.cancel(source.id);
+  const session = f.state.session(sessionKey(home, event('$human'))).grok!;
+  await f.inbox().scheduleRestart('boot', home, owner, session, undefined, 'Revision and release notes');
+  await f.inbox().scheduleRestart('boot', home, owner, session, undefined, 'Revision and release notes');
+  f.restart();
+  const notice = (await f.service.claim())!;
+  assert.equal(f.queue.get(notice.id).event.content?.[NOTICE], 'restart');
+  assert.match(notice.text, /not a human message or approval/);
+  assert.match(notice.text, /Revision and release notes/);
+  assert.equal(notice.conversation, source.conversation);
+  const task = f.queue.get(notice.id); task.response = { text: 'NO_REPLY', files: [] };
+  assert.deepEqual(await prepareWorkerReply(task, bot, undefined, {
+    authorize: async () => {}, file: async () => ({}), encrypt: async content => content,
+  }), []);
+  f.queue.cancel(notice.id); assert.equal(await f.service.claim(), null);
+});
+
+test('worker restart does not create sessions or bypass access, reset and stop', async t => {
+  for (const deny of ['missing', 'access', 'reset', 'stop']) {
+    const f = fixture(t), bridge = f.inbox();
+    const key = sessionKey(home, event('$human'));
+    if (deny !== 'missing') f.state.update(key, { grok: 'session' });
+    if (deny === 'access') f.deny();
+    if (deny === 'reset') f.state.update(key, { grok: 'replacement' });
+    if (deny === 'stop') bridge.stop();
+    await bridge.scheduleRestart('boot', home, owner, 'session', undefined, 'Update');
+    assert.equal(f.queue.list().length, 0);
+  }
+});
+
 test('initiative persists without a lease, deduplicates across restart and respects cooldown and cancellation', async t => {
   const f = fixture(t);
   await f.inbox().handle(home, event('$human'));

@@ -190,3 +190,11 @@ support matrix is `src/backend-capabilities.ts` and is shown in `!status`; suppo
 does not imply the owner configured or permitted a tool. Pi currently supports
 background watches, GitHub, room messages, attachments and publication. Its shell
 approval and steering semantics remain specific to Pi.
+
+## Release notes
+
+For user-visible changes, update [release notes](release-notes.md) with the new
+behavior and any action users or agents need to take. Keep entries self-contained;
+do not describe draft history or claim capabilities that a backend does not expose.
+Startup notices pin this document to the running revision and link the exact
+revision comparison. GitHub release tags are not required.

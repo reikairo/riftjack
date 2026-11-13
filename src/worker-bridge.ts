@@ -1,6 +1,6 @@
 import type { ConversationLinks } from './conversation-links.js';
 import { randomUUID } from 'node:crypto';
-import { AGENT_TRIGGER, NOTICE, sessionKey, type MatrixEvent } from './bridge.js';
+import { AGENT_TRIGGER, NOTICE, RESTART_PROMPT, sessionKey, type MatrixEvent } from './bridge.js';
 import { isMedia } from './media.js';
 import type { State } from './state.js';
 import { WorkerError, type WorkerQueue, type WorkerTask } from './worker-queue.js';
@@ -16,6 +16,18 @@ export class WorkerBridge {
   get busy() { return this.options.service.busy; }
   stop() { this.stopped = true; this.options.service.stop(); }
   revoke(sender: string) { this.options.queue.cancelWhere(task => task.event.sender === sender); }
+  // Connector-owned notice, not a synthetic human request. Queueing is durable;
+  // claim and delivery recheck membership, session and pinned-room bindings.
+  async scheduleRestart(id: string, room: string, sender: string, session: string, thread?: string, version?: string) {
+    const o = this.options;
+    const event: MatrixEvent = { type: 'm.room.message', event_id: `restart:${id}:${o.botId}`, sender,
+      origin_server_ts: Date.now(), content: { msgtype: 'm.text', [NOTICE]: 'restart',
+        body: 'Connector restart notice (not a human message or approval):\n' + RESTART_PROMPT + (version ? '\n' + version : ''),
+        ...(thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: thread } }) } };
+    const valid = () => !this.stopped && o.authorized(sender) &&
+      o.state.session(o.links ? o.links.key(o.botId, room, event) : sessionKey(room, event)).grok === session;
+    if (valid() && await o.privateRoom(room, sender) && valid()) this.enqueue(room, event);
+  }
   async handle(room: string, event: MatrixEvent) {
     const o = this.options, links = o.links, shared = links?.room(o.botId, room);
     if (this.stopped) return;
@@ -81,7 +93,7 @@ export class WorkerBridge {
     const context = { room, type: shared ? 'shared' as const : 'private' as const, agents: links?.bots(o.botId, room) ?? [],
       key, session: conversation, binding: workerBinding(links, o.botId, room) };
     o.queue.enqueue(room, event, key + '\n' + conversation, false, context);
-    if (fresh && !event.content?.[AGENT_TRIGGER]) links?.credit(o.botId);
+    if (fresh && !event.content?.[AGENT_TRIGGER] && !event.content?.[NOTICE]) links?.credit(o.botId);
   }
 }
 
