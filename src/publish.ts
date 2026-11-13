@@ -84,7 +84,7 @@ async function git(repo: string, args: string[], signal: AbortSignal, input?: st
     return stdout;
   } catch (cause) {
     signal.throwIfAborted();
-    const operation = args.find(arg => ['rev-parse', 'config', 'ls-remote', 'rev-list', 'diff', 'show', 'log', 'merge-base', 'status', 'push', 'for-each-ref', 'check-ref-format', 'cat-file'].includes(arg)) ?? 'request';
+    const operation = args.find(arg => ['rev-parse', 'config', 'remote', 'fetch', 'ls-remote', 'rev-list', 'diff', 'show', 'log', 'merge-base', 'status', 'push', 'for-each-ref', 'check-ref-format', 'cat-file'].includes(arg)) ?? 'request';
     // merge-base exits 1 for unrelated histories; let the caller explain it.
     if (operation === 'merge-base' && (cause as { code?: unknown }).code === 1) return '';
     if (['diff', 'show', 'rev-list'].includes(operation) && (cause as NodeJS.ErrnoException)?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
@@ -135,12 +135,14 @@ async function defaultBranch(repo: string, url: string, signal: AbortSignal) {
 }
 
 // Read the push destination itself: local tracking refs may be stale or forged.
-async function publishedBranches(repo: string, url: string, signal: AbortSignal) {
-  const output = (await git(repo, ['ls-remote', '--heads', '--', url], signal)).trim();
+async function publishedBranches(repo: string, url: string, refs: readonly string[], signal: AbortSignal) {
+  if (!refs.length) return [];
+  const output = (await git(repo, ['ls-remote', '--heads', '--', url, ...refs], signal)).trim();
   if (!output) return [];
   return output.split('\n').map(line => {
     const match = /^([a-f0-9]{40,64})\t(refs\/heads\/[^\s]+)$/.exec(line);
     if (!match) throw new PublicError('Unexpected published branch response.');
+    if (!refs.includes(match[2])) throw new PublicError('Unexpected published branch response.');
     return Object.freeze({ ref: match[2], head: match[1] });
   });
 }
@@ -152,12 +154,16 @@ async function publicationContext(input: PublicationInput, workspace: string, si
   if ((await realpath((await git(repository, ['rev-parse', '--show-toplevel'], signal)).trim())) !== repository) throw new PublicError('Choose the repository root directory.');
   if ((await git(repository, ['rev-parse', '--is-shallow-repository'], signal)).trim() !== 'false') throw new PublicError('A complete repository history is required; shallow repositories cannot be reviewed.');
   const url = await destination(repository, input.remote, signal);
-  const advertisedDefault = await defaultBranch(repository, url, signal);
-  const publishedReferences = Object.freeze(await publishedBranches(repository, url, signal));
+  const advertisedDefault = input.review_base ? null : await defaultBranch(repository, url, signal);
+  const destinations = 'branch' in input ? [input.branch] : input.branches.map(branch => branch.branch);
+  const refs = [...new Set([...destinations.map(branch => 'refs/heads/' + branch),
+    ...(advertisedDefault ? [advertisedDefault.ref] : [])])];
+  const publishedReferences = Object.freeze(await publishedBranches(repository, url, refs, signal));
   if (advertisedDefault && !publishedReferences.some(ref => ref.ref === advertisedDefault.ref && ref.head === advertisedDefault.head)) {
     throw new PublicError('The remote default branch changed while preparing the review. Prepare a new report.');
   }
   const publishedTips = [...new Set(publishedReferences.map(ref => ref.head))];
+  // Fetch only destinations and the selected default base, never unrelated fork branches.
   // Fetch once for the whole package without changing shared tracking refs.
   if (publishedTips.length) await git(repository, ['fetch', '--no-tags', '--no-write-fetch-head', '--', url, ...publishedTips], signal);
   let upstreamReference: PublishReview['upstreamReference'] = null;
@@ -171,14 +177,13 @@ async function publicationContext(input: PublicationInput, workspace: string, si
     await git(repository, ['fetch', '--no-tags', '--no-write-fetch-head', '--', upstreamUrl, head], signal);
     upstreamReference = Object.freeze({ remote, url: upstreamUrl, ref, head });
   }
-  return { repository, url, advertisedDefault, publishedReferences, publishedTips, upstreamReference };
+  return { repository, url, advertisedDefault, publishedReferences, upstreamReference };
 }
 
 type PublicationContext = Awaited<ReturnType<typeof publicationContext>>;
 
 async function prepareBranch(input: PublishInput, context: PublicationContext, head: string, signal: AbortSignal): Promise<PublishReview> {
-  const { repository, url, advertisedDefault, publishedReferences, publishedTips, upstreamReference } = context;
-  const verifiedTips = [...publishedTips, ...(upstreamReference ? [upstreamReference.head] : [])];
+  const { repository, url, advertisedDefault, publishedReferences, upstreamReference } = context;
   await git(repository, ['check-ref-format', 'refs/heads/' + input.branch], signal);
   if ((await git(repository, ['cat-file', '-t', head], signal)).trim() !== 'commit') throw new PublicError('Publication head must be a commit object.');
   const base = publishedReferences.find(ref => ref.ref === 'refs/heads/' + input.branch)?.head ?? null;
@@ -195,6 +200,9 @@ async function prepareBranch(input: PublishInput, context: PublicationContext, h
   let reviewBase = base;
   const baseReference = (upstreamReference || (base && advertisedDefault?.ref === 'refs/heads/' + input.branch)) ? null : advertisedDefault;
   const diffReference = upstreamReference ?? baseReference;
+  // Only history in this destination or its review base may be omitted from
+  // per-commit patches. Other branches (including batch siblings) are irrelevant.
+  const verifiedTips = [...(base ? [base] : []), ...(diffReference ? [diffReference.head] : [])];
   if (diffReference) {
     const ancestors = (await git(repository, ['merge-base', '--all', head, diffReference.head], signal)).trim().split('\n');
     if (ancestors.length !== 1 || !/^[a-f0-9]{40,64}$/.test(ancestors[0])) {
@@ -278,7 +286,9 @@ export async function pushReviewedBatch(review: PublishBatchReview, signal: Abor
   if (await destination(review.repository, review.remote, signal) !== review.url) {
     throw new PublicError('The destination changed after review. Prepare a new report and request confirmation again.');
   }
-  const current = new Map((await publishedBranches(review.repository, review.url, signal)).map(ref => [ref.ref, ref.head]));
+  const refs = [...new Set(review.branches.flatMap(branch =>
+    ['refs/heads/' + branch.branch, ...branch.publishedReferences.map(ref => ref.ref)]))];
+  const current = new Map((await publishedBranches(review.repository, review.url, refs, signal)).map(ref => [ref.ref, ref.head]));
   for (const branch of review.branches) {
     await verifyUpstream(branch, signal);
     if ((current.get('refs/heads/' + branch.branch) ?? null) !== branch.base ||
@@ -306,7 +316,7 @@ export async function pushReviewed(review: PublishReview, signal: AbortSignal, a
       (review.baseReference && await remoteHead(review.repository, review.url, review.baseReference.ref, signal) !== review.baseReference.head)) {
     throw new PublicError('HEAD or the destination changed after review. Prepare a new report and request confirmation again.');
   }
-  const currentPublished = new Map((await publishedBranches(review.repository, review.url, signal)).map(ref => [ref.ref, ref.head]));
+  const currentPublished = new Map((await publishedBranches(review.repository, review.url, review.publishedReferences.map(ref => ref.ref), signal)).map(ref => [ref.ref, ref.head]));
   if (review.publishedReferences.some(ref => currentPublished.get(ref.ref) !== ref.head)) {
     throw new PublicError('Published reference changed after review. Prepare a new report and request confirmation again.');
   }
