@@ -206,6 +206,7 @@ does not manage shared resource leases. Read-only bots do not receive the tool.
 - [Restarts and recovery](docs/operations.md)
 - [Access and encryption](docs/security.md)
 - [Development and validation](docs/development.md)
+- [Worked example: evolve a file-checking procedure](examples/skill-evolution/README.md)
 
 Riftjack is available under the [MIT License](LICENSE). Dependencies retain their own licenses.
 
