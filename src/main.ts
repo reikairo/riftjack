@@ -1,3 +1,4 @@
+import { linkedToolConversation } from './tool-conversation.js';
 import { installMatrixTransport } from './matrix-transport.js';
 import { DeliveryReceipts } from './delivery-receipts.js';
 import type { ApprovalJobOptions } from './approval-jobs.js';
@@ -417,6 +418,9 @@ async function main() {
       typing: matrixTyping({ homeserver: config.homeserver, userId: account.userId, accessToken: account.accessToken }, transport.fetch),
       typingMeasurement: (room, measurement) => console.log(JSON.stringify({ time: new Date().toISOString(),
         bot: account.userId, room, ...measurement })),
+      toolConversation: linkedAgent ? (selection, source, signal) => linkedToolConversation(links, account.userId, source, selection, signal, {
+        allowed: privateRoom, stopping: () => stopping || restart.pending,
+      }) : undefined,
       linkedSession: linkedAgent ? (room, event) => links.key(account.userId, room, event) : undefined,
       decoratePrompt: linkedAgent ? (room, event, prompt, steering) => links.prompt(account.userId, room, event, prompt, steering) : undefined,
       promptDelivered: linkedAgent ? () => links.acknowledge(account.userId) : undefined,

@@ -1,3 +1,4 @@
+import { conversationSchema } from './tool-conversation.js';
 import { startToolMcp, type ToolAction } from './tool-mcp.js';
 export const DETACHED_SERVER = 'riftjack_detached';
 export const DETACHED_TOOL = 'mcp__riftjack_detached__run_detached';
@@ -5,6 +6,7 @@ export const detachedInstructions = '\nFor long processes use run_detached. star
 export function startDetachedMcp(action: ToolAction, signal: AbortSignal) {
   return startToolMcp({ name: 'run_detached', description: 'Prepare a confirmed long-running command for launch through the ordinary sandboxed command tool; inspect and request stopping runs. start returns operation_id immediately. Retrieve the approved launch_argv with approval_status or the background result; this is not a running process. Automatically observes completion across connector restarts. Lost observation is not proof of process termination.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
+      conversation: conversationSchema,
       action: { type: 'string', enum: ['start', 'list', 'status', 'stop', 'close', 'approval_status'] }, id: { type: 'string' },
       evidence: { type: 'string', maxLength: 2000, description: 'For close: when and how you checked that no processes remain, including escaped descendants. No secrets.' },
       label: { type: 'string', maxLength: 160 }, cwd: { type: 'string', description: 'Workspace directory.' },

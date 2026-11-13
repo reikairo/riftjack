@@ -1,3 +1,4 @@
+import { conversationSchema } from './tool-conversation.js';
 import { startToolMcp } from './tool-mcp.js';
 import { MAX_REMINDER_MINUTES, type BackgroundAction } from './background-tasks.js';
 export const BACKGROUND_SERVER = 'riftjack_tasks';
@@ -6,8 +7,9 @@ export const backgroundInstructions = '\nFor plain result files use action=watch
 export function startBackgroundMcp(action: BackgroundAction, signal: AbortSignal) {
   return startToolMcp({
     name: 'background_tasks',
-    description: 'Watch background tasks, list active notifications, browse retained history, or create, update and cancel reminders in this conversation. Supports one-time, minute-interval and daily/weekly series. Watches and timers survive connector restarts. Does not execute commands or stop processes.',
+    description: 'Watch background tasks, list active notifications, browse retained history, or create, update and cancel reminders in the current or explicitly selected linked conversation. Supports one-time, minute-interval and daily/weekly series. Watches and timers survive connector restarts. Does not execute commands or stop processes.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['action'], properties: {
+      conversation: conversationSchema,
       action: { type: 'string', enum: ['watch', 'remind', 'update', 'list', 'history', 'cancel'] }, id: { type: 'string' }, label: { type: 'string' },
       limit: { type: 'integer', minimum: 1, maximum: 100, description: 'History page size; default 20.' },
       offset: { type: 'integer', minimum: 0, description: 'History offset; default 0. Pages reflect current retained records.' },

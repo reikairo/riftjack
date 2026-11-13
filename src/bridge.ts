@@ -21,6 +21,7 @@ import { isMedia, type MediaContent, type IncomingAttachment, type OutgoingAttac
 import { Interactions, type Interact, type ReactionControls } from './interactions.js';
 import type { PublishAction } from './publish-mcp.js';
 import { feedbackMeaning, reactionFeedback, type ReactionReader } from './reaction-feedback.js';
+import { splitToolConversation, type ToolConversation, type ToolContext } from './tool-conversation.js';
 
 // Connector-defined content fields. A trigger marks a turn started by a peer
 // agent's mention; it is created locally and never accepted from Matrix.
@@ -89,6 +90,7 @@ type Options = {
   compactionRoom?: string;
   compaction?: (phase: CompactionPhase, context: { room: string; sender: string }) => Promise<void>;
   linkedSession?: (room: string, event: MatrixEvent) => string;
+  toolConversation?: (selection: ToolConversation, source: ToolContext, signal: AbortSignal) => Promise<ToolContext>;
   decoratePrompt?: (room: string, event: MatrixEvent, prompt: string, steering?: boolean) => string;
   promptDelivered?: () => void;
   // Unfinished background work of the conversation this restart notice is delivered in.
@@ -509,6 +511,20 @@ export class Bridge {
         let lastMessage: { room: string; eventId: string } | undefined;
         const sent = (destination: string, eventId: string) => { lastMessage = { room: destination, eventId }; };
         const sentHere = (eventId: string) => sent(room, eventId);
+        const selectConversation = async (input: unknown, signal: AbortSignal) => {
+          signal.throwIfAborted();
+          await this.authorize(room, current);
+          const selected = splitToolConversation(input);
+          const source = { room, event: requestEvent, key: backendKey };
+          if (selected.conversation && !o.toolConversation) throw new PublicError('Explicit tool conversations require a linked agent.');
+          const context = selected.conversation
+            ? await o.toolConversation!(selected.conversation, source, signal) : source;
+          signal.throwIfAborted();
+          if (!o.isAuthorized(current.sender)) throw new PublicError('Account access was revoked.');
+          if (selected.conversation && o.linkedSession &&
+              o.linkedSession(context.room, context.event) !== backendKey) throw new PublicError('Tool conversation session changed.');
+          return { ...selected, context };
+        };
         const interact: Interact = (request, requestSignal) => current.interactions.ask(request,
           AbortSignal.any([controller.signal, requestSignal]), async (text, controls, markdown) => {
             await this.authorize(room, current);
@@ -522,14 +538,17 @@ export class Bridge {
             else await this.reply(room, requestEvent, text);
           });
         const publish: PublishAction | undefined = o.publish || o.publications ? async (input, callSignal) => {
+          const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
+          const selected = await selectConversation(input, signal);
+          input = selected.input;
           if (o.publications) {
-            const target = this.publicationTarget(room, requestEvent, backendKey);
+            const target = this.publicationTarget(selected.context.room, selected.context.event, selected.context.key);
             if (!target) throw new PublicError('The agent session is not ready for publication.');
             turnLifetime.signal.throwIfAborted(); controller.signal.throwIfAborted();
             return o.publications.start(input, target, AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]));
           }
+          if (selected.conversation) throw new PublicError('Selected-conversation publication requires connector-owned operations.');
           if (current.publication) throw new PublicError('A publication review is already pending.');
-          const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
           signal.throwIfAborted();
           current.publication = true;
           try {
@@ -554,12 +573,11 @@ export class Bridge {
           deliveryReceipts: receipts ? () => receipts('attachments') : undefined,
           detached: o.detached ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
-            signal.throwIfAborted();
-            await this.authorize(room, current);
-            signal.throwIfAborted();
+            const selected = await selectConversation(input, signal);
+            input = selected.input;
             const request = input as { action?: string; id?: string } | undefined;
             if (o.detachedJobs && ['start', 'close', 'approval_status'].includes(request?.action ?? '')) {
-              const target = this.publicationTarget(room, requestEvent, backendKey);
+              const target = this.publicationTarget(selected.context.room, selected.context.event, selected.context.key);
               if (!target) throw new PublicError('The agent session is not ready.');
               if (request?.action === 'approval_status') {
                 if (Object.keys(request).some(k => !['action', 'id'].includes(k))) throw new PublicError('Use only action and optional id.');
@@ -567,15 +585,17 @@ export class Bridge {
               }
               return o.detachedJobs.start(input, target, signal);
             }
-            return o.detached!(input, { room, event: requestEvent, key: backendKey }, signal, interact, () => this.authorize(room, current));
+            if (selected.conversation && ['start', 'close'].includes(request?.action ?? '')) throw new PublicError('Selected-conversation runs require connector-owned operations.');
+            return o.detached!(input, selected.context, signal, interact, async () => {
+              await selectConversation(selected.conversation ? { conversation: selected.conversation } : {}, signal);
+            });
           } : undefined,
           confirmation: o.requestConfirmation || o.confirmationJobs ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
-            signal.throwIfAborted();
-            await this.authorize(room, current);
-            signal.throwIfAborted();
+            const selected = await selectConversation(input, signal);
+            input = selected.input;
             if (o.confirmationJobs) {
-              const target = this.publicationTarget(room, requestEvent, backendKey);
+              const target = this.publicationTarget(selected.context.room, selected.context.event, selected.context.key);
               if (!target) throw new PublicError('The agent session is not ready.');
               const request = input as { action?: string; id?: string } | undefined;
               if (request?.action === 'status') {
@@ -584,6 +604,7 @@ export class Bridge {
               }
               return o.confirmationJobs.start(input, target, signal);
             }
+            if (selected.conversation) throw new PublicError('Selected-conversation questions require connector-owned operations.');
             return o.requestConfirmation!(input, signal, interact);
           } : undefined,
           compaction: o.compaction ? async phase => {
@@ -611,17 +632,13 @@ export class Bridge {
           } : undefined,
           github: o.github ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
-            signal.throwIfAborted();
-            await this.authorize(room, current);
-            signal.throwIfAborted();
-            return o.github!(input, { room, event: requestEvent, key: backendKey }, signal);
+            const selected = await selectConversation(input, signal);
+            return o.github!(selected.input, selected.context, signal);
           } : undefined,
           background: o.background ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);
-            signal.throwIfAborted();
-            await this.authorize(room, current);
-            signal.throwIfAborted();
-            return o.background!(input, { room, event: requestEvent, key: backendKey }, signal);
+            const selected = await selectConversation(input, signal);
+            return o.background!(selected.input, selected.context, signal);
           } : undefined,
           progress: async text => {
             turnLifetime.signal.throwIfAborted();
