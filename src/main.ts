@@ -192,9 +192,22 @@ async function main() {
     clearInterval(restartNoticeTimer);
     clearInterval(workerTimer); clearInterval(discoveryTimer);
     clearInterval(backgroundTimer); clearInterval(githubTimer); githubLifetime.abort();
-    for (const { client, bridge } of clients.values()) { bridge.stop(); client.stop(); }
-    void Promise.all([tunnel?.stop(), transport.destroy(), workerServer.stop(), new Promise(resolve => setTimeout(resolve, 1500))])
-      .then(() => process.exit(code));
+    let failed = false;
+    const stop = async (component: string, action: () => unknown) => {
+      try { await action(); }
+      catch (error) {
+        failed = true;
+        try { diagnostics(new PublicError(`Could not stop ${component} during shutdown.`, { cause: error })); }
+        catch { /* A logging failure must not interrupt the remaining cleanup. */ }
+      }
+    };
+    const cleanup = [...clients].flatMap(([bot, { client, bridge }]) => [
+      stop(`bridge for ${bot}`, () => bridge.stop()), stop(`client for ${bot}`, () => client.stop()),
+    ]);
+    void Promise.all([...cleanup, stop('SSH tunnel', () => tunnel?.stop()),
+      stop('Matrix transport', () => transport.destroy()), stop('worker', () => workerServer.stop()),
+      new Promise(resolve => setTimeout(resolve, 1500))])
+      .then(() => process.exit(failed ? 1 : code));
   };
   const restart = new RestartController({
     supported: process.env.MATRIX_CONNECTOR_SUPERVISED === '1',
