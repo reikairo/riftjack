@@ -2,8 +2,6 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { errorMessage } from '../src/errors.js';
 import { test } from 'node:test';
-import fs from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
