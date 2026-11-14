@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
@@ -10,6 +12,34 @@ import { replyContent } from '../src/message-format.js';
 import type { Interact } from '../src/interactions.js';
 import { Bridge, type MatrixEvent } from '../src/bridge.js';
 import { State } from '../src/state.js';
+
+for (const stage of ['write', 'rename']) test(`created user retains recovery password after failed status ${stage}`, async t => {
+  const f = fixture(t), write = fs.writeFileSync;
+  let password = '';
+  const fetcher: typeof fetch = async (url, init) => {
+    if (init?.method === 'PUT') password = JSON.parse(String(init.body)).password;
+    return f.options.fetcher(url, init);
+  };
+  if (stage === 'write') t.mock.method(fs, 'writeFileSync', ((path: any, data: any, options: any) => {
+    if (typeof data === 'string' && JSON.parse(data).status === 'created') {
+      write(path, '{', options);
+      throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+    }
+    return write(path, data, options);
+  }) as typeof fs.writeFileSync);
+  else t.mock.method(fs, 'renameSync', () => { throw Object.assign(new Error('rename failed'), { code: 'EIO' }); });
+  syncBuiltinESMExports();
+  let failure: unknown;
+  try {
+    await createMatrixUser(f.config, f.request, { ...f.options, fetcher }).catch(error => { failure = error; });
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  const folder = join(f.root, 'created-users'), files = readdirSync(folder);
+  assert.equal(files.length, 1);
+  const record = JSON.parse(readFileSync(join(folder, files[0]), 'utf8'));
+  assert.equal(record.status, 'pending'); assert.equal(record.password, password);
+  assert.equal(f.calls.filter(c => c.init?.method === 'PUT').length, 1);
+  assert.ok(failure instanceof Error); assert.match(failure.message, /created.*recovery/i);
+});
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = mkdtempSync(join(tmpdir(), 'matrix-users-'));
