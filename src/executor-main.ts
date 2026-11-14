@@ -8,7 +8,7 @@ import { ExecutorQueue, type ExecutorTransport } from './executor-queue.js';
 import { executorPolicy, executorRoomAllowed } from './executor-protocol.js';
 import { lockInstance } from './instance-lock.js';
 import { MatrixMedia } from './media.js';
-import { safeErrorSummary } from './errors.js';
+import { errorMessage, safeErrorSummary } from './errors.js';
 import { ensureDeviceIdentity } from './device-identity.js';
 
 export function bindExecutorInbox(client: Pick<MessageMatrixClient, 'on' | 'inbox'>, queue: Pick<ExecutorQueue, 'receive'>, allowed: ExecutorTransport['allowed']) {
@@ -85,7 +85,7 @@ export async function executorMain() {
     console.error(safeErrorSummary(error));
   }
   await client.start();
-  const timer = setInterval(() => { if (!stopped) void queue.tick(transport).catch(e => console.error(safeErrorSummary(e))); }, 2000);
+  const timer = setInterval(() => { if (!stopped) void queue.tick(transport).catch(e => console.error(errorMessage(e, 'Executor queue failed'))); }, 2000);
   const shutdown = () => { stopped = true; clearInterval(timer); client.stop(); release(); process.exit(0); };
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
   console.log(`Executor started; mode ${policy.mode}. No model backend is configured.`);
