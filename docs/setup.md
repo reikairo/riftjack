@@ -21,26 +21,28 @@ Run `scripts/start-connector.sh` and `scripts/restart-supervisor.sh` from an ind
 
 ## Accounts and first startup
 
-Requires Node.js 24+, Python 3, `lsof`, your Synapse server, and at least one engine: Codex with a ChatGPT login or Claude Code with a Claude login. Either engine is sufficient; the other provider’s account is not required. A [Grok worker](grok.md) is another option and requires neither CLI. Set `MATRIX_HOMESERVER` to your own server; `https://matrix.example.org` in the template is a placeholder. No OpenAI API key is needed.
+Requires Node.js 24+, Python 3, `lsof`, your Synapse server, and at least one engine: Codex with a ChatGPT login, Claude Code with a Claude login, or [Pi](pi.md) authenticated with a supported provider. One engine is sufficient; the other providers’ accounts are not required. A [Grok worker](grok.md) is another option and requires neither CLI. Set `MATRIX_HOMESERVER` to your own server; `https://matrix.example.org` in the template is a placeholder. No OpenAI API key is needed.
 
 1. From the instance directory, run `cp riftjack/.env.example .env` and `chmod 600 .env`. Keep this file outside the Git repository. Fill in:
    - `MATRIX_HOMESERVER`: your actual HTTPS Matrix server URL.
    - `MATRIX_OWNER_ID`: your full Matrix ID. This is the recovery administrator and the only account that can add/remove allowed accounts through the manager.
    - `SYNAPSE_ADMIN_TOKEN`: a Synapse administrator's token, used only for provisioning. Alternatively set `SYNAPSE_REGISTRATION_SHARED_SECRET`.
-   - `RIFTJACK_WORKSPACE`: the default working directory for both engines when no custom workspace is selected.
+   - `RIFTJACK_WORKSPACE`: the default working directory for local engines when no custom workspace is selected.
 2. Install dependencies with `npm --prefix riftjack ci`, then set up the engine you want:
    - **Codex:** install [Codex CLI](https://developers.openai.com/codex/cli) separately, run `codex login` and sign in with ChatGPT. Check `codex login status`. Leave `CODEX_MODEL` blank for the default. Riftjack runs `codex` from the connector’s `PATH`; set `CODEX_PATH` to an absolute executable path if needed. The installed CLI must support `codex app-server --listen stdio://`.
    - **Claude:** install [Claude Code](https://code.claude.com/docs/en/setup), run `claude auth login`, then `npm --prefix riftjack run check:claude`. Set `CLAUDE_PATH` if needed and leave `CLAUDE_MODEL` blank for its default. No Codex login is needed. See [Claude setup](claude.md).
+   - **Pi:** follow [Pi setup](pi.md#setup) to install the CLI, log in to a supported provider and select a model. Set `PI_PATH` if needed. No Codex or Claude login is required.
 3. Run:
 
    ```sh
    npm --prefix riftjack run check:config
    npm --prefix riftjack run bootstrap:codex
    # Or: npm --prefix riftjack run bootstrap:claude
+   # Or: npm --prefix riftjack run bootstrap:pi
    npm --prefix riftjack start
    ```
 
-`bootstrap:codex` creates a manager and a Codex account; `bootstrap:claude` creates a manager and a Claude account. Both accounts are non-admin with distinct device sessions, and their credentials are saved locally. Each command skips bot types already present, so an interrupted partial bootstrap can be resumed. `start` brings the bots online and creates encrypted DM invitations. Accept them in Element X, then send messages normally.
+Each of `bootstrap:codex`, `bootstrap:claude` and `bootstrap:pi` creates a manager and an account for the selected engine. The two created accounts are non-admin with distinct device sessions, and their credentials are saved locally. Each command skips bot types already present, so an interrupted partial bootstrap can be resumed. `start` brings the bots online and creates encrypted DM invitations. Accept them in Element X, then send messages normally.
 
 All Codex bots use the same local ChatGPT login and share its plan usage limits. More bot accounts do not create additional quota. The connector forces `forced_login_method="chatgpt"` and the built-in OpenAI provider, does not pass API keys to Codex, and has no API-key fallback. The manager uses local command handling and makes no model requests. Claude bots use only the Claude login; neither engine starts the other CLI. If the plan limit is reached, wait for it to reset; the connector does not switch to separately billed API access. Any additional credits already enabled on your ChatGPT account remain governed by that account's billing settings.
 
