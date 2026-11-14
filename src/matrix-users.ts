@@ -1,5 +1,5 @@
-import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Config } from './config.js';
 import type { Interact } from './interactions.js';
@@ -99,6 +99,15 @@ export async function createMatrixUser(config: Config, request: UserCreation, op
   }
   // No login, access token, bot registry entry or connector-access grant is made.
   if (created?.user_id !== userId && created?.name !== userId) throw new PublicError('The server did not confirm the expected Matrix ID. The account may have been created; check the server and data/created-users.');
-  writeFileSync(record, JSON.stringify({ userId, name: request.name, password, homeserver: config.homeserver, status: 'created', createdAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+  // Keep the recovery password intact if updating the outcome fails midway.
+  const temporary = record + '.' + randomUUID() + '.tmp';
+  try {
+    writeFileSync(temporary, JSON.stringify({ userId, name: request.name, password, homeserver: config.homeserver, status: 'created', createdAt: new Date().toISOString() }, null, 2), { mode: 0o600, flag: 'wx', flush: true });
+    renameSync(temporary, record);
+  } catch (cause) {
+    throw new PublicError('The Matrix user was created, but its local status could not be updated. The recovery password remains in data/created-users on the connector host. Do not repeat account creation.', { cause });
+  } finally {
+    try { rmSync(temporary, { force: true }); } catch { /* Preserve the creation outcome and original persistence error. */ }
+  }
   return `**Matrix user created:** ${markdownText(request.name)}\n\nServer: ${inlineCode(config.homeserver)}\nMatrix ID: ${inlineCode(userId)}\nPassword: ${inlineCode(password)}\n\nSign in through Element X and change the password in account settings. To grant bot access separately: ${inlineCode('allow ' + userId)}.`;
 }
