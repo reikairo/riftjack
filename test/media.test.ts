@@ -224,7 +224,35 @@ test('only explicit manifests create attachments; ordinary paths stay text', () 
     assert.throws(() => parseMediaReply('```matrix-attachments\n' + JSON.stringify({ files: [{ path }] }) + '\n```', root));
   }
   assert.throws(() => parseMediaReply('```matrix-attachments\nnot JSON\n```', root), /invalid/);
+  assert.throws(() => parseMediaReply('```matrix-attachments\n```', root), /invalid/);
+  assert.deepEqual(parseMediaReply('```matrix-attachments\r\n{"files":[]}\r\n```', root), { text: '', attachments: [] });
   assert.throws(() => parseMediaReply('```matrix-attachments\n' + JSON.stringify({ files: Array(11).fill({ path: 'a' }) }) + '\n```', root), /at most 10/);
+});
+
+test('attachment manifest examples stay text inside other Markdown blocks', () => {
+  const root = '/workspace/outbox';
+  const manifest = '```matrix-attachments\n{"files":[{"path":"example.txt"}]}\n```';
+  const examples = [
+    '````markdown\n' + manifest + '\n````',
+    '~~~markdown\n' + manifest + '\n~~~',
+    '> ' + manifest.replace(/\n/g, '\n> '),
+    '- Example:\n\n  ' + manifest.replace(/\n/g, '\n  '),
+    '    ' + manifest.replace(/\n/g, '\n    '),
+  ];
+  for (const example of examples) assert.equal(parseMediaReply(example, root), example);
+  // An unterminated example does not become a delivery request either.
+  assert.equal(parseMediaReply(manifest.slice(0, -3), root), manifest.slice(0, -3));
+});
+
+test('a real attachment manifest after an identical example removes only the real block', () => {
+  const root = '/workspace/outbox';
+  const manifest = '```matrix-attachments\n{"files":[{"path":"example.txt"}]}\n```';
+  const example = '````markdown\n' + manifest + '\n````';
+  assert.deepEqual(parseMediaReply(example + '\n\nSending now.\n\n' + manifest, root), {
+    text: example + '\n\nSending now.',
+    attachments: [{ root, path: root + '/example.txt', name: undefined }],
+  });
+  assert.throws(() => parseMediaReply(manifest + '\n\n' + manifest, root), /single attachment manifest/);
 });
 
 test('each conversation has one stable outbox that is emptied at the start of every turn', async t => {
