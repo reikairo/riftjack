@@ -432,7 +432,6 @@ test('Claude permission prompts use stdio only for workspace-write bots with app
 for (const [name, decide, expected] of [
   ['approved', async (question: Interaction) => question.approve!, 'Permission allow'],
   ['declined', async (question: Interaction) => question.deny, 'Permission deny'],
-  ['unconfirmable', async () => { throw new Error('Matrix unavailable'); }, 'Permission deny'],
 ] as const) {
   test('Claude permission request is ' + name + ' through Matrix and answered on stdin', async t => {
     const f = setup(t);
@@ -952,4 +951,42 @@ test('unexpected Claude failures identify their stage without exposing exception
     return true;
   });
   assert.ok(f.calls().every(call => !call.args?.includes('--print')));
+});
+
+test('Claude confirmation transport failure is not a human decline and releases the conversation', async t => {
+  const f = setup(t);
+  const cause = Object.assign(new Error('private Matrix details'), { code: 'ETIMEDOUT' });
+  let requests = 0;
+  await assert.rejects(f.backend('claude', '[permission]', 'confirmation-failure', signal(), '@owner:test', [], async () => {
+    requests++;
+    throw cause;
+  }), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /confirmation failed/i);
+    assert.doesNotMatch(error.message, /user declined/i);
+    assert.doesNotMatch(error.message, /private Matrix details/);
+    assert.equal(error.cause, cause);
+    return true;
+  });
+  assert.equal(requests, 1);
+  assert.ok(!f.calls().some(call => call.response));
+  assert.equal(f.calls().filter(call => call.input).length, 1);
+  assert.equal(await f.backend('claude', 'retry', 'confirmation-failure', signal(), '@owner:test'), 'Claude answer');
+});
+
+test('Claude cancellation while awaiting confirmation preserves cancellation instead of a decline', async t => {
+  const f = setup(t), controller = new AbortController();
+  let shown!: () => void;
+  const ready = new Promise<void>(resolve => { shown = resolve; });
+  const reason = new Error('caller cancelled');
+  const task = f.backend('claude', '[permission]', 'cancel-confirmation', controller.signal, '@owner:test', [], (_question, requestSignal) =>
+    new Promise((_resolve, reject) => {
+      requestSignal.addEventListener('abort', () => reject(requestSignal.reason), { once: true });
+      shown();
+    }));
+  const rejected = assert.rejects(task, error => error === reason);
+  await ready;
+  controller.abort(reason);
+  await rejected;
+  assert.ok(!f.calls().some(call => call.response));
 });

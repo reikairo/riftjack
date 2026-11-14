@@ -25,7 +25,7 @@ import type { State } from './state.js';
 import { PublicError } from './accounts.js';
 import { imageMime, MAX_ATTACHMENTS, mediaInstructions, outboxDirectory, parseMediaReply, readOutgoing, type BackendReply, type IncomingAttachment } from './media.js';
 import { approvalInstructions } from './approval-instructions.js';
-import { CLAUDE_DENY, claudeInteraction } from './claude-interactions.js';
+import { claudeInteraction } from './claude-interactions.js';
 import { startPublishMcp, PUBLISH_SERVER, PUBLISH_TOOL, type PublishConnection } from './publish-mcp.js';
 
 const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -337,6 +337,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     let diagram: Awaited<ReturnType<typeof startDrawioMcp>> | undefined;
     let delivery: ReturnType<typeof attachmentDelivery> | undefined;
     const mediaLifetime = new AbortController();
+    const confirmationFailure = new AbortController();
     let tools: Awaited<ReturnType<typeof startBackendTools>> | undefined;
     // Ends the turn's input: no further updates, unconfirmed ones are reported.
     const finish = () => {
@@ -350,7 +351,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       ({ detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media } = tools);
       stage('CLI startup (before first protocol message)');
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude', claudeAutoReview(config, !!interact) ? 'auto_review' : 'user') + tools.instructions, publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached), signal, (line, stdin) => {
+        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude', claudeAutoReview(config, !!interact) ? 'auto_review' : 'user') + tools.instructions, publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached), AbortSignal.any([signal, confirmationFailure.signal]), (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       if (diagnostic.stage === 'CLI startup (before first protocol message)') stage('model execution and tool handling');
@@ -418,12 +419,20 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         }
         const controller = new AbortController();
         pending.set(requestId, controller);
-        void interact!(question, AbortSignal.any([signal, controller.signal])).catch(() => CLAUDE_DENY).then(decision => {
+        const failed = (cause: unknown) => {
+          if (pending.get(requestId) !== controller || controller.signal.aborted || signal.aborted) return;
+          pending.delete(requestId);
+          // An unavailable confirmation channel is not a decision. Stop this
+          // run without sending a fabricated decline or retrying the action.
+          confirmationFailure.abort(new PublicError('Claude confirmation failed. The task was stopped without retrying the action.', { cause }));
+        };
+        void interact!(question, AbortSignal.any([signal, controller.signal])).then(decision => {
           // A withdrawn or finished request must not be answered.
           if (pending.get(requestId) !== controller || controller.signal.aborted) return;
+          try { answer(stdin, requestId, decision); }
+          catch (error) { failed(error); return; }
           pending.delete(requestId);
-          answer(stdin, requestId, decision);
-        });
+        }, failed);
         return;
       }
       // CLI-generated messages describe its own state; they are not model output.
