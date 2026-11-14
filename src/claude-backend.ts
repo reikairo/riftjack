@@ -353,6 +353,11 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
         routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude', claudeAutoReview(config, !!interact) ? 'auto_review' : 'user') + tools.instructions, publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached), signal, (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
+      // Child assistant events share this stream, but the parent decides what
+      // to expose and how to recover from a child failure. Keep them out of the
+      // parent session, progress, fallback answer and terminal error state.
+      // Control requests still follow the normal permission handling below.
+      if (message.type === 'assistant' && message.parent_tool_use_id) return;
       if (diagnostic.stage === 'CLI startup (before first protocol message)') stage('model execution and tool handling');
       if (typeof message.session_id === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(message.session_id)) {
         if (savedSession && message.session_id !== savedSession) throw new PublicError('Claude resumed a different session. The saved history was not replaced.');
