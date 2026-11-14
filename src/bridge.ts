@@ -152,10 +152,10 @@ export class Bridge {
   }
   // One notice per bot startup, only for an existing conversation. No private
   // task files are read to decide whether to start a turn.
-  scheduleRestart(id: string, room: string, sender: string, session: string, thread?: string): void {
+  scheduleRestart(id: string, room: string, sender: string, session: string, thread?: string, version?: string): void {
     if (this.options.kind !== 'codex' && this.options.kind !== 'claude' && this.options.kind !== 'pi') return;
     const event: MatrixEvent = { type: 'm.room.message', event_id: `restart:${id}:${this.options.botId}`,
-      sender, origin_server_ts: Date.now(), content: { msgtype: 'm.text', body: RESTART_PROMPT, [NOTICE]: 'restart',
+      sender, origin_server_ts: Date.now(), content: { msgtype: 'm.text', body: RESTART_PROMPT + (version ? '\n' + version : ''), [NOTICE]: 'restart',
         ...(thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: thread } }) } };
     const key = this.options.linkedSession?.(room, event) ?? sessionKey(room, event);
     this.restartNotice = { room, event, key, session };
@@ -655,7 +655,7 @@ export class Bridge {
         const restart = this.restartNotice;
         if (verb !== 'publish' && !next.prompt.startsWith('!') && restart?.key === backendKey &&
             o.state.session(backendKey)[o.kind as 'codex' | 'claude' | 'pi'] === restart.session) {
-          if (next.event.content?.[NOTICE] !== 'restart') modelPrompt += '\n\nConnector restart notice:\n' + RESTART_PROMPT;
+          if (next.event.content?.[NOTICE] !== 'restart') modelPrompt += '\n\nConnector restart notice:\n' + restart.event.content!.body;
           const unfinished = o.restartContext?.(room, requestEvent, backendKey, restart.session);
           if (unfinished) modelPrompt += '\n' + unfinished;
           // Consume only when a model turn actually begins, not at privacy

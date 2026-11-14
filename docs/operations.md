@@ -53,10 +53,25 @@ If the connector exits unexpectedly, the supervisor starts it again after a dela
 
 ## Agent turn after startup
 
-After each connector startup, every Codex and Claude bot with an existing home
+After each connector startup, every Codex, Claude, Pi and external-worker bot with an existing home
 conversation receives a short connector notice:
 
 > Riftjack restarted. Check current work and background tasks; continue if there is work to do.
+
+The notice also identifies the code revision captured from the source checkout
+at process startup. `data/startup-version.json` records the last successful
+connector startup. When the revision differs, the notice includes both revisions,
+a comparison link and [release notes](release-notes.md) pinned to the new revision.
+The first tracked startup reports an unknown baseline and links the current notes;
+it does not claim an update occurred. Local edits are labelled, since revision
+links describe committed code only. Missing Git metadata does not block startup
+or overwrite a known baseline. The owner's restart acknowledgement includes the
+same information. Revision information is diagnostic data, not new permission.
+
+External-worker notices use the durable worker queue and the existing session,
+membership and binding checks. They do not create a session or grant peer credits.
+An external worker may return `NO_REPLY` without sending a visible message. The
+turn coalescing and unfinished-work details below apply to native-agent bridges.
 
 When that conversation has unfinished detached runs or waiting file watches, the
 notice also lists them as data, read when the turn starts. For a detached run,
