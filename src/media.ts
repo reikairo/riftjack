@@ -278,6 +278,7 @@ export class MatrixMedia {
       const content = await this.prepareAttachment(file, signal, authorize);
       signal.throwIfAborted();
       await authorize();
+      signal.throwIfAborted();
       const eventId = await this.client.sendMessage(room, { ...content, ...(relation && { 'm.relates_to': relation }) });
       sent?.(eventId);
     }

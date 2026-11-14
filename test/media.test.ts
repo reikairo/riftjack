@@ -207,6 +207,20 @@ test('cancellation while rechecking authorization prevents attachment delivery',
   assert.equal(f.messages.length, 0);
 });
 
+test('cancellation during the final authorization check sends no attachment event', async t => {
+  const f = setup(t);
+  const root = await mediaDirectory(f.dir, 'outgoing', 'final-check');
+  const path = join(root, 'hello.txt'); writeFileSync(path, 'hello');
+  const controller = new AbortController(), cancelled = new Error('Turn cancelled');
+  let checks = 0;
+  await assert.rejects(f.media.send('!dm:test', [{ root, path }], undefined, controller.signal, async () => {
+    if (++checks === 4) controller.abort(cancelled);
+  }), error => error === cancelled);
+  assert.equal(checks, 4);
+  assert.equal(f.uploads.length, 1);
+  assert.deepEqual(f.messages, []);
+});
+
 test('Unicode filenames fit the filesystem byte limit and cannot contain path separators', () => {
   const name = safeName('../' + '😀'.repeat(200) + '.png');
   assert.ok(Buffer.byteLength(name) <= 200);
