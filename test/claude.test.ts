@@ -25,9 +25,13 @@ const path = require('node:path');
 const args = process.argv.slice(2);
 process.stderr.write(${JSON.stringify(options.stderr ?? '')});
 const record = value => fs.appendFileSync(__filename + '.calls', JSON.stringify(value) + '\\n');
-record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
+// Publishing the call is the readiness handshake used by timeout tests.
+// Install the signal handler first so the parent can safely abort immediately.
 if (args[0] === ${JSON.stringify(options.hangCheck)}) {
   process.on('SIGTERM', () => { fs.writeFileSync(__filename + '.terminated', 'yes'); process.exit(0); });
+}
+record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
+if (args[0] === ${JSON.stringify(options.hangCheck)}) {
   setInterval(() => {}, 1000); return;
 }
 if (args.includes('--help')) {

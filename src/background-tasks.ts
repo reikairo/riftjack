@@ -346,6 +346,7 @@ export class BackgroundTasks {
     if (this.pumping) return;
     this.pumping = true;
     const deliveries: Promise<void>[] = [];
+    const failures: unknown[] = [];
     const dispatch = (watch: Watch, run: () => Promise<void>) => {
       this.inFlight.add(watch.id);
       deliveries.push(Promise.resolve().then(run).finally(() => { this.inFlight.delete(watch.id); }));
@@ -412,9 +413,16 @@ export class BackgroundTasks {
             ...(watch.thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: watch.thread } }) } };
         dispatch(watch, () => this.deliverAgent(watch, options, event, () => { watch.result = outcome; }));
       }
-    } finally { this.pumping = false; }
-    // Await this pass without holding the scan lock across a model turn.
-    await Promise.all(deliveries);
+    } catch (error) { failures.push(error); }
+    finally { this.pumping = false; }
+    // Observe every dispatched promise even if scanning failed. A persistence
+    // error can affect both paths; retain all failures for the caller to report.
+    // Do not hold the scan lock across a model turn.
+    for (const result of await Promise.allSettled(deliveries)) {
+      if (result.status === 'rejected') failures.push(result.reason);
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, 'Background scan and delivery failures');
   }
   // Save each admitted occurrence before model execution. Failure waits for a
   // restart, avoiding an unbounded retry loop against a broken backend.
