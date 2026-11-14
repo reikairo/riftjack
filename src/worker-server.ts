@@ -1,3 +1,4 @@
+import { diagnosticOperation, reportDiagnostic } from './diagnostics.js';
 import { errorMessage } from './errors.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
@@ -7,7 +8,11 @@ import type { WorkerService } from './worker-service.js';
 export class WorkerServer {
   private bots = new Map<string, { token: string; service: WorkerService }>();
   private controllers = new Set<AbortController>();
-  private server = createServer((request, response) => { void this.handle(request, response); });
+  private server = createServer((request, response) => {
+    void diagnosticOperation({ operation: 'worker.http' }, () => this.handle(request, response))
+      .catch(error => { try { this.report(error, { operation: 'worker.http' }); } catch { /* Host log unavailable. */ } });
+  });
+  constructor(private report = reportDiagnostic) {}
   add(bot: string, token: string, service: WorkerService) { this.bots.set(bot, { token, service }); }
   remove(bot: string) { this.bots.delete(bot); }
   async start(port: number) {
@@ -19,6 +24,8 @@ export class WorkerServer {
     await new Promise<void>(resolve => { this.server.close(() => resolve()); this.server.closeAllConnections(); });
   }
   private async handle(request: IncomingMessage, response: ServerResponse) {
+    let operation = 'worker.http';
+    let bot: string | undefined;
     const controller = new AbortController(); this.controllers.add(controller);
     response.on('close', () => controller.abort());
     const send = (status: number, body: unknown) => {
@@ -34,14 +41,17 @@ export class WorkerServer {
       const bearer = request.headers.authorization?.replace(/^Bearer /, '') || '';
       if (!selected || Buffer.byteLength(bearer) !== Buffer.byteLength(selected.token) || !timingSafeEqual(Buffer.from(bearer), Buffer.from(selected.token))) throw new WorkerError(401, 'Invalid bot credentials.');
       const { service } = selected;
+      bot = decodeURIComponent(match![1]);
       const id = match![3], action = match![4];
+      operation = action ? 'worker.' + action : id ? 'worker.status' : 'worker.claim';
+      const run = <T>(call: () => Promise<T>) => diagnosticOperation({ operation, bot, task: id }, call);
       if (request.method === 'GET' && !id) {
         const seconds = Number(url.searchParams.get('wait') || '0');
         if (!Number.isFinite(seconds) || seconds < 0 || seconds > 30) throw new WorkerError(400, 'wait must be between 0 and 30 seconds.');
         const until = Date.now() + seconds * 1000;
         do {
           controller.signal.throwIfAborted();
-          const task = await service.claim();
+          const task = await run(() => service.claim());
           if (task) { send(200, { task }); return; }
           if (Date.now() >= until) break;
           await new Promise<void>(resolve => {
@@ -52,7 +62,7 @@ export class WorkerServer {
         } while (!controller.signal.aborted);
         send(200, { task: null }); return;
       }
-      if (request.method === 'GET' && id && !action) { send(200, await service.status(id)); return; }
+      if (request.method === 'GET' && id && !action) { send(200, await run(() => service.status(id))); return; }
       if (request.method !== 'POST' || !id || !action) throw new WorkerError(404, 'Unknown worker endpoint.');
       const limit = action === 'initiate' ? 100_000 : Math.ceil(service.maxBytes * 4 / 3) + 300_000;
       let size = 0; const chunks: Buffer[] = [];
@@ -64,15 +74,16 @@ export class WorkerServer {
       let body;
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
       catch { throw new WorkerError(400, 'Expected JSON.'); }
-      if (action === 'initiate') { send(200, await service.initiate(id, body)); return; }
+      if (action === 'initiate') { send(200, await run(() => service.initiate(id, body))); return; }
       if (!body || typeof body.lease !== 'string') throw new WorkerError(400, 'Task lease is required.');
-      const result = action === 'renew' ? await service.renew(id, body.lease)
-        : action === 'release' ? await service.release(id, body.lease)
-        : action === 'attachment' ? await service.attachment(id, body.lease)
-        : action === 'rooms' ? await service.rooms(id, body.lease, body.request)
-        : await service.complete(id, body.lease, body);
+      const result = await run(() => action === 'renew' ? service.renew(id, body.lease)
+        : action === 'release' ? service.release(id, body.lease)
+        : action === 'attachment' ? service.attachment(id, body.lease)
+        : action === 'rooms' ? service.rooms(id, body.lease, body.request)
+        : service.complete(id, body.lease, body));
       send(200, result);
     } catch (error) {
+      if (!controller.signal.aborted) { try { this.report(error, { operation, bot }); } catch { /* Preserve the HTTP result. */ } }
       if (!controller.signal.aborted) send(error instanceof WorkerError ? error.status : 503,
         { error: error instanceof WorkerError ? error.message : errorMessage(error, 'Worker service is temporarily unavailable') });
     } finally { this.controllers.delete(controller); }

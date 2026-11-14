@@ -1,3 +1,4 @@
+import { diagnosticOperation } from './diagnostics.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -29,7 +30,7 @@ export class WorkerService {
   stop() { this.stopped = true; this.controller.abort(); }
   private async allowed(task: WorkerTask) {
     if (this.stopped) throw new WorkerError(503, 'Connector is stopping.');
-    const allowed = (!task.initiative || !!this.transport.initiative) && await this.transport.allowed(task);
+    const allowed = (!task.initiative || !!this.transport.initiative) && await diagnosticOperation({ operation: 'worker.authorize', task: task.id, taskAttempt: task.attempt }, () => this.transport.allowed(task));
     if (this.stopped) throw new WorkerError(503, 'Connector is stopping.');
     if (!allowed) {
       this.queue.cancel(task.id);
@@ -54,7 +55,7 @@ export class WorkerService {
     const task = option.prepare(source, text, eventId);
     // The destination is the conversation's home, which may differ from the
     // source task's shared room. Revalidate both after asynchronous checks.
-    if (!(await this.transport.allowed(task))) throw new WorkerError(403, 'Worker initiative destination is no longer allowed.');
+    if (!(await diagnosticOperation({ operation: 'worker.authorize', task: task.id, taskAttempt: task.attempt }, () => this.transport.allowed(task)))) throw new WorkerError(403, 'Worker initiative destination is no longer allowed.');
     await this.allowed(source);
     const accepted = this.queue.enqueueInitiative(task, option.intervalMs);
     return { id: accepted.id, status: accepted.status, conversation: accepted.conversation };
@@ -66,7 +67,7 @@ export class WorkerService {
       catch (error) { if (error instanceof WorkerError && error.status === 403) return null; throw error; }
       const task = this.queue.claim(candidate.id);
       if (!task) return null;
-      try { await this.transport.started?.(); } catch (error) { this.transport.report(error); }
+      try { await diagnosticOperation({ operation: 'worker.started', task: task.id, taskAttempt: task.attempt }, async () => { await this.transport.started?.(); }); } catch (error) { this.transport.report(error); }
       await this.allowed(task);
       this.queue.checkLease(task.id, task.lease!);
       if (task.prompt === undefined && this.transport.prompt) {
@@ -97,7 +98,7 @@ export class WorkerService {
     let download = this.downloads.get(id);
     if (!task.attachment && !download) {
       download = (async () => {
-        let file = await this.transport.receive(task);
+        let file = await diagnosticOperation({ operation: 'worker.attachment', task: task.id, taskAttempt: task.attempt }, () => this.transport.receive(task));
         this.queue.checkLease(id, lease); await this.allowed(task);
         if (!file) throw new WorkerError(404, 'This task has no attachment.');
         if (this.transport.transcribe) {
@@ -191,18 +192,18 @@ export class WorkerService {
       for (const pending of this.queue.list('replied')) {
         try {
           await this.allowed(pending);
-          if (!pending.delivery) this.queue.prepare(pending.id, await this.transport.prepare(pending));
+          if (!pending.delivery) this.queue.prepare(pending.id, await diagnosticOperation({ operation: 'worker.prepare', task: pending.id, taskAttempt: pending.attempt }, () => this.transport.prepare(pending)));
           let task = this.queue.get(pending.id);
           while (task.status === 'replied' && task.delivery && task.delivery.next < task.delivery.events.length) {
             await this.allowed(task);
             // Check cancellation after asynchronous access checks, before sending.
             if (this.queue.get(task.id).status !== 'replied') break;
-            const eventId = await this.transport.send(task, this.queue.transaction(task.id, task.delivery.next), task.delivery.events[task.delivery.next]);
+            const eventId = await diagnosticOperation({ operation: 'worker.send', task: task.id, taskAttempt: task.attempt }, () => this.transport.send(task, this.queue.transaction(task.id, task.delivery!.next), task.delivery!.events[task.delivery!.next]));
             this.queue.deliveredPart(task.id); task = this.queue.get(task.id);
             if (task.status === 'delivered' && eventId && this.transport.completed) {
               // Delivery is already durable; a reaction failure must not resend it.
               await this.allowed(task);
-              await this.transport.completed(task, eventId);
+              await diagnosticOperation({ operation: 'worker.completed', task: task.id, taskAttempt: task.attempt }, () => this.transport.completed!(task, eventId));
             }
           }
         } catch (error) { this.transport.report(error); }
