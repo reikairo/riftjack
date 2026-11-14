@@ -224,7 +224,10 @@ export class GitHubSubscriptions {
     const concurrent = checkRegistration();
     if (concurrent) return JSON.stringify({ ...this.describe(concurrent), already_subscribed: true });
     s.last_success = new Date().toISOString(); s.next = Date.now() + s.interval_seconds * 1000;
-    this.items = [...this.items.filter(x => x.state === 'active'), s]; this.save();
+    const previous = this.items;
+    this.items = [...this.items.filter(x => x.state === 'active'), s];
+    try { this.save(); }
+    catch (error) { this.items = previous; throw error; }
     return JSON.stringify({ ...this.describe(s), baseline_saved: true });
   }
   private async pages(endpoint: string, signal: AbortSignal, field?: string): Promise<any[]> {
