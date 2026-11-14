@@ -72,8 +72,8 @@ test('long-running turns skip slots elapsed during execution, including the fina
   assert.deepEqual(f.list(), []);
 });
 
-test('last admitted slot recovers the same event after restart, without restarting the count', async t => {
-  const f = setup(t), saved = f.action({ ...input, schedule: { ...input.schedule, count: 1 } });
+for (const interval of [{ interval_minutes: 10 }, { interval_seconds: 1 }]) test(`last admitted slot recovers the same event after restart: ${JSON.stringify(interval)}`, async t => {
+  const f = setup(t), saved = f.action({ ...input, schedule: { frequency: 'interval', ...interval, count: 1 } });
   t.mock.timers.setTime(Date.parse(saved.due)); let id = '';
   await f.queue.pump({ ...f.options, deliver: async (_t, e, admit) => { admit(); id = e.event_id!; return false; } });
   assert.equal(f.list()[0].state, 'interrupted'); assert.equal(f.list()[0].remaining, 0);
@@ -164,4 +164,42 @@ test('an occurrence that expires during the access check is not admitted', async
     t.mock.timers.setTime(start + 10 * minute); assert.equal(ready(), false); return false;
   } });
   await f.queue.pump(f.options); assert.deepEqual(f.list(), []); assert.equal(f.events.length, 0);
+});
+
+test('one-second continuation defers while busy, skips long turns and resumes without a backlog', async t => {
+  const f = setup(t), saved = f.action({ ...input, schedule: { frequency: 'interval', interval_seconds: 1 } });
+  const start = Date.parse(saved.due);
+  assert.equal(start, Date.now() + 1000);
+  t.mock.timers.setTime(start);
+  await f.queue.pump({ ...f.options, deliver: async () => false });
+  assert.equal(f.list()[0].state, 'waiting');
+  assert.equal(f.list()[0].lastRun, undefined);
+  t.mock.timers.setTime(start + 60_000);
+  let finish!: () => void;
+  const running = f.queue.pump({ ...f.options, deliver: async (_t, e, admit) => {
+    admit(); f.events.push(e.event_id!); await new Promise<void>(resolve => finish = resolve); return true;
+  } });
+  await new Promise(resolve => setImmediate(resolve));
+  await f.pump(start + 120_000);
+  assert.equal(f.events.length, 1);
+  finish(); await running;
+  assert.equal(f.list()[0].due, new Date(start + 121_000).toISOString());
+  await f.pump(start + 120_999); assert.equal(f.events.length, 1);
+  await f.pump(start + 121_000); assert.equal(f.events.length, 2);
+  f.action({ action: 'cancel', id: saved.id });
+  f.restart(); await f.pump(start + 122_000); assert.equal(f.events.length, 2);
+});
+
+test('second intervals persist, change units under one ID and expire finite slots across downtime', async t => {
+  const f = setup(t), saved = f.action(input);
+  const changed = f.action({ ...input, action: 'update', id: saved.id,
+    schedule: { frequency: 'interval', interval_seconds: 2, count: 3 } });
+  const start = Date.parse(changed.due);
+  assert.equal(changed.id, saved.id); assert.equal(start, Date.now() + 2000);
+  f.restart(); assert.equal(f.list()[0].schedule.interval_seconds, 2);
+  assert.equal(f.list()[0].schedule.interval_minutes, undefined);
+  assert.match(f.queue.overview(target), /every 2 seconds/);
+  await f.pump(start + 4000);
+  assert.equal(f.events.length, 1); assert.deepEqual(f.list(), []);
+  f.restart(); await f.pump(start + 6000); assert.equal(f.events.length, 1);
 });

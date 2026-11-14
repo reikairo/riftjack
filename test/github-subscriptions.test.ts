@@ -560,3 +560,97 @@ test('a single selection over 50 PRs is rejected before reading GitHub', async t
   await assert.rejects(f.subscriptions.action({ ...selection, pull_requests: Array.from({ length: 51 }, (_, i) => i + 1) }, target, signal()), /1–50/);
   assert.equal(f.requests.length, 0);
 });
+
+test('concurrent identical registrations share one saved subscription', async t => {
+  const f = fixture(t);
+  const replies = await Promise.all([1, 2].map(() => f.subscriptions.action(selection, target, signal())));
+  assert.equal(JSON.parse(replies[0]).id, JSON.parse(replies[1]).id);
+  const list = JSON.parse(await f.subscriptions.action({ action: 'list' }, target, signal()));
+  assert.equal(list.subscriptions.length, 1);
+  assert.equal(JSON.parse(readFileSync(f.path, 'utf8')).subscriptions.length, 1);
+});
+
+test('concurrent registrations cannot both consume the last PR slot', async t => {
+  const f = fixture(t);
+  const manager = new GitHubSubscriptions(f.path, f.policy, f.queue, async () => structuredClone(f.state.pr));
+  const spec = { ...selection, events: ['pull_request'] };
+  await manager.action({ ...spec, pull_requests: Array.from({ length: 49 }, (_, i) => i + 1) }, target, signal());
+  const results = await Promise.allSettled([50, 51].map(pr => manager.action({ ...spec, pull_requests: [pr] }, target, signal())));
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  const rejected = results.find(r => r.status === 'rejected') as PromiseRejectedResult;
+  assert.match(rejected.reason.message, /50 total PR selections/);
+  const restored = new GitHubSubscriptions(f.path, f.policy, f.queue, f.read);
+  const list = JSON.parse(await restored.action({ action: 'list' }, target, signal()));
+  assert.equal(list.subscriptions.reduce((n: number, s: any) => n + s.pull_requests.length, 0), 50);
+});
+
+for (const stage of ['write', 'rename']) test(`failed registration ${stage} is not retained or persisted by a later subscription`, async t => {
+  const f = fixture(t), blocker = stage === 'write' ? f.path + '.tmp' : f.path;
+  mkdirSync(blocker);
+  await assert.rejects(f.subscriptions.action(selection, target, signal()));
+  rmSync(blocker, { recursive: true });
+  const list = JSON.parse(await f.subscriptions.action({ action: 'list' }, target, signal()));
+  assert.equal(list.subscriptions.length, 0);
+  const other = { ...selection, events: ['pull_request'] };
+  await f.subscriptions.action(other, target, signal());
+  assert.equal(JSON.parse(readFileSync(f.path, 'utf8')).subscriptions.length, 1);
+  const retried = JSON.parse(await f.subscriptions.action(selection, target, signal()));
+  assert.equal(retried.baseline_saved, true);
+  assert.equal(retried.already_subscribed, undefined);
+  assert.equal(JSON.parse(readFileSync(f.path, 'utf8')).subscriptions.length, 2);
+});
+
+for (const operation of ['cancel', 'reconcile'] as const) {
+  for (const stage of ['write', 'rename'] as const) {
+    test(`${operation} preserves subscription and queued notice after failed ${stage}`, async t => {
+      const f = fixture(t);
+      const first = JSON.parse(await f.subscriptions.action(selection, target, signal()));
+      f.state.pr.draft = true;
+      t.mock.timers.tick(61_000);
+      await f.subscriptions.pump(() => true, signal());
+      const notice = f.notices()[0];
+      // The inbox was saved, but the process stopped before clearing its outbox.
+      const persisted = JSON.parse(readFileSync(f.path, 'utf8'));
+      const pending = { id: notice.id, message: notice.message };
+      persisted.subscriptions[0].pending = pending;
+      writeFileSync(f.path, JSON.stringify(persisted));
+      const subscriptions = new GitHubSubscriptions(f.path, f.policy, f.queue, f.read);
+      const blocker = stage === 'write' ? f.path + '.tmp' : f.path;
+      if (stage === 'rename') rmSync(f.path);
+      mkdirSync(blocker);
+      const cancel = async () => {
+        if (operation === 'cancel') await subscriptions.action({ action: 'cancel', id: first.id }, target, signal());
+        else subscriptions.reconcile(() => false);
+      };
+      await assert.rejects(cancel());
+      const listed = JSON.parse(await subscriptions.action({ action: 'list' }, target, signal()));
+      assert.equal(listed.subscriptions[0].state, 'active');
+      assert.equal(f.notices().length, 1);
+      rmSync(blocker, { recursive: true });
+      // A later unrelated successful save must not commit the failed cancellation.
+      await subscriptions.action(selection, { ...target, room: '!other:example.com' }, signal());
+      assert.equal(f.stored().state, 'active');
+      assert.deepEqual(f.stored().pending, pending);
+      await cancel();
+      assert.equal(f.stored().state, 'cancelled');
+      assert.equal(f.stored().pending, undefined);
+      assert.equal(f.notices().length, 0);
+    });
+  }
+}
+
+test('reconcile retries inbox cancellation after subscription cancellation was saved', async t => {
+  const f = fixture(t);
+  await f.subscriptions.action(selection, target, signal());
+  f.state.pr.draft = true;
+  t.mock.timers.tick(61_000);
+  await f.subscriptions.pump(() => true, signal());
+  const cancel = f.queue.cancelNotifications.bind(f.queue);
+  t.mock.method(f.queue, 'cancelNotifications', () => { throw new Error('Inbox write failed'); }, { times: 1 });
+  assert.throws(() => f.subscriptions.reconcile(() => false), /Inbox write failed/);
+  assert.equal(f.stored().state, 'cancelled');
+  assert.equal(f.notices().length, 1);
+  t.mock.method(f.queue, 'cancelNotifications', cancel);
+  f.subscriptions.reconcile(() => true);
+  assert.equal(f.notices().length, 0);
+});

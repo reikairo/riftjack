@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { PublicError, errorMessage } from './errors.js';
 import { NOTICE, type MatrixEvent } from './bridge.js';
-import { nextReminder, validSchedule, validStart, occurrenceInWindow, remainingOccurrences, scheduleDescription, type ReminderSchedule } from './reminder-schedule.js';
+import { nextReminder, validSchedule, validStart, intervalMilliseconds, occurrenceInWindow, remainingOccurrences, scheduleDescription, type ReminderSchedule } from './reminder-schedule.js';
 
 export type BackgroundAction = (input: unknown, signal: AbortSignal) => Promise<string>;
 export type BackgroundTarget = { room: string; sender: string; thread?: string; key: string; session: string };
@@ -189,7 +189,7 @@ export class BackgroundTasks {
       let schedule = input.schedule;
       const recurring = schedule !== undefined;
       if (validSchedule(schedule) && schedule.frequency === 'interval') {
-        schedule = { ...schedule, start_at: schedule.start_at ?? new Date(now + schedule.interval_minutes * 60_000).toISOString() };
+        schedule = { ...schedule, start_at: schedule.start_at ?? new Date(now + intervalMilliseconds(schedule)).toISOString() };
       }
       const due = recurring && validSchedule(schedule) ? nextReminder(schedule, now) : input.at !== undefined ? at : now + (delay as number) * 60_000;
       if (Object.keys(input).some(k => !['action', 'label', 'message', 'deliver', 'at', 'delay_minutes', 'schedule', ...(updating ? ['id'] : [])].includes(k)) ||
@@ -198,7 +198,7 @@ export class BackgroundTasks {
         (delay !== undefined && (!Number.isInteger(delay) || (delay as number) < 1 || (delay as number) > MAX_REMINDER_MINUTES)) ||
         (validSchedule(schedule) && schedule.frequency === 'interval' && Date.parse(schedule.start_at!) <= now) ||
         due === null || !Number.isFinite(due) || due <= now || due > now + MAX_REMINDER_MINUTES * 60_000) {
-        throw new PublicError('Use remind (or update with id) with label, message (up to 4000 characters), deliver (agent or room), and either delay_minutes (1–86400), at (ISO 8601 with offset, within 60 days), or a valid schedule. Interval schedules need interval_minutes, optional future start_at and count. Calendar schedules need time and timezone; an interval series needs count or end_time.');
+        throw new PublicError('Use remind (or update with id) with label, message (up to 4000 characters), deliver (agent or room), and either delay_minutes (1–86400), at (ISO 8601 with offset, within 60 days), or a valid schedule. Interval schedules need exactly one of interval_minutes (1–86400) or interval_seconds (1–5184000), optional future start_at and count. Calendar schedules need time and timezone; an interval series needs count or end_time.');
       }
       if (!updating && this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length >= 100) throw new PublicError('Too many active background watches. Cancel an unused watch first.');
       this.prune();
@@ -346,6 +346,7 @@ export class BackgroundTasks {
     if (this.pumping) return;
     this.pumping = true;
     const deliveries: Promise<void>[] = [];
+    const failures: unknown[] = [];
     const dispatch = (watch: Watch, run: () => Promise<void>) => {
       this.inFlight.add(watch.id);
       deliveries.push(Promise.resolve().then(run).finally(() => { this.inFlight.delete(watch.id); }));
@@ -412,9 +413,16 @@ export class BackgroundTasks {
             ...(watch.thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: watch.thread } }) } };
         dispatch(watch, () => this.deliverAgent(watch, options, event, () => { watch.result = outcome; }));
       }
-    } finally { this.pumping = false; }
-    // Await this pass without holding the scan lock across a model turn.
-    await Promise.all(deliveries);
+    } catch (error) { failures.push(error); }
+    finally { this.pumping = false; }
+    // Observe every dispatched promise even if scanning failed. A persistence
+    // error can affect both paths; retain all failures for the caller to report.
+    // Do not hold the scan lock across a model turn.
+    for (const result of await Promise.allSettled(deliveries)) {
+      if (result.status === 'rejected') failures.push(result.reason);
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, 'Background scan and delivery failures');
   }
   // Save each admitted occurrence before model execution. Failure waits for a
   // restart, avoiding an unbounded retry loop against a broken backend.

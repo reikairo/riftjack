@@ -25,9 +25,13 @@ const path = require('node:path');
 const args = process.argv.slice(2);
 process.stderr.write(${JSON.stringify(options.stderr ?? '')});
 const record = value => fs.appendFileSync(__filename + '.calls', JSON.stringify(value) + '\\n');
-record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
+// Publishing the call is the readiness handshake used by timeout tests.
+// Install the signal handler first so the parent can safely abort immediately.
 if (args[0] === ${JSON.stringify(options.hangCheck)}) {
   process.on('SIGTERM', () => { fs.writeFileSync(__filename + '.terminated', 'yes'); process.exit(0); });
+}
+record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
+if (args[0] === ${JSON.stringify(options.hangCheck)}) {
   setInterval(() => {}, 1000); return;
 }
 if (args.includes('--help')) {
@@ -55,6 +59,25 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   const prompt = message.message.content[0].text;
   output({ type: 'system', subtype: 'init', session_id: 'claude-session-1', ...(prompt.includes('[missing-status]') ? {} : { model: 'resolved-claude', cwd: process.cwd(), permissionMode: args[args.indexOf('--permission-mode') + 1], fast_mode_state: 'off', ...(prompt.includes('[fast-') ? { fast_mode_disabled_reason: 'preference' } : {}) }) });
   const finish = result => output({ type: 'result', subtype: 'success', is_error: false, result, session_id: 'claude-session-1' });
+  if (prompt.includes('[child-output]')) {
+    const assistant = (text, extra = {}) => output({ type: 'assistant', session_id: 'claude-session-1',
+      message: { model: 'real-model', content: [{ type: 'text', text }] }, ...extra });
+    assistant('Parent answer');
+    const parent_tool_use_id = 'child-task';
+    if (prompt.includes('[child-auth]')) {
+      assistant('Child authentication failed', { parent_tool_use_id, error: 'authentication_failed', isApiErrorMessage: true,
+        message: { model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in' }] } });
+    } else if (prompt.includes('[child-synthetic]')) {
+      assistant('Child placeholder', { parent_tool_use_id, message: { model: '<synthetic>', content: [{ type: 'text', text: 'No response requested.' }] } });
+    } else {
+      assistant('Child internal work', { parent_tool_use_id });
+      if (prompt.includes('[child-progress]')) {
+        assistant('Child final answer', { parent_tool_use_id });
+        assistant('Parent final answer');
+      }
+    }
+    finish(); return;
+  }
   if (prompt.includes('[fast-')) {
     const fast = prompt.includes('[fast-on]') ? { fast_mode_state: 'on' }
       : { fast_mode_state: 'off', fast_mode_disabled_reason: 'extra_usage_disabled' };
@@ -89,7 +112,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
     return;
   }
   if (prompt.includes('[permission]')) {
-    output({ type: 'control_request', request_id: 'perm-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'touch x', description: 'Create x', timeout: 5, dangerouslyDisableSandbox: true }, decision_reason: 'Outside the sandbox' } });
+    output({ type: 'control_request', request_id: 'perm-1', ...(prompt.includes('[child-permission]') ? { parent_tool_use_id: 'child-task' } : {}), request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'touch x', description: 'Create x', timeout: 5, dangerouslyDisableSandbox: true }, decision_reason: 'Outside the sandbox' } });
     onResponse = response => finish('Permission ' + response.response.response.behavior);
     return;
   }
@@ -432,7 +455,6 @@ test('Claude permission prompts use stdio only for workspace-write bots with app
 for (const [name, decide, expected] of [
   ['approved', async (question: Interaction) => question.approve!, 'Permission allow'],
   ['declined', async (question: Interaction) => question.deny, 'Permission deny'],
-  ['unconfirmable', async () => { throw new Error('Matrix unavailable'); }, 'Permission deny'],
 ] as const) {
   test('Claude permission request is ' + name + ' through Matrix and answered on stdin', async t => {
     const f = setup(t);
@@ -952,4 +974,67 @@ test('unexpected Claude failures identify their stage without exposing exception
     return true;
   });
   assert.ok(f.calls().every(call => !call.args?.includes('--print')));
+});
+
+for (const mode of ['fallback', 'progress', 'auth', 'synthetic']) {
+  test(`Claude child assistant output does not replace parent output: ${mode}`, async t => {
+    const f = setup(t), updates: string[] = [];
+    f.state.update('parent', { claude: 'claude-session-1' });
+    const result = await f.backend('claude', `[child-output] [child-${mode}]`, 'parent', signal(), '@owner:test', [], undefined, undefined,
+      { progress: async text => { updates.push(text); } });
+    assert.equal(result, mode === 'progress' ? 'Parent final answer' : 'Parent answer');
+    assert.deepEqual(updates, mode === 'progress' ? ['Parent answer'] : []);
+    assert.equal(f.state.session('parent').claude, 'claude-session-1');
+    assert.equal(f.calls().filter(call => call.input).length, 1);
+  });
+}
+
+test('Claude child control requests still require permission', async t => {
+  const f = setup(t);
+  let requests = 0;
+  const result = await f.backend('claude', '[permission] [child-permission]', 'child-permission', signal(), '@owner:test', [], async question => {
+    requests++;
+    assert.match(question.text, /Command: touch x/);
+    return question.deny;
+  });
+  assert.equal(requests, 1);
+  assert.equal(result, 'Permission deny');
+});
+
+test('Claude confirmation transport failure is not a human decline and releases the conversation', async t => {
+  const f = setup(t);
+  const cause = Object.assign(new Error('private Matrix details'), { code: 'ETIMEDOUT' });
+  let requests = 0;
+  await assert.rejects(f.backend('claude', '[permission]', 'confirmation-failure', signal(), '@owner:test', [], async () => {
+    requests++;
+    throw cause;
+  }), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /confirmation failed/i);
+    assert.doesNotMatch(error.message, /user declined/i);
+    assert.doesNotMatch(error.message, /private Matrix details/);
+    assert.equal(error.cause, cause);
+    return true;
+  });
+  assert.equal(requests, 1);
+  assert.ok(!f.calls().some(call => call.response));
+  assert.equal(f.calls().filter(call => call.input).length, 1);
+  assert.equal(await f.backend('claude', 'retry', 'confirmation-failure', signal(), '@owner:test'), 'Claude answer');
+});
+
+test('Claude cancellation while awaiting confirmation preserves cancellation instead of a decline', async t => {
+  const f = setup(t), controller = new AbortController();
+  let shown!: () => void;
+  const ready = new Promise<void>(resolve => { shown = resolve; });
+  const reason = new Error('caller cancelled');
+  const task = f.backend('claude', '[permission]', 'cancel-confirmation', controller.signal, '@owner:test', [], (_question, requestSignal) =>
+    new Promise((_resolve, reject) => {
+      requestSignal.addEventListener('abort', () => reject(requestSignal.reason), { once: true });
+      shown();
+    }));
+  const rejected = assert.rejects(task, error => error === reason);
+  await ready;
+  controller.abort(reason);
+  await rejected;
+  assert.ok(!f.calls().some(call => call.response));
 });

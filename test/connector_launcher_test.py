@@ -86,13 +86,13 @@ class LauncherTests(unittest.TestCase):
         owner = self.start('main', "console.log('ready'); setInterval(() => {}, 1000)")
         supervisor = self.start('supervisor', f"""
 import {{ writeFileSync }} from 'node:fs';
-console.log('ready');
 setInterval(() => {{}}, 1000);
 process.on('SIGTERM', () => {{
   process.kill({owner.pid}, 0);
   writeFileSync('supervisor-stopped', 'connector was still alive');
   process.exit(0);
 }});
+console.log('ready');
 """)
         launcher.replace_instance(self.root, NODE)
         self.assertEqual(supervisor.wait(timeout=5), 0)

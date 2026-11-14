@@ -1,5 +1,5 @@
-import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Config } from './config.js';
 import type { Interact } from './interactions.js';
@@ -33,8 +33,8 @@ export async function createMatrixUser(config: Config, request: UserCreation, op
     signal.throwIfAborted();
     const admin = path.startsWith('/_synapse/');
     const base = admin ? config.adminUrl : config.homeserver;
-    const failure = (detail: string) => new PublicError(`User creation: ${step}. ${detail}` +
-      (attempted ? ' The creation request was already sent: the account may exist. Do not retry automatically; check the server and the record in data/created-users on the connector host.' : ''));
+    const failure = (detail: string, cause?: unknown) => new PublicError(`User creation: ${step}. ${detail}` +
+      (attempted ? ' The creation request was already sent: the account may exist. Do not retry automatically; check the server and the record in data/created-users on the connector host.' : ''), { cause });
     let response: Response;
     try {
       response = await fetcher(base + path, {
@@ -46,13 +46,13 @@ export async function createMatrixUser(config: Config, request: UserCreation, op
     } catch (error) {
       if (!attempted) signal.throwIfAborted();
       const detail = safeErrorSummary(error);
-      throw failure(`${detail}. ${connectionHint(detail)}`);
+      throw failure(`${detail}. ${connectionHint(detail)}`, error);
     }
     if (allow404 && response.status === 404) return null;
-    if (!response.ok) throw failure(`HTTP ${response.status}. Check administrator permissions, connectivity and Synapse configuration.`);
+    if (!response.ok) throw failure(`HTTP ${response.status}. Check administrator permissions, connectivity and Synapse configuration.`, { status: response.status });
     let data: unknown;
     try { data = await response.json(); }
-    catch { throw failure('The server returned an unreadable response.'); }
+    catch (cause) { throw failure('The server returned an unreadable response.', cause); }
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw failure('Invalid server response.');
     return data as Record<string, unknown>;
   };
@@ -82,7 +82,7 @@ export async function createMatrixUser(config: Config, request: UserCreation, op
     writeFileSync(record, JSON.stringify({ userId, name: request.name, password, homeserver: config.homeserver, status: 'pending', createdAt: new Date().toISOString() }, null, 2), { mode: 0o600, flag: 'wx' });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new PublicError('A creation attempt for this username is already recorded in data/created-users. Check it on the connector host before trying again.');
-    throw new PublicError('Could not save the recovery password. No creation request was sent.');
+    throw new PublicError('Could not save the recovery password. No creation request was sent.', { cause: error });
   }
   let created: Record<string, unknown> | null;
   if (config.registrationSecret) {
@@ -99,6 +99,15 @@ export async function createMatrixUser(config: Config, request: UserCreation, op
   }
   // No login, access token, bot registry entry or connector-access grant is made.
   if (created?.user_id !== userId && created?.name !== userId) throw new PublicError('The server did not confirm the expected Matrix ID. The account may have been created; check the server and data/created-users.');
-  writeFileSync(record, JSON.stringify({ userId, name: request.name, password, homeserver: config.homeserver, status: 'created', createdAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+  // Keep the recovery password intact if updating the outcome fails midway.
+  const temporary = record + '.' + randomUUID() + '.tmp';
+  try {
+    writeFileSync(temporary, JSON.stringify({ userId, name: request.name, password, homeserver: config.homeserver, status: 'created', createdAt: new Date().toISOString() }, null, 2), { mode: 0o600, flag: 'wx', flush: true });
+    renameSync(temporary, record);
+  } catch (cause) {
+    throw new PublicError('The Matrix user was created, but its local status could not be updated. The recovery password remains in data/created-users on the connector host. Do not repeat account creation.', { cause });
+  } finally {
+    try { rmSync(temporary, { force: true }); } catch { /* Preserve the creation outcome and original persistence error. */ }
+  }
   return `**Matrix user created:** ${markdownText(request.name)}\n\nServer: ${inlineCode(config.homeserver)}\nMatrix ID: ${inlineCode(userId)}\nPassword: ${inlineCode(password)}\n\nSign in through Element X and change the password in account settings. To grant bot access separately: ${inlineCode('allow ' + userId)}.`;
 }

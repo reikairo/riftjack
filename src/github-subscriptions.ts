@@ -196,8 +196,7 @@ export class GitHubSubscriptions {
     if (input.action === 'cancel' && Object.keys(input).every(k => ['action', 'id'].includes(k))) {
       const s = this.items.find(s => s.id === input.id && same(s, target));
       if (!s) throw new PublicError('No such GitHub subscription in this conversation.');
-      s.state = 'cancelled'; delete s.pending; this.save();
-      this.background.cancelNotifications(group(s), target);
+      this.cancelSubscriptions([s]);
       return JSON.stringify(this.describe(s));
     }
     const selection = { ...input, interval_seconds: input.interval_seconds ?? DEFAULT_GITHUB_POLL_SECONDS };
@@ -207,15 +206,27 @@ export class GitHubSubscriptions {
     if (!this.policy?.repositories.includes(input.repository.toLowerCase()) || !this.read) throw new PublicError('This repository is not enabled for this bot by the owner. Use list to see allowed repositories.');
     const s: Subscription = { ...target, id: randomUUID(), repository: input.repository.toLowerCase(), pull_requests: [...new Set<number>(input.pull_requests)].sort((a,b) => a-b),
       events: [...new Set<EventKind>(input.events)].sort(), interval_seconds: selection.interval_seconds, state: 'active', next: 0, failures: 0, snapshot: {} };
-    const existing = this.items.find(x => same(x, s) && x.state === 'active' && x.repository === s.repository &&
-      JSON.stringify(x.pull_requests) === JSON.stringify(s.pull_requests) && JSON.stringify(x.events) === JSON.stringify(s.events) && x.interval_seconds === s.interval_seconds);
+    const checkRegistration = () => {
+      const active = this.items.filter(x => x.state === 'active');
+      const existing = active.find(x => same(x, s) && x.repository === s.repository &&
+        JSON.stringify(x.pull_requests) === JSON.stringify(s.pull_requests) && JSON.stringify(x.events) === JSON.stringify(s.events) && x.interval_seconds === s.interval_seconds);
+      if (existing) return existing;
+      if (active.length >= MAX_GITHUB_SUBSCRIPTIONS || active.reduce((n, x) => n + x.pull_requests.length, 0) + s.pull_requests.length > MAX_GITHUB_PR_SELECTIONS) throw new PublicError(`Cancel an unused subscription first (maximum ${MAX_GITHUB_SUBSCRIPTIONS} subscriptions and ${MAX_GITHUB_PR_SELECTIONS} total PR selections per bot).`);
+      return undefined;
+    };
+    const existing = checkRegistration();
     if (existing) return JSON.stringify({ ...this.describe(existing), already_subscribed: true });
-    if (this.items.filter(x => x.state === 'active').length >= MAX_GITHUB_SUBSCRIPTIONS || this.items.filter(x => x.state === 'active').reduce((n, x) => n + x.pull_requests.length, 0) + s.pull_requests.length > MAX_GITHUB_PR_SELECTIONS) throw new PublicError(`Cancel an unused subscription first (maximum ${MAX_GITHUB_SUBSCRIPTIONS} subscriptions and ${MAX_GITHUB_PR_SELECTIONS} total PR selections per bot).`);
     // Baseline first, never replay existing comments or completed checks on registration.
     s.snapshot = await this.capture(s, signal);
     signal.throwIfAborted();
+    // Another registration may have committed while the baseline was loading.
+    const concurrent = checkRegistration();
+    if (concurrent) return JSON.stringify({ ...this.describe(concurrent), already_subscribed: true });
     s.last_success = new Date().toISOString(); s.next = Date.now() + s.interval_seconds * 1000;
-    this.items = [...this.items.filter(x => x.state === 'active'), s]; this.save();
+    const previous = this.items;
+    this.items = [...this.items.filter(x => x.state === 'active'), s];
+    try { this.save(); }
+    catch (error) { this.items = previous; throw error; }
     return JSON.stringify({ ...this.describe(s), baseline_saved: true });
   }
   private async pages(endpoint: string, signal: AbortSignal, field?: string): Promise<any[]> {
@@ -311,15 +322,27 @@ export class GitHubSubscriptions {
     if (Object.keys(snapshot).length > 25000) throw new PublicError('GitHub snapshot exceeds the limit; narrow the subscription.');
     return snapshot;
   }
-  reconcile(valid: (target: BackgroundTarget) => boolean): void {
-    let changed = false;
-    for (const s of this.items) {
-      if (s.state === 'active' && valid(s) && this.allowed(s)) continue;
-      if (s.state !== 'cancelled' || s.pending) changed = true;
-      s.state = 'cancelled'; delete s.pending;
-      this.background.cancelNotifications(group(s), s);
+  private cancelSubscriptions(items: Subscription[]): void {
+    const previous = items.map(s => ({ subscription: s, state: s.state, pending: s.pending }));
+    if (items.some(s => s.state !== 'cancelled' || s.pending)) {
+      for (const s of items) { s.state = 'cancelled'; delete s.pending; }
+      try { this.save(); }
+      catch (error) {
+        // Keep the same objects: an in-flight poll may still hold a reference.
+        for (const { subscription: s, state, pending } of previous) {
+          s.state = state;
+          if (pending) s.pending = pending;
+          else delete s.pending;
+        }
+        throw error;
+      }
     }
-    if (changed) this.save();
+    // Only revoke queued deliveries after cancellation is durable. Retry this
+    // even for cancelled records if a previous inbox write failed.
+    for (const s of items) this.background.cancelNotifications(group(s), s);
+  }
+  reconcile(valid: (target: BackgroundTarget) => boolean): void {
+    this.cancelSubscriptions(this.items.filter(s => s.state !== 'active' || !valid(s) || !this.allowed(s)));
   }
   async pump(valid: (target: BackgroundTarget) => boolean, signal: AbortSignal): Promise<void> {
     this.reconcile(valid);

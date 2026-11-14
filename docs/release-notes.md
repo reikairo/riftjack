@@ -20,6 +20,28 @@ between the previous successful startup and the current one, including rollbacks
   A notice is diagnostic context, not permission to repeat actions or reuse an
   expired approval. Missing Git metadata does not prevent startup.
 
+## Reliability and diagnostics audit (#59)
+
+- Failed writes restore the last saved account, session, conversation and job
+  state. Executors stop when their journal cannot be saved; user recovery records
+  remain intact when a later status update fails.
+- Failed startup and shutdown clean up the remaining clients and workers.
+  Undelivered worker claims are released, cancelled attachments are not sent,
+  and confirmation transport errors are reported separately from human refusals.
+- Matrix failures identify the operation, request attempt, elapsed time and
+  transport. The owner receives detailed task errors and grouped background
+  diagnostics in the private chat. Local diagnostic files retain evidence when
+  Matrix delivery is unavailable; see [operations](operations.md) for limits.
+- Saved code snapshots reject symbolic links, Claude child output no longer
+  replaces the parent response, and Markdown examples do not trigger attachments.
+
+## Second-interval reminders (#28)
+
+- Interval reminders accept `interval_seconds`, with a minimum of one second,
+  as an alternative to `interval_minutes`.
+- Agent delivery waits for an idle turn. Missed occurrences do not accumulate
+  into a burst of queued turns; use one recurring series for continued work.
+
 ## Tools across linked conversations (#24)
 
 - `background_tasks`, `github_subscriptions`, `run_detached`,

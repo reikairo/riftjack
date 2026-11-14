@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { PublicError } from './errors.js';
 import { createHash } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,6 +28,7 @@ export class ExecutorQueue {
   private data: Saved;
   private pumping = false;
   private savedJson?: string;
+  private persistenceError?: PublicError;
   constructor(private dir: string, readonly bot: string, readonly policy: ExecutorPolicy,
     private launch = (directory: string) => {
       const runner = fileURLToPath(new URL('../scripts/executor-runner.mjs', import.meta.url));
@@ -44,11 +46,19 @@ export class ExecutorQueue {
   }
   get since() { return this.data.since; }
   get heads() { return { ...this.data.heads }; }
-  saveHeads(heads: Record<string, string>) { this.data.heads = heads; this.save(); }
+  saveHeads(heads: Record<string, string>) { this.healthy(); this.data.heads = heads; this.save(); }
+  private healthy() { if (this.persistenceError) throw this.persistenceError; }
   private save() {
+    this.healthy();
     const next = JSON.stringify(this.data);
     if (next === this.savedJson) return;
-    saveExecutorJson(join(this.dir, 'queue.json'), this.data); this.savedJson = next;
+    try { saveExecutorJson(join(this.dir, 'queue.json'), this.data); this.savedJson = next; }
+    catch (cause) {
+      // A failed directory fsync may follow a successful rename. Do not guess
+      // which state is durable, or let another in-flight callback save/launch it.
+      this.persistenceError = new PublicError('Executor journal persistence failed. Repair storage and restart the executor to recover saved work; no automatic retry is safe.', { cause });
+      throw this.persistenceError;
+    }
   }
   private post(room: string, sender: string, event: string, body: string, file?: string, wake?: ExecutorPost['wake']) {
     this.data.outbox.push({ id: hash(this.bot + ':' + this.data.since + ':' + ++this.data.sequence), room, sender, event, body, ...(file && { file }), ...(wake && { wake }) });
@@ -59,12 +69,14 @@ export class ExecutorQueue {
     return `${job.request.id}: ${job.state}; elapsed ${elapsed}s; exit ${r?.code ?? 'unknown'}; signal ${r?.signal ?? 'none'}; mode ${this.policy.mode}.`;
   }
   async receive(room: string, event: ExecutorEvent, allowed: ExecutorTransport['allowed']) {
+    this.healthy();
     if (!this.policy.rooms.includes(room) || !event.sender || !this.policy.senders.includes(event.sender) || event.sender === this.bot ||
       event.type !== 'm.room.message' || !event.event_id || event.content?.msgtype !== 'm.text' ||
       event.content['m.relates_to']?.rel_type === 'm.replace' || !event.content.body?.startsWith(`!exec ${this.bot} `) ||
       !Number.isFinite(event.origin_server_ts) || event.origin_server_ts! < this.data.since) return;
     if (this.data.events.includes(event.event_id)) return;
     if (!await allowed(room, event.sender)) return;
+    this.healthy();
     // Recheck after the asynchronous room check; sync and delivery can overlap.
     if (this.data.events.includes(event.event_id)) return;
     if (this.data.events.length >= 10000 || this.data.outbox.length >= 1000) throw new Error('Executor journal is full; archive it locally before accepting more work.');
@@ -112,6 +124,7 @@ export class ExecutorQueue {
     } else if (job.state === 'starting') job.state = 'uncertain';
   }
   async tick(transport: ExecutorTransport) {
+    this.healthy();
     if (this.pumping) return;
     this.pumping = true;
     try {
@@ -153,6 +166,7 @@ export class ExecutorQueue {
         const job = this.data.jobs.find(j => j.state === 'queued');
         if (job) {
           const permitted = job.policy === hash(JSON.stringify(this.policy)) && await transport.allowed(job.room, job.sender);
+          this.healthy();
           if (job.state === 'queued') {
             if (!permitted) job.state = 'cancelled';
             else {
@@ -169,8 +183,10 @@ export class ExecutorQueue {
       const post = this.data.outbox[0];
       if (post) {
         if (!await transport.allowed(post.room, post.sender)) { this.data.outbox.shift(); this.save(); return; }
+        this.healthy();
         if (!post.encrypted) { post.encrypted = await transport.prepare(post); this.save(); }
         if (!await transport.allowed(post.room, post.sender)) return;
+        this.healthy();
         await transport.send(post);
         this.data.outbox.shift(); this.save();
       }

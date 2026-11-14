@@ -9,6 +9,7 @@ type Transport = {
 export class TurnReaction {
   private revision = 0;
   private tail: Promise<void> = Promise.resolve();
+  private unsaved: { room: string; eventId: string }[] = [];
   constructor(private state: State, private bot: string, private transport: Transport, private home?: string) {}
 
   rememberReply(room: string, eventId: string) {
@@ -23,9 +24,14 @@ export class TurnReaction {
 
   private async clear() {
     const errors: unknown[] = [];
-    for (const marker of this.state.turnReactions(this.bot)) {
+    const markers = this.state.turnReactions(this.bot);
+    for (const marker of this.unsaved) {
+      if (!markers.some(saved => saved.room === marker.room && saved.eventId === marker.eventId)) markers.push(marker);
+    }
+    for (const marker of markers) {
       try {
         await this.transport.remove(marker.room, marker.eventId);
+        this.unsaved = this.unsaved.filter(saved => saved.room !== marker.room || saved.eventId !== marker.eventId);
         this.state.saveTurnReactions(this.bot, this.state.turnReactions(this.bot)
           .filter(saved => saved.room !== marker.room || saved.eventId !== marker.eventId));
       } catch (error) { errors.push(error); }
@@ -51,7 +57,19 @@ export class TurnReaction {
         if (!(await allowed(target.room))) continue;
         if (revision !== this.revision) break;
         const reactionId = await this.transport.send(target.room, target.eventId);
-        this.state.saveTurnReactions(this.bot, [...this.state.turnReactions(this.bot), { room: target.room, eventId: reactionId }]);
+        // Retain the remote receipt until it is durable or successfully redacted.
+        // A failed save must not leave a marker that later turns cannot clear.
+        this.unsaved.push({ room: target.room, eventId: reactionId });
+        try {
+          this.state.saveTurnReactions(this.bot, [...this.state.turnReactions(this.bot), ...this.unsaved]);
+          this.unsaved = [];
+        } catch (error) {
+          try { await this.clear(); }
+          catch (cleanupError) {
+            throw new AggregateError([error, cleanupError], 'Could not save or remove task activity reactions');
+          }
+          throw error;
+        }
         // A new task or queued update can arrive while either send is in flight.
         if (revision !== this.revision || !(await allowed(target.room)) || revision !== this.revision) {
           await this.clear(); break;

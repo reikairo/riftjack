@@ -30,14 +30,47 @@ Before acknowledging `!restart`, the connector saves the requesting bot, owner, 
 
 To enable `!restart` after upgrading from the old launcher, stop the running connector on the host once, then run `npm --prefix riftjack start`. Starting `src/main.ts` directly does not provide restart support. Ctrl+C or SIGTERM to the supervisor stops the connector without restarting it. `data/connector.pid` continues to identify the child connector process, not its supervisor.
 
-## Codex task failures
+## Error diagnostics
+
+The console emits concise structured summaries. The connector also writes original
+exception messages, stacks (including dependencies), error codes and cause chains
+to `DATA_DIR/diagnostics/errors.jsonl`. This is an owner-readable local journal;
+it can contain provider text and private paths. Files use mode `0600` and a newly
+created diagnostics directory uses `0700`. The current file and one rotated
+backup each retain at most 5 MiB. Records are bounded to 16 exception nodes,
+16,384 characters per text field and 256 KiB per record; omitted details are
+marked explicitly. A journal write failure leaves the console summary available
+and produces one `diagnostics.write` notice until storage recovers.
+
+For a failed task requested by the installation owner, Riftjack sends original
+error text, stacks and causes to the owner's encrypted two-person chat. The
+operation context accompanies ordinary errors. Shared replies and guest task
+replies retain the concise summary. Expected owner cancellations do not send
+an additional diagnostic. These service messages do not trigger agent turns.
+The local journal retains evidence when Matrix delivery fails; journal contents
+are not automatically exported to a room.
+
+Background errors also reach the owner's encrypted two-person chat, preferring
+Bot Manager and otherwise an available bot home chat. The first report is sent
+on the next five-second delivery tick; matching operation/bot/endpoint/error
+summary/source-location groups send at most once every five minutes, with an
+occurrence count, first/last times and the latest diagnostic. Up to 50 groups are
+kept in memory; overflow is counted in the next report. Every event still goes
+to the local journal. Delivery checks room privacy again before every part.
+Delivery failures are logged locally and never recursively sent to Matrix.
+An uncertain multipart send is not automatically retried. A missing private
+room leaves the group pending for a later tick after its cooldown. Pending
+reports do not survive process exit: startup/fatal failures before a usable
+Matrix client and reports interrupted by shutdown remain in the host journal.
+
+### Codex task failures
 
 A Codex task stopped with `cyberPolicy` is reported as a safety-filter decision
 about possible cybersecurity risk. It does not mean the connector crashed or
 authentication failed. Riftjack does not retry the task automatically or reset
 the conversation. Other unclassified turn failures use a generic failure message;
 raw server error messages and additional details stay out of shared replies and
-host logs. For tasks requested by the installation owner, Riftjack also sends
+console summaries. For tasks requested by the installation owner, Riftjack also sends
 the full original Codex turn error (`message` and `additionalDetails`) or RPC
 error message to the owner's encrypted two-person chat. Linked agents use their
 configured home chat; other bots use the requesting chat only if it passes the

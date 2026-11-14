@@ -17,11 +17,11 @@ Send `!reset` to start a fresh conversation with that bot in the current room/th
 
 Text messages beginning with `!` (after trimming whitespace and removing Matrix reply quotes) are reserved for connector commands. Unknown commands and invalid syntax, such as `!aprove` or `!reset extra`, produce a local error and help guidance; they never start a model turn, steer an active task, or enter the follow-up queue. Attachment captions and filenames remain attachment content, not commands.
 
-Coding bots have separate sessions and use their saved workspace, or `RIFTJACK_WORKSPACE` when none was selected. Coding bots run in parallel without a shared lock; each bot handles only one active task at a time, across all its conversations. If two bots edit the same file at the same time, one may overwrite the other's changes. Codex runs use `workspace-write` (or `read-only`) and disabled sandbox network/web search. `CODEX_APPROVAL_POLICY` defaults to `on-request`: Codex may request an exception, which is sent to Matrix for explicit approval. Set it to `never` to deny command/file/permission escalations instead. Approvals are routed to the user, not an automatic reviewer. Existing Codex configuration, managed restrictions, MCP tools, and local filesystem readability still apply; use a dedicated OS account/container if stronger isolation is needed. Connector tokens are excluded from both engines' subprocess environments.
+Coding bots have separate sessions and use their saved workspace, or `RIFTJACK_WORKSPACE` when none was selected. Coding bots run in parallel without a shared lock; each bot handles only one active task at a time, across all its conversations. If two bots edit the same file at the same time, one may overwrite the other's changes. Codex runs use `workspace-write` (or `read-only`); sandbox command network access and web search are disabled by default. The owner can configure [command network access](setup.md#optional-codex-command-network-access). `CODEX_APPROVAL_POLICY` defaults to `on-request`: Codex may request an exception, which is sent to Matrix for explicit approval by default. Set it to `never` to deny command/file/permission escalations instead. Approvals default to human review; `CODEX_APPROVALS_REVIEWER=auto_review` enables Codex review of eligible requests. See [confirmations and answers](#confirmations-and-answers). Existing Codex configuration, managed restrictions, MCP tools, and local filesystem readability still apply; use a dedicated OS account/container if stronger isolation is needed. Connector tokens are excluded from local engines' subprocess environments.
 
 ## Background task notifications
 
-Codex and Claude can register completion watches with the `background_tasks` tool
+Codex, Claude and Pi can register completion watches with the `background_tasks` tool
 on the `riftjack_tasks` MCP server. This lets a bot return with a result after its
 current turn has ended. The tool watches an existing JSON file inside that bot's
 workspace; it does not start a process or keep one alive.
@@ -78,6 +78,24 @@ For a recurring reminder, use `schedule` instead of `at` or `delay_minutes`:
 {"action":"remind","label":"Daily check","message":"Check for useful project updates.","deliver":"agent","schedule":{"frequency":"daily","time":"09:00","timezone":"Europe/London"}}
 ```
 
+For elapsed intervals, set `frequency` to `interval` and supply exactly one of
+`interval_seconds` (1–5184000) or `interval_minutes` (1–86400). For example, a
+continuation that checks for a free agent turn every second uses:
+
+```json
+{"action":"remind","label":"Continue review","message":"Continue the saved review plan. Cancel this series when finished or blocked.","deliver":"agent","schedule":{"frequency":"interval","interval_seconds":1}}
+```
+
+The connector checks dispatch approximately once per second. This is not a
+real-time deadline: an active turn, access checks or a busy connector can delay
+it. Agent reminders start only when the bot is idle; elapsed slots never build
+up a queue of turns. Optional `count` (1–10000) includes missed slots; omit it
+for an unlimited series and cancel the series when its work is complete.
+`start_at` optionally sets a future ISO 8601 anchor within 60 days; otherwise the
+first occurrence is one interval after registration. `update` can change the
+interval of a waiting reminder while keeping its ID. Calendar schedules retain
+minute precision.
+
 Weekly schedules also require `weekday` (Monday=1 through Sunday=7).
 Recurrence uses the named timezone's local clock, including daylight saving
 changes. A nonexistent local time is skipped; a repeated local time fires only
@@ -96,7 +114,7 @@ field must be a top-level string; the JSON file must be a regular file of at mos
 64 KiB. Only the selected status, label and file path are passed to the agent,
 not the rest of the file. They are supplied as data, not instructions or approvals.
 
-Riftjack checks about every two seconds. Registrations survive connector restarts;
+Riftjack checks about every second. Registrations survive connector restarts;
 completion waits until the bot is idle, then starts a turn in the original room,
 thread and agent session. Account access and room privacy are checked again.
 `!reset`, revoked access or a changed workspace cancels pending watches. While
@@ -157,7 +175,7 @@ records are not replayed. Older interrupted records without a saved notification
 remain uncertain and require inspection. Direct `deliver=room` messages keep
 uncertain-send status after an interrupted send and are not automatically resent.
 
-These watches are available to Codex and Claude bots. External workers continue
+These watches are available to Codex, Claude and Pi bots. External workers continue
 to use their existing durable task queue; this tool does not monitor arbitrary
 Grok processes. Workspaces remain a filesystem trust boundary, not isolation
 between mutually untrusted host users.
@@ -226,7 +244,7 @@ The connector reads the plugin description, apps and MCP servers from `openai-cu
 
 ## Delivery and formatting
 
-For Codex and Claude, ordinary human messages and attachments are saved before the
+For Codex, Claude and Pi, ordinary human messages and attachments are saved before the
 Matrix synchronization checkpoint advances. After restart, Riftjack resumes
 unfinished messages in arrival order and catches up on messages sent while it
 was offline. Limited Matrix timelines are paginated back to the saved room event.
@@ -383,8 +401,9 @@ It returns JSON identifying the report, commits and SHA-256, never pushes, and r
 When the owner has [configured fetch](setup.md#optional-fetch-tool), ask the bot
 to inspect a CI log or API response under an allowed URL prefix. The connector's
 `fetch` tool supports only GET and HEAD, with no request body or caller-supplied
-headers. Calls to this tool must be sequential; a second concurrent call is
-refused while the first is pending.
+headers. Parallel calls are queued within the current task: one executes at a time,
+with up to 50 waiting. A full queue rejects further calls. Ending the task
+cancels its queue; other agents have independent queues.
 
 GET saves a new file in `.fetch/` under that bot's workspace and returns its
 path, final URL, HTTP status, content type, byte count and `truncated` flag.

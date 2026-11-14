@@ -93,6 +93,16 @@ test('background MCP exposes interval series and updates one persisted ID', asyn
     schedule: { frequency: 'interval', interval_minutes: 10, count: 6 } };
   const saved = JSON.parse((await call(spec)).content[0].text);
   assert.equal(saved.remaining, 6); assert.equal(saved.schedule.start_at, saved.due);
+  assert.equal(schema.schedule.properties.interval_seconds.minimum, 1);
+  assert.equal(schema.schedule.properties.interval_seconds.maximum, 5_184_000);
+  const seconds = JSON.parse((await call({ ...spec, action: 'update', id: saved.id,
+    schedule: { frequency: 'interval', interval_seconds: 1 } })).content[0].text);
+  assert.equal(seconds.id, saved.id); assert.equal(seconds.schedule.interval_seconds, 1);
+  assert.equal(seconds.schedule.interval_minutes, undefined);
+  for (const schedule of [{ frequency: 'interval', interval_seconds: 1, interval_minutes: 1 },
+    { frequency: 'interval', interval_seconds: 0 }, { frequency: 'daily', time: '10:00', timezone: 'UTC', interval_seconds: 1 }]) {
+    assert.ok((await call({ ...spec, schedule })).isError);
+  }
   const updated = JSON.parse((await call({ ...spec, action: 'update', id: saved.id,
     schedule: { frequency: 'daily', time: '10:00', timezone: 'UTC', weekdays: [1,2,3,4,5], interval_minutes: 15, end_time: '12:00' } })).content[0].text);
   assert.equal(updated.id, saved.id); assert.equal(updated.schedule.end_time, '12:00');
