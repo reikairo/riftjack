@@ -54,6 +54,28 @@ test('unanswered questions expire on restart and cannot be approved by an old id
   assert.equal(JSON.parse(recovered.status(target, receipt.request_id)).state, 'interrupted');
 });
 
+test('a timely decision settles while reaction seeding is still blocked', async t => {
+  const f = fixture(t);
+  let release!: () => void;
+  const seeding = new Promise<void>(resolve => { release = resolve; });
+  f.options.send = async (_target, _request, text, controls) => {
+    controls.bind('$slow-seed'); f.requests.push(text);
+    await seeding;
+  };
+  // The manager captures the options when constructed.
+  const questions = createConfirmationJobs(join(f.dir, 'slow-question.json'), f.options);
+  try {
+    const receipt = JSON.parse(await questions.start({ question: 'Proceed?' }, target, signal()));
+    await until(() => f.requests.length === 1);
+    assert.match((await questions.answer(target, '!approve'))!, /Answer sent/);
+    // All authorization and persistence are local here. Let the accepted
+    // decision propagate, without releasing the unrelated seed request.
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(JSON.parse(questions.status(target, receipt.request_id)).state, 'approved');
+    assert.equal(f.notices.length, 1);
+  } finally { release(); questions.stop(); await new Promise(resolve => setImmediate(resolve)); }
+});
+
 test('question deadline is independent of the submitting turn and never becomes consent', async t => {
   const f = fixture(t);
   const receipt = JSON.parse(await f.questions.start({ question: 'Proceed?', timeout_seconds: 1 }, target, signal()));

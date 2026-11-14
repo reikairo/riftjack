@@ -8,6 +8,24 @@ import type { Interaction } from '../src/interactions.js';
 import { confirmationDetails } from '../src/confirmation-format.js';
 import { replyContent } from '../src/message-format.js';
 
+test('cancellation settles before a stalled delivery finishes and cannot bind late controls', async () => {
+  const interactions = new Interactions(), controller = new AbortController();
+  let release!: () => void;
+  const stalled = new Promise<void>(resolve => { release = resolve; });
+  const failure = new Error('Cancelled');
+  let rejected = false;
+  const result = interactions.ask({ text: 'Ready?', approve: {}, deny: {} }, controller.signal,
+    async (_text, controls) => { await stalled; controls.bind('$late'); throw new Error('Late delivery failure'); });
+  const settled = assert.rejects(result, error => { rejected = true; return error === failure; });
+  controller.abort(failure);
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(rejected, true);
+    assert.equal(interactions.size, 0);
+  } finally { release(); await settled; await new Promise(resolve => setImmediate(resolve)); }
+  assert.equal(interactions.hasReactionTarget('$late'), false);
+});
+
 async function deliver(request: Interaction) {
   const interactions = new Interactions();
   const parts: ReturnType<typeof replyContent> = [];
