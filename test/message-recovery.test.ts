@@ -192,14 +192,15 @@ test('real SDK sync saves message before checkpoint, and disk failure keeps the 
       } } }; }
     }
     const client = new Client('https://matrix.example.com', 'test', storage);
-    let fatal = false; client.on('worker.inbox_failure', () => { fatal = true; });
+    const failure = new Error('disk unavailable'), fatal: unknown[] = [];
+    client.on('worker.inbox_failure', error => { fatal.push(error); });
     client.inbox = async (target, input) => {
       assert.equal(storage.getSyncToken(), 'previous');
-      if (fail) throw new Error('disk unavailable');
+      if (fail) throw failure;
       f.bridge.capture(target, input); client.stop();
     };
     await client.run(); await new Promise(resolve => setImmediate(resolve));
-    assert.equal(fatal, fail); assert.equal(storage.getSyncToken(), fail ? 'previous' : 'next');
+    assert.deepEqual(fatal, fail ? [failure] : []); assert.equal(storage.getSyncToken(), fail ? 'previous' : 'next');
     const restarted = create(); await restarted.bridge.recoverMessages();
     assert.deepEqual(restarted.prompts, fail ? [] : ['$sync']);
   }
