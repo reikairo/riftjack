@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'no
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
-import { loadTunnelConfig, SshTunnel, tunnelArguments, type TunnelConfig } from '../src/ssh-tunnel.js';
+import { loadTunnelConfig, SshTunnel, tunnelArguments, type TunnelConfig, type TunnelDiagnostic } from '../src/ssh-tunnel.js';
 
 const config: TunnelConfig = { target: 'user@server.example', port: 2222, localPort: 18008, remotePort: 8008 };
 
@@ -20,9 +20,11 @@ ${body}
 `, { mode: 0o700 });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const messages: string[] = [];
-  const tunnel = new SshTunnel(config, { executable, retryMs: 50, killMs: 100, report: message => messages.push(message) });
+  const records: TunnelDiagnostic[] = [];
+  const tunnel = new SshTunnel(config, { executable, retryMs: 50, killMs: 100, report: message => messages.push(message),
+    diagnostic: record => records.push(record) });
   t.after(() => tunnel.stop());
-  return { tunnel, messages, log, dir, executable };
+  return { tunnel, messages, records, log, dir, executable };
 }
 
 const ready = `console.error('debug1: Local forwarding listening on 127.0.0.1 port 18008.');
@@ -89,6 +91,11 @@ ${hold}`);
   assert.equal(readFileSync(f.log, 'utf8'), '2');
   await f.tunnel.waitUntilReady(undefined, 3000);
   assert.ok(f.messages.some(message => /Reconnecting/.test(message)));
+  assert.deepEqual(f.records.map(record => [record.state, record.attempt]), [['ready', 1], ['closed', 1], ['ready', 2]]);
+  assert.equal(f.records[1].error, 'exit 255');
+  assert.equal(f.records[1].retryMs, 50);
+  assert.ok(f.records[1].elapsedMs >= 0);
+  assert.doesNotMatch(JSON.stringify(f.records), /user@|server.example|private-key/);
   await f.tunnel.stop();
   assert.equal(existsSync(join(f.dir, 'lock')), false);
 });
@@ -105,15 +112,35 @@ for (const [stderr, expected] of [
   assert.ok(f.messages.length > 0);
   await assert.rejects(f.tunnel.waitUntilReady(undefined, 0), expected);
   assert.doesNotMatch(f.messages.join('\n'), /secret-token|private-key-path|private-detail/);
+  assert.doesNotMatch(JSON.stringify(f.records), /secret-token|private-key-path|private-detail/);
+});
+
+for (const [stderr, reason] of [
+  ['Timeout, server private.example not responding.', 'keepalive-timeout'],
+  ['client_loop: send disconnect: Broken pipe private-detail', 'broken-pipe'],
+  ['Connection reset by private.example port 22', 'remote-closed'],
+] as const) test('SSH close diagnostics identify ' + reason + ' without raw stderr', async t => {
+  const f = fake(t, `console.error(${JSON.stringify(stderr)}); process.exit(255);`);
+  f.tunnel.start();
+  const deadline = Date.now() + 3000;
+  while (!f.records.length && Date.now() < deadline) await delay(20);
+  assert.equal(f.records[0]?.reason, reason);
+  assert.equal(f.records[0]?.error, 'exit 255');
+  assert.doesNotMatch(JSON.stringify(f.records), /private|port 22/);
 });
 
 test('missing ssh executable retries and stops cleanly', async () => {
   const messages: string[] = [];
-  const tunnel = new SshTunnel(config, { executable: '/nonexistent/matrix-ssh', report: message => messages.push(message), retryMs: 20 });
+  const records: TunnelDiagnostic[] = [];
+  const tunnel = new SshTunnel(config, { executable: '/nonexistent/matrix-ssh', report: message => messages.push(message),
+    diagnostic: record => { records.push(record); throw new Error('Observer failed'); }, retryMs: 20 });
   tunnel.start();
   try { await assert.rejects(tunnel.waitUntilReady(undefined, 100), /Could not launch OpenSSH/); }
   finally { await tunnel.stop(); }
   assert.ok(messages.length > 0);
+  assert.equal(records[0].reason, 'spawn');
+  assert.match(records[0].error!, /ENOENT/);
+  assert.doesNotMatch(JSON.stringify(records), /nonexistent/);
 });
 
 test('cancelling readiness does not stop the shared tunnel; shutdown escalates an unresponsive child', async t => {

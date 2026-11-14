@@ -4,6 +4,7 @@ import { MatrixError, type MatrixClient } from '@vector-im/matrix-bot-sdk';
 import { RateLimitedMatrixClient, matrixRetryDelay } from '../src/rate-limited-matrix-client.js';
 import { sendConfirmation } from '../src/confirmation-message.js';
 import { Interactions } from '../src/interactions.js';
+import { diagnosticOperation, diagnosticRecord } from '../src/diagnostics.js';
 
 type Args = Parameters<MatrixClient['doRequest']>;
 const limited = (ms = 1000) => new MatrixError({ errcode: 'M_LIMIT_EXCEEDED', error: 'Slow down', retry_after_ms: ms }, 429, {});
@@ -21,6 +22,31 @@ class Client extends RateLimitedMatrixClient {
   protected override async requestOnce(...args: Args) { this.calls.push(args); return this.respond(args); }
   protected override async waitForRetry(ms: number) { this.waits.push(ms); await this.onWait(ms); }
 }
+
+test('diagnostics distinguish sync from worker authorization and do not change retry outcomes', async () => {
+  const client = new Client(), records: ReturnType<typeof diagnosticRecord>[] = [];
+  client.diagnosticBot = '@private-bot:test';
+  client.diagnosticReport = (error, details) => { records.push(diagnosticRecord(error, details)); };
+  const error = Object.assign(new Error('private-response'), { code: 'UND_ERR_BODY_TIMEOUT' });
+  client.respond = async () => { throw error; };
+  await assert.rejects(diagnosticOperation({ operation: 'worker.authorize', task: 'private-task' },
+    () => client.doRequest('GET', '/_matrix/client/v3/rooms/private-room/state')), e => e === error);
+  await assert.rejects(client.doRequest('GET', '/_matrix/client/v3/sync'), e => e === error);
+  assert.equal(client.calls.length, 2, 'ambiguous failures are never retried');
+  assert.equal(records[0].endpoint, 'room-state');
+  assert.deepEqual(records[0].operations, ['worker.authorize', 'matrix.request']);
+  assert.equal(records[1].endpoint, 'sync');
+  assert.equal(records[1].task, undefined);
+  assert.doesNotMatch(JSON.stringify(records), /private/);
+  client.diagnosticReport = () => { throw new Error('broken observer'); };
+  await assert.rejects(client.doRequest('GET', '/state'), e => e === error);
+  records.length = 0;
+  client.diagnosticReport = (error, details) => { records.push(diagnosticRecord(error, details)); };
+  const rateLimit = limited();
+  client.respond = async () => { if (records.length < 2) throw rateLimit; return 'recovered'; };
+  assert.equal(await client.doRequest('GET', '/state'), 'recovered');
+  assert.deepEqual(records.map(record => record.attempt), [1, 2]);
+});
 
 test('rate limit delays honor SDK/header/body hints with bounded fallback', () => {
   assert.equal(matrixRetryDelay(limited(1200), 0), 1200);

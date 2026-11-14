@@ -11,6 +11,7 @@ import { WorkerService } from '../../src/worker-service.js';
 import { WorkerServer } from '../../src/worker-server.js';
 import { WorkerBridge, workerInitiative, workerTaskAllowed } from '../../src/worker-bridge.js';
 import { State } from '../../src/state.js';
+import { diagnosticRecord } from '../../src/diagnostics.js';
 
 const event = (id = '$one', body = 'hello') => ({ type: 'm.room.message', event_id: id, sender: '@alice:test', origin_server_ts: 1000, content: { msgtype: 'm.text', body } });
 function directory(t: { after(fn: () => void): void }) {
@@ -18,6 +19,37 @@ function directory(t: { after(fn: () => void): void }) {
   t.after(() => rmSync(dir, { recursive: true, force: true })); return dir;
 }
 const idle = async (service: WorkerService) => { while (service.busy) await new Promise(resolve => setTimeout(resolve, 1)); };
+
+test('worker HTTP failures identify authorization and recover without changing the task', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const records: ReturnType<typeof diagnosticRecord>[] = [];
+  let offline = true;
+  const error = Object.assign(new Error('private-server-response'), { code: 'ETIMEDOUT', syscall: 'read' });
+  const service = new WorkerService(queue, join(dir, 'files'), 100, {
+    allowed: async () => { if (offline) throw error; return true; },
+    receive: async () => undefined, prepare: async () => [], send: async () => {}, report: () => {},
+  });
+  const candidate = queue.enqueue('!private-room:test', event('$private-event', 'private-message'), 'private-conversation');
+  const server = new WorkerServer((error, context) => { records.push(diagnosticRecord(error, context)); });
+  server.add('@private-bot:test', 'a'.repeat(43), service);
+  const port = await server.start(0);
+  t.after(async () => { service.stop(); await server.stop(); queue.close(); });
+  const url = `http://127.0.0.1:${port}/v1/bots/%40private-bot%3Atest/tasks`;
+  const request = () => fetch(url, { headers: { Authorization: 'Bearer ' + 'a'.repeat(43) } });
+  const failure = await request();
+  assert.equal(failure.status, 503);
+  assert.match((await failure.json() as { error: string }).error, /ETIMEDOUT/);
+  assert.equal(records[0].operation, 'worker.claim');
+  assert.equal(records[0].failedOperation, 'worker.authorize');
+  assert.deepEqual(records[0].operations, ['worker.http', 'worker.claim', 'worker.authorize']);
+  assert.ok(records[0].bot); assert.ok(records[0].task);
+  assert.doesNotMatch(JSON.stringify(records), /private-|Bearer|aaaa/);
+  offline = false;
+  const success = await request();
+  assert.equal(success.status, 200);
+  assert.equal((await success.json() as { task: { id: string } }).task.id, candidate.id);
+  assert.equal(records.length, 1);
+});
 
 test('Python client can initiate from a finished task without a lease, with per-bot HTTP authorization', async t => {
   const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
