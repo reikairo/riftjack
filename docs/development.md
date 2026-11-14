@@ -141,6 +141,50 @@ The existing human-facing private compaction notices are unchanged.
 
 ## Error diagnostics
 
+The connector writes structured JSON diagnostics to its existing host log.
+`operation` names the reporting boundary; `failedOperation` and `operations`
+identify the observed nested operation. `trace`, `span` and `parentSpan` correlate
+requests without logging conversation contents. Bot and task identifiers are
+hashed; `taskAttempt` is a worker lease attempt, whereas `attempt` is an HTTP
+request attempt. `elapsedMs` measures the failed instrumented operation, not
+necessarily the entire task or time spent waiting in a queue.
+
+Matrix records use endpoint categories such as `sync`, `room-state`, `room-send`
+and `media`, plus the method, configured destination role and transport policy.
+They never contain raw URLs, query strings, room IDs, request/response bodies or
+authorization headers. The request boundary covers SDK response-body failures
+as well as connection/header failures. Explicit fetch diagnostics cover fetching
+response headers; subsequent streaming failures are reported by the consuming
+operation. HTTP error statuses can be expected protocol responses; their presence
+does not prove an unhandled task failure. Instrumented SDK requests emit one
+`matrix.request` error per attempt; their transport and SDK HTTP loggers defer
+to that boundary. It includes body-reading failures and preserves the transport
+failure context. Direct HTTP calls retain their own diagnostics. A caller may
+also report the effect on a larger operation, so use trace/span and operation
+fields rather than counting log lines as failed tasks.
+
+`matrix-transport-config` records whether the admin API uses the configured SSH
+tunnel, whether its origin equals the homeserver origin, and whether proxy
+environment variables are present. It does not print their values. This is
+configuration evidence, not a socket-route measurement or proof that a proxy was
+used. The admin tunnel and ordinary homeserver traffic can use different routes.
+`ssh-tunnel` records readiness and unexpected exits, connection attempt, lifetime,
+retry delay and a bounded reason/category. It never prints verbose SSH output.
+
+Unknown exceptions retain up to eight locations in Riftjack source files when
+available. Raw stack text, function labels, absolute paths and third-party frames
+are excluded. Connector-authored `PublicError` context retains its existing
+public-message policy. A diagnostic recorder failure must not replace the primary
+error, change retry policy, resend a response or prevent recovery.
+
+When investigating, preserve a short log interval around the first error and the
+next recovery, the running revision, and the relevant operation/trace identifiers.
+Do not enable raw SDK trace logging to obtain this context: it can include private
+request data. Diagnostics cannot reconstruct a request before instrumentation,
+an OS kill, or a failure while the host log itself is unavailable. Existing
+component-specific status files remain useful alongside this log; deliberately
+ignored cleanup errors are not all promoted to connector failures.
+
 Keep the operation and its safe cause together when an error crosses a boundary.
 Use `PublicError(message, { cause })` for connector-authored context and
 `errorMessage(error, context)` at delivery boundaries. Do not replace an exception

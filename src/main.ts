@@ -1,3 +1,5 @@
+import { matrixSdkLogger } from './matrix-sdk-logger.js';
+import { diagnosticOperation, reportDiagnostic, transportConfiguration } from './diagnostics.js';
 import { linkedToolConversation } from './tool-conversation.js';
 import { installMatrixTransport } from './matrix-transport.js';
 import { DeliveryReceipts } from './delivery-receipts.js';
@@ -46,7 +48,7 @@ import { ConversationLinks, mentionText } from './conversation-links.js';
 import { sendConfirmation } from './confirmation-message.js';
 import { createBackend } from './backends.js';
 import { Accounts, parseManagerRequest, provision, PublicError, type Account } from './accounts.js';
-import { errorMessage, safeErrorSummary } from './errors.js';
+import { errorMessage } from './errors.js';
 import { Access, parseAccessRequest } from './access.js';
 import { manageBotAccess, parseBotAccessRequest } from './bot-access.js';
 import { BotInvitations } from './bot-invitations.js';
@@ -72,8 +74,8 @@ const notifySupervisor = (message: SupervisorMessage) => { process.send?.(messag
 let tunnel: SshTunnel | undefined;
 let matrixTransport: ReturnType<typeof installMatrixTransport> | undefined;
 
-function diagnostics(error: unknown, bot?: string) {
-  console.error(JSON.stringify({ time: new Date().toISOString(), event: 'connector-error', bot, message: errorMessage(error) }));
+function diagnostics(error: unknown, operation = 'connector', bot?: string) {
+  reportDiagnostic(error, { operation, bot });
 }
 
 async function main() {
@@ -104,9 +106,11 @@ async function main() {
     process.exitCode = CONFIG_EXIT_CODE;
     return;
   }
-  const transport = installMatrixTransport(config.matrixHttpVersion, [config.homeserver, config.adminUrl]);
+  const transport = installMatrixTransport(config.matrixHttpVersion, [config.homeserver, config.adminUrl], undefined, reportDiagnostic);
   matrixTransport = transport;
-  if (config.sshTunnel) tunnel = new SshTunnel(config.sshTunnel, { report: message => console.log(message) });
+  console.log(JSON.stringify({ time: new Date().toISOString(), ...transportConfiguration(config.matrixHttpVersion, config.homeserver, config.adminUrl, !!config.sshTunnel, process.env) }));
+  if (config.sshTunnel) tunnel = new SshTunnel(config.sshTunnel, { report: message => console.log(message),
+    diagnostic: record => console.error(JSON.stringify({ time: new Date().toISOString(), event: 'ssh-tunnel', ...record })) });
   const accounts = new Accounts(join(config.dataDir, 'accounts.json'));
   const audioWarnings = new AudioConfigurationWarnings();
   let audio = config.audioTranscription ? new AudioTranscriber(config.audioTranscription) : undefined;
@@ -148,18 +152,7 @@ async function main() {
   if (!accounts.list().length) throw new PublicError('No bot accounts configured. Run bootstrap:codex, bootstrap:claude, bootstrap:pi or bootstrap:grok first (see README).');
 
   LogService.setLevel(LogLevel.WARN);
-  LogService.setLogger({
-    info() {}, debug() {}, trace() {},
-    warn(module) { console.warn('Matrix SDK warning (' + module + ').'); },
-    // SDK arguments can hold tokens and request bodies; only allow-listed codes are printed.
-    error(module, ...args) {
-      const details = args.map(safeErrorSummary).filter(summary => !summary.startsWith('Error (no safe'));
-      // The HTTP layer logs every non-2xx response before callers handle it. M_NOT_FOUND is an
-      // expected answer (e.g. a bot has no m.direct account data at startup) and is handled there.
-      if (module === 'MatrixHttpClient' && details.length === 1 && details[0] === 'M_NOT_FOUND') return;
-      console.error('Matrix SDK error (' + [module, ...new Set(details)].join(', ') + '). Check homeserver connectivity and bot device credentials.');
-    },
-  });
+  LogService.setLogger(matrixSdkLogger());
   const state = new State(join(config.dataDir, 'sessions.json'));
   const links = new ConversationLinks(join(config.dataDir, 'conversation-links.json'),
     join(config.dataDir, 'shared-room-history.json'), accounts.list(), state, access.owner);
@@ -167,17 +160,17 @@ async function main() {
   const workerServer = new WorkerServer();
   const workers = new Map<string, WorkerService>();
   const discoveries = new Map<string, PeerDiscovery>();
-  const discoveryTimer = setInterval(() => { for (const discovery of discoveries.values()) void discovery.pump().catch(diagnostics); }, 30_000);
+  const discoveryTimer = setInterval(() => { for (const [bot, discovery] of discoveries) void diagnosticOperation({ operation: 'discovery.pump', bot }, () => discovery.pump()).catch(error => diagnostics(error, 'discovery.pump', bot)); }, 30_000);
   discoveryTimer.unref();
   const startupId = randomBytes(16).toString('hex');
   const githubPumps = new Map<string, () => Promise<void>>();
   const githubLifetime = new AbortController();
-  const githubTimer = setInterval(() => { for (const pump of githubPumps.values()) void pump().catch(diagnostics); }, 2000);
+  const githubTimer = setInterval(() => { for (const [bot, pump] of githubPumps) void diagnosticOperation({ operation: 'github.pump', bot }, pump).catch(error => diagnostics(error, 'github.pump', bot)); }, 2000);
   githubTimer.unref();
   const backgroundPumps = new Map<string, () => Promise<void>>();
-  const backgroundTimer = setInterval(() => { for (const pump of backgroundPumps.values()) void pump().catch(diagnostics); }, 1000);
+  const backgroundTimer = setInterval(() => { for (const [bot, pump] of backgroundPumps) void diagnosticOperation({ operation: 'background.pump', bot }, pump).catch(error => diagnostics(error, 'background.pump', bot)); }, 1000);
   backgroundTimer.unref();
-  const workerTimer = setInterval(() => { for (const worker of workers.values()) void worker.deliver(); }, 2000);
+  const workerTimer = setInterval(() => { for (const [bot, worker] of workers) void diagnosticOperation({ operation: 'worker.deliver', bot }, () => worker.deliver()).catch(error => diagnostics(error, 'worker.deliver', bot)); }, 2000);
   workerTimer.unref();
   const botInvitations = new BotInvitations(join(config.dataDir, 'bot-dms.json'));
   const restartNotice = new RestartNotice(join(config.dataDir, 'restart-notice.json'));
@@ -234,6 +227,9 @@ async function main() {
     const recoverMessages = account.kind === 'codex' || account.kind === 'claude' || account.kind === 'pi';
     const client = recoverMessages || account.kind === 'grok' ? new MessageMatrixClient(config.homeserver, account.accessToken, storage, crypto)
       : new RateLimitedMatrixClient(config.homeserver, account.accessToken, storage, crypto);
+    client.diagnosticBot = account.userId;
+    client.diagnosticReport = reportDiagnostic;
+    const report = (error: unknown) => diagnostics(error, 'bot.operation', account.userId);
     const media = new MatrixMedia(client, { workspace: botConfig.workspace, homeserver: config.homeserver,
       accessToken: account.accessToken, maxBytes: config.maxMediaBytes, scope: account.userId,
       uploadTimeoutMs: config.mediaUploadTimeoutMs,
@@ -286,11 +282,11 @@ async function main() {
           authorize,
           sendMessage: content => client.sendMessage(target.room, { ...content, [SERVICE]: 'confirmation', 'm.relates_to': relation }),
           sendReaction: (eventId, key) => client.sendRawEvent(target.room, 'm.reaction', { 'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key } }),
-          report: diagnostics,
+          report,
         }, markdown);
       },
       notify: (id, target, message) => background!.notify(id, target, message, { group: id, progress: false }, 'Operation result'),
-      report: error => diagnostics(error, account.userId),
+      report,
     };
     const publications = background && botConfig.sandbox !== 'read-only' ? new PublicationJobs(join(dir, 'publications.json'), {
       ...approvalOptions,
@@ -382,7 +378,7 @@ async function main() {
         started: turnStarted,
         completed: (task, eventId) => turnCompleted(task.room, eventId, task.event.sender!,
           () => !queue.list().some(task => ['queued', 'leased', 'replied'].includes(task.status))),
-        report: diagnostics,
+        report,
       });
       workers.set(account.userId, service); workerServer.add(account.userId, token, service);
       bridge = new WorkerBridge({ botId: account.userId, authorized, privateRoom, queue, service, state, reactionTarget, links: workerLinks, since,
@@ -392,7 +388,7 @@ async function main() {
         },
       });
       (client as WorkerMatrixClient).inbox = (room, event) => bridge.handle(room, event);
-      client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
+      client.on('worker.inbox_failure', error => { diagnostics(error, 'message.persist', account.userId); shutdown(1); });
       console.log(account.userId + ' worker token file: ' + tokenFile);
     } else bridge = new Bridge({
       journal, publications, confirmationJobs, detachedJobs, maxMediaBytes: botConfig.maxMediaBytes, receipts: background ? new DeliveryReceipts(join(dir, 'delivery-receipts.json')) : undefined,
@@ -414,7 +410,7 @@ async function main() {
           send: (target, content) => client.sendMessage(target, content),
         }),
       queuedUpdateMessage: account.kind === 'pi' ? 'Your update is queued for Pi after the current task.' : account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
-      since, recoverMessages, timeoutMs: config.timeoutMs, state, report: error => diagnostics(error, account.userId),
+      since, recoverMessages, timeoutMs: config.timeoutMs, state, report,
       typing: matrixTyping({ homeserver: config.homeserver, userId: account.userId, accessToken: account.accessToken }, transport.fetch),
       typingMeasurement: (room, measurement) => console.log(JSON.stringify({ time: new Date().toISOString(),
         bot: account.userId, room, ...measurement })),
@@ -550,7 +546,7 @@ async function main() {
           created.inviteUserId = sender;
           accounts.add(created);
           try { await startAccount(created); } catch (error) {
-            diagnostics(error);
+            diagnostics(error, 'bot.create', account.userId);
             return '**Bot created, but startup failed:** ' + inlineCode(created.userId) + '\nCredentials saved. ' + markdownText(errorMessage(error, 'Bot startup failed')) + '\nCheck the server connection and restart the connector.';
           }
           return '**Bot created:** ' + markdownText(created.name) + '\n\n' + managerBotList([created], requestedConfig.workspace) + '\n\nAccept the encrypted DM invitation and send a task.';
@@ -575,7 +571,7 @@ async function main() {
           sendReaction: (eventId, key) => client.sendRawEvent(room, 'm.reaction', {
             'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key },
           }),
-          report: diagnostics,
+          report,
         }, markdown);
       },
       async reply(room, event, text, markdown = false, msgtype = 'm.notice', mentions, sent, inReplyTo) {
@@ -608,7 +604,7 @@ async function main() {
         // notice turn, once per recipient. Executor results use the durable inbox above.
         if (event.sender !== shared.owner) {
           const mention = links.mention(account.userId, room, event);
-          if (mention && bridge instanceof Bridge) void bridge.handleAgentMention(room, mention).catch(diagnostics);
+          if (mention && bridge instanceof Bridge) void diagnosticOperation({ operation: 'agent.mention', bot: account.userId }, () => bridge instanceof Bridge ? bridge.handleAgentMention(room, mention) : Promise.resolve()).catch(report);
           return false;
         }
         if (!links.addressed(account.userId, room, event)) return false;
@@ -622,32 +618,32 @@ async function main() {
       }
       // Serialize admission/observations, not model work: confirmations and
       // same-room steering must still get through while the agent is running.
-      void bridge.handle(room, event).catch(diagnostics);
+      void diagnosticOperation({ operation: 'message.handle', bot: account.userId }, () => bridge.handle(room, event)).catch(report);
     };
     const inbox = (room: string, event: MatrixEvent) => {
       // Capture before the first await, including before room routing checks.
       if (bridge instanceof Bridge) bridge.capture(room, event);
-      incoming = incoming.catch(() => {}).then(() => prepareIncoming(room, event));
+      incoming = incoming.catch(() => {}).then(() => diagnosticOperation({ operation: 'message.admit', bot: account.userId }, () => prepareIncoming(room, event)));
       return incoming;
     };
     if (client instanceof MessageMatrixClient && bridge instanceof Bridge) {
       client.inbox = async (room, event) => { await inbox(room, event); };
-      client.on('worker.inbox_failure', error => { diagnostics(error); shutdown(1); });
-    } else if (account.kind !== 'grok') client.on('room.message', (room, event) => { void inbox(room, event).catch(diagnostics); });
+      client.on('worker.inbox_failure', error => { diagnostics(error, 'message.persist', account.userId); shutdown(1); });
+    } else if (account.kind !== 'grok') client.on('room.message', (room, event) => { void inbox(room, event).catch(report); });
     if (linkedAgent && client instanceof MessageMatrixClient) {
       const discovery = new PeerDiscovery(links, account.userId, {
         allowed: privateRoom, stopping: () => stopping || restart.pending || !clients.has(account.userId),
-        send: (room, type, content) => client.sendEvent(room, type, content), report: diagnostics,
+        send: (room, type, content) => client.sendEvent(room, type, content), report,
       });
       discoveries.set(account.userId, discovery);
       client.protocol = (room, event) => discovery.receive(room, event);
     }
     client.on('room.event', (room: string, event: MatrixEvent) => {
       if (event.type === 'm.room.member') discoveries.get(account.userId)?.changed(room);
-      if (account.kind !== 'grok' && !(client instanceof MessageMatrixClient) && event.type === 'm.reaction') void inbox(room, event).catch(diagnostics);
+      if (account.kind !== 'grok' && !(client instanceof MessageMatrixClient) && event.type === 'm.reaction') void inbox(room, event).catch(report);
     });
     client.on('room.invite', (room: string, event: MatrixEvent) => {
-      if (event.sender && authorized(event.sender)) void client.joinRoom(room).catch(diagnostics);
+      if (event.sender && authorized(event.sender)) void diagnosticOperation({ operation: 'room.join', bot: account.userId }, () => client.joinRoom(room)).catch(report);
     });
     client.on('room.failed_decryption', () => console.warn(account.name + ': message could not be decrypted. Check device trust and key sharing in Element.'));
     let online = false;
@@ -661,7 +657,7 @@ async function main() {
       });
       backgroundPumps.set(account.userId, async () => {
         if (!online || starting || stopping || restart.pending || !clients.has(account.userId)) return;
-        void codingBridge.drainQueued().catch(diagnostics);
+        void diagnosticOperation({ operation: 'message.drain', bot: account.userId }, () => codingBridge.drainQueued()).catch(report);
         publications?.pump(); confirmationJobs?.pump(); detachedJobs?.pump();
         github?.reconcile(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude' | 'pi'] === target.session);
         detached?.pump(target => authorized(target.sender) && state.session(target.key)[account.kind as 'codex' | 'claude'] === target.session);
@@ -680,7 +676,7 @@ async function main() {
             }
             return true;
           },
-          report: diagnostics,
+          report,
         });
         await codingBridge.resumeRestart();
       });
@@ -707,7 +703,7 @@ async function main() {
         console.log(account.name + ': device cross-signing verified.');
       } catch (error) {
         console.warn(account.name + ': device verification incomplete; encrypted messaging remains available.');
-        diagnostics(error);
+        diagnostics(error, 'crypto.verify', account.userId);
       }
       phase('deviceIdentity');
       // Reserve the bridge before sync admits new input. Recovery runs without
@@ -723,20 +719,20 @@ async function main() {
             bridge.scheduleRestart(startupId, home, sender, session, linkedAgent?.thread);
           }
         }
-        void bridge.recoverMessages(routeIncoming).catch(diagnostics);
+        void diagnosticOperation({ operation: 'message.recover', bot: account.userId }, () => bridge instanceof Bridge ? bridge.recoverMessages(routeIncoming) : Promise.resolve()).catch(report);
       }
       await client.start();
       // start() launches the sync loop without waiting for the first /sync response.
       phase('clientStart');
       online = true;
-      void discoveries.get(account.userId)?.pump().catch(diagnostics);
+      void diagnosticOperation({ operation: 'discovery.pump', bot: account.userId }, async () => { await discoveries.get(account.userId)?.pump(); }).catch(report);
       console.log(account.name + ' (' + account.kind + ') online: ' + account.userId);
       console.log(JSON.stringify({ time: new Date().toISOString(), event: 'bot-startup', bot: account.userId,
         totalMs: Math.round(performance.now() - startedAt), phases }));
     } catch (error) { client.stop(); discoveries.delete(account.userId); clients.delete(account.userId); workers.get(account.userId)?.stop(); workers.delete(account.userId); workerServer.remove(account.userId); throw error; }
   }
   for (const account of accounts.list()) {
-    try { await startAccount(account); } catch (error) { console.error('Could not start ' + account.userId + '.'); diagnostics(error); }
+    try { await diagnosticOperation({ operation: 'bot.start', bot: account.userId }, () => startAccount(account)); } catch (error) { diagnostics(error, 'bot.start', account.userId); }
   }
   starting = false;
   if (!clients.size) throw new PublicError('No bots could start. Check credentials, encryption support, and homeserver connectivity.');
@@ -788,7 +784,7 @@ async function main() {
       });
       // Host-side handovers can write a notice after startup has finished.
       // Keep polling even when the inbox is empty; shutdown clears the timer.
-    } catch (error) { diagnostics(error); }
+    } catch (error) { diagnostics(error, 'restart.notify'); }
     finally { notifyingRestart = false; }
   };
   restartNoticeTimer = setInterval(() => { void notifyRestart(); }, 30_000);
@@ -796,4 +792,4 @@ async function main() {
   await notifyRestart();
 }
 
-main().catch(async error => { diagnostics(error); await Promise.all([tunnel?.stop(), matrixTransport?.destroy()]); process.exitCode = 1; });
+main().catch(async error => { diagnostics(error, 'connector.start'); await Promise.all([tunnel?.stop(), matrixTransport?.destroy()]); process.exitCode = 1; });

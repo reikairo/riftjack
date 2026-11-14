@@ -1,9 +1,12 @@
 import { MatrixClient } from '@vector-im/matrix-bot-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
+import { diagnosticOperation, matrixEndpoint, type reportDiagnostic } from './diagnostics.js';
 
 // Retry at the HTTP boundary: retrying sendMessage/sendRawEvent would allocate
 // a new transaction ID (and may encrypt again). Never retry ambiguous failures.
 export class RateLimitedMatrixClient extends MatrixClient {
+  diagnosticBot?: string;
+  diagnosticReport?: typeof reportDiagnostic;
   private readonly retryController = new AbortController();
   private sends: Promise<unknown> = Promise.resolve();
 
@@ -11,7 +14,7 @@ export class RateLimitedMatrixClient extends MatrixClient {
     const [method, endpoint] = args;
     // /sync already has SDK backoff. Typing is ephemeral: a delayed update can
     // resurrect the indicator after a turn ends; its owner handles renewal.
-    if (/\/(sync|typing\/[^/]+)$/.test(endpoint)) return this.requestOnce(...args);
+    if (/\/(sync|typing\/[^/]+)$/.test(endpoint)) return this.requestAttempt(args, 1);
     const run = () => this.retryRequest(args);
     if (method === 'PUT' && /\/rooms\/[^/]+\/(send|redact)\//.test(endpoint)) {
       // Hold the event lane through a cooldown so later messages/reactions do
@@ -28,6 +31,17 @@ export class RateLimitedMatrixClient extends MatrixClient {
     return super.doRequest(...args);
   }
 
+  private async requestAttempt(args: Parameters<MatrixClient['doRequest']>, attempt: number) {
+    try {
+      return await diagnosticOperation({ operation: 'matrix.request', bot: this.diagnosticBot,
+        reportsMatrixErrors: !!this.diagnosticReport,
+        method: args[0], endpoint: matrixEndpoint(args[1]), destination: 'homeserver', attempt }, () => this.requestOnce(...args));
+    } catch (error) {
+      try { this.diagnosticReport?.(error, { operation: 'matrix.request' }); } catch { /* Keep the request failure. */ }
+      throw error;
+    }
+  }
+
   protected waitForRetry(ms: number): Promise<void> {
     return delay(ms, undefined, { signal: this.retryController.signal });
   }
@@ -36,7 +50,7 @@ export class RateLimitedMatrixClient extends MatrixClient {
     let waited = 0;
     for (let attempt = 0; ; attempt++) {
       this.retryController.signal.throwIfAborted();
-      try { return await this.requestOnce(...args); }
+      try { return await this.requestAttempt(args, attempt + 1); }
       catch (error) {
         const ms = matrixRetryDelay(error, attempt);
         // A broken server must not retain confirmations indefinitely. Do not
