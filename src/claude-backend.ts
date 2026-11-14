@@ -1,3 +1,4 @@
+import { startReleaseNotesMcp, RELEASE_NOTES_SERVER, RELEASE_NOTES_TOOL } from './release-notes-mcp.js';
 import { startBackendTools } from './backend-tools.js';
 import { startDetachedMcp, DETACHED_SERVER, DETACHED_TOOL } from './detached-mcp.js';
 import { startConfirmationMcp, CONFIRMATION_SERVER, CONFIRMATION_TOOL } from './confirmation-mcp.js';
@@ -196,7 +197,7 @@ export function claudeAutoReview(config: Config, interactive = true): boolean {
 }
 
 export function claudeArguments(config: Config, session?: string, interactive = false, instructions?: string, publication?: PublishConnection, background?: PublishConnection, media?: PublishConnection, rooms?: PublishConnection,
-  replay = false, systemPromptSnapshot = false, web?: PublishConnection, hookEvents = false, github?: PublishConnection, diagram?: PublishConnection, confirmation?: PublishConnection, detached?: PublishConnection): string[] {
+  replay = false, systemPromptSnapshot = false, web?: PublishConnection, hookEvents = false, github?: PublishConnection, diagram?: PublishConnection, confirmation?: PublishConnection, detached?: PublishConnection, releaseNotes?: PublishConnection): string[] {
   const readOnly = config.sandbox === 'read-only';
   const automatic = claudeAutoReview(config, interactive);
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
@@ -216,7 +217,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const allowed = readOnly ? ['Read', 'Glob', 'Grep'] : [];
   const servers: Record<string, object> = {};
   for (const [name, connection, tool] of [[PUBLISH_SERVER, !readOnly && publication, PUBLISH_TOOL],
-    [DETACHED_SERVER, !readOnly && detached, DETACHED_TOOL], [CONFIRMATION_SERVER, confirmation, CONFIRMATION_TOOL], [GITHUB_SERVER, github, GITHUB_TOOL], [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL], [ROOM_MESSAGE_SERVER, rooms, ROOM_MESSAGE_TOOL], [FETCH_SERVER, web, FETCH_TOOL], [DRAWIO_SERVER, !readOnly && diagram, DRAWIO_TOOL]] as const) {
+    [RELEASE_NOTES_SERVER, releaseNotes, RELEASE_NOTES_TOOL], [DETACHED_SERVER, !readOnly && detached, DETACHED_TOOL], [CONFIRMATION_SERVER, confirmation, CONFIRMATION_TOOL], [GITHUB_SERVER, github, GITHUB_TOOL], [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL], [ROOM_MESSAGE_SERVER, rooms, ROOM_MESSAGE_TOOL], [FETCH_SERVER, web, FETCH_TOOL], [DRAWIO_SERVER, !readOnly && diagram, DRAWIO_TOOL]] as const) {
     if (!connection) continue;
     servers[name] = { type: 'http', url: connection.url, headers: connection.headers, timeout: config.timeoutMs };
     allowed.push(tool);
@@ -326,6 +327,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     const close = () => { for (const controller of pending.values()) controller.abort(); pending.clear(); };
     const answer = (stdin: ClaudeInput, requestId: string, response: object) =>
       stdin.write({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response } });
+    let releaseNotes: Awaited<ReturnType<typeof startReleaseNotesMcp>> | undefined;
     let detached: Awaited<ReturnType<typeof startDetachedMcp>> | undefined;
     let confirmation: Awaited<ReturnType<typeof startConfirmationMcp>> | undefined;
     let github: Awaited<ReturnType<typeof startGitHubMcp>> | undefined;
@@ -348,10 +350,10 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
       stage('tool server startup');
       tools = await startBackendTools({ kind: 'claude', config, outbox, hooks, publish,
         allowPublication: !!interact, signal: AbortSignal.any([signal, mediaLifetime.signal]), beforeAttachments: () => progress });
-      ({ detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media } = tools);
+      ({ releaseNotes, detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media } = tools);
       stage('CLI startup (before first protocol message)');
       await runClaude(config, claudeArguments(config, savedSession, interactive,
-        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude', claudeAutoReview(config, !!interact) ? 'auto_review' : 'user') + tools.instructions, publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached), AbortSignal.any([signal, confirmationFailure.signal]), (line, stdin) => {
+        routingInstructions + checkpointInstructions + mediaInstructions(outbox, config.maxMediaBytes, !!media) + approvalInstructions('claude', claudeAutoReview(config, !!interact) ? 'auto_review' : 'user') + tools.instructions, publication, background, media, rooms, replay, systemPromptSnapshot, web, hookEvents, github, diagram, confirmation, detached, releaseNotes), AbortSignal.any([signal, confirmationFailure.signal]), (line, stdin) => {
       let message: any;
       try { message = JSON.parse(line); } catch { throw new PublicError('Claude Code returned invalid stream-json output. Check its installed version.'); }
       // Child assistant events share this stream, but the parent decides what

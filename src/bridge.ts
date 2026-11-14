@@ -44,7 +44,7 @@ export type MatrixEvent = {
 // replyTo: an event of the same room the reply answers (sent as a Matrix reply).
 export type Mentions = { text: string; mentions: string[]; replyTo?: string; error?: string };
 export type Mode = 'codex' | 'claude' | 'pi' | 'grok' | 'manager';
-export type BackendHooks = { deliveryReceipts?: () => Promise<ScopedReceipts>; detached?: BackgroundAction; confirmation?: BackgroundAction; github?: BackgroundAction; background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool };
+export type BackendHooks = { releaseNotes?: () => string; deliveryReceipts?: () => Promise<ScopedReceipts>; detached?: BackgroundAction; confirmation?: BackgroundAction; github?: BackgroundAction; background?: BackgroundAction; progress?: (text: string) => Promise<void>; compaction?: (phase: CompactionPhase) => Promise<void>; sendAttachments?: SendAttachments; roomMessages?: RoomMessageTool };
 
 export type Backend = (mode: Mode, prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[], interact?: Interact, publish?: PublishAction, hooks?: BackendHooks) => Promise<string | BackendReply>;
 export type Steer = (prompt: string, key: string, signal: AbortSignal, sender: string, attachments?: IncomingAttachment[]) => Promise<boolean>;
@@ -54,6 +54,7 @@ type Options = {
   state: State; run: Backend;
   steer?: Steer;
   recoverMessages?: boolean;
+  releaseNotes?: () => string;
   queuedUpdateMessage?: string;
   owner?: string;
   ownerDiagnostic?: (error: unknown, context: { room: string; sender: string }) => Promise<void>;
@@ -571,6 +572,7 @@ export class Bridge {
           o.roomMessages!(request, { room, event: requestEvent, key: backendKey, sent,
             onCancel: cancel => { (current.cancelContinuations ??= []).push(cancel); } }, signal), receipts ? () => receipts('rooms') : undefined, o.maxMediaBytes);
         const hooks: BackendHooks = {
+          releaseNotes: o.releaseNotes,
           deliveryReceipts: receipts ? () => receipts('attachments') : undefined,
           detached: o.detached ? async (input, callSignal) => {
             const signal = AbortSignal.any([controller.signal, turnLifetime.signal, callSignal]);

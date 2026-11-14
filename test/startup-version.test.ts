@@ -62,3 +62,31 @@ test('code identity comes from the supplied source directory, including worktree
   writeFileSync(join(tree, 'source.txt'), 'edited');
   assert.deepEqual(codeVersion(tree), { revision, dirty: true });
 });
+
+test('release notes are captured once and notices name the available retrieval interface', t => {
+  const { dir, file } = fixture(t), notes = join(dir, 'notes.md');
+  writeFileSync(notes, '# Changes\nA Unicode note: café.');
+  const v = new StartupVersion(file, { revision: first, dirty: true }, notes);
+  writeFileSync(notes, '# A newer checkout');
+  assert.deepEqual(JSON.parse(v.releaseNotes), { revision: first, dirty: true,
+    source: 'startup snapshot', markdown: '# Changes\nA Unicode note: café.' });
+  assert.match(v.notice(), /release_notes tool/);
+  assert.match(v.notice(true), /worker-client.py release-notes/);
+  assert.doesNotMatch(v.notice(true), /release_notes tool/);
+  assert.match(v.notice(), new RegExp(`/blob/${first}/`));
+});
+
+test('archives, missing notes and oversized notes remain explicit without preventing startup', t => {
+  const { dir, file } = fixture(t), notes = join(dir, 'notes.md');
+  const missing = new StartupVersion(file, { revision: first, dirty: false }, notes);
+  assert.match(JSON.parse(missing.releaseNotes).unavailable, /unavailable/);
+  missing.ready();
+  writeFileSync(notes, '# Archive notes');
+  const archive = new StartupVersion(file, { revision: '', dirty: false }, notes);
+  assert.equal(JSON.parse(archive.releaseNotes).revision, null);
+  assert.equal(JSON.parse(archive.releaseNotes).markdown, '# Archive notes');
+  assert.match(archive.notice(), /release_notes tool/);
+  writeFileSync(notes, 'x'.repeat(256 * 1024 + 1));
+  const oversized = JSON.parse(new StartupVersion(file, { revision: first, dirty: false }, notes).releaseNotes);
+  assert.match(oversized.unavailable, /256 KiB/); assert.equal(oversized.markdown, undefined);
+});

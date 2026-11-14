@@ -91,6 +91,15 @@ conversation receives a short connector notice:
 
 > Riftjack restarted. Check current work and background tasks; continue if there is work to do.
 
+Agents can retrieve the running instance's release notes directly: Codex, Claude
+and Pi use the `release_notes` tool with no arguments; external workers use
+`python3 worker-client.py release-notes` with their existing credentials. Startup
+notices include the appropriate invocation. The connector captures the Markdown
+and revision metadata once at startup, before the checkout can be updated again.
+The response includes `revision`, `dirty`, `source` and `markdown`; missing or
+oversized notes (over 256 KiB) have an `unavailable` reason instead. Source archives
+without Git metadata still serve their bundled notes with a null revision.
+
 The notice also identifies the code revision captured from the source checkout
 at process startup. `data/startup-version.json` records the last successful
 connector startup. When the revision differs, the notice includes both revisions,

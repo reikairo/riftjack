@@ -12,7 +12,7 @@ export class WorkerServer {
     void diagnosticOperation({ operation: 'worker.http' }, () => this.handle(request, response))
       .catch(error => { try { this.report(error, { operation: 'worker.http' }); } catch { /* Host log unavailable. */ } });
   });
-  constructor(private report = reportDiagnostic) {}
+  constructor(private report = reportDiagnostic, private releaseNotes?: () => string) {}
   add(bot: string, token: string, service: WorkerService) { this.bots.set(bot, { token, service }); }
   remove(bot: string) { this.bots.delete(bot); }
   async start(port: number) {
@@ -36,13 +36,18 @@ export class WorkerServer {
     try {
       if (request.headers.origin) throw new WorkerError(403, 'Browser requests are not supported.');
       const url = new URL(request.url || '/', 'http://localhost');
-      const match = /^\/v1\/bots\/([^/]+)\/(tasks)(?:\/([a-f0-9-]{36})(?:\/(renew|release|reply|attachment|rooms|initiate))?)?$/.exec(url.pathname);
+      const match = /^\/v1\/bots\/([^/]+)\/(tasks|release-notes)(?:\/([a-f0-9-]{36})(?:\/(renew|release|reply|attachment|rooms|initiate))?)?$/.exec(url.pathname);
       const selected = match && this.bots.get(decodeURIComponent(match[1]));
       const bearer = request.headers.authorization?.replace(/^Bearer /, '') || '';
       if (!selected || Buffer.byteLength(bearer) !== Buffer.byteLength(selected.token) || !timingSafeEqual(Buffer.from(bearer), Buffer.from(selected.token))) throw new WorkerError(401, 'Invalid bot credentials.');
       const { service } = selected;
       bot = decodeURIComponent(match![1]);
       const id = match![3], action = match![4];
+      if (match![2] === 'release-notes') {
+        operation = 'worker.release-notes';
+        if (request.method !== 'GET' || id || url.search || !this.releaseNotes) throw new WorkerError(404, 'Unknown worker endpoint.');
+        send(200, JSON.parse(this.releaseNotes())); return;
+      }
       operation = action ? 'worker.' + action : id ? 'worker.status' : 'worker.claim';
       const run = <T>(call: () => Promise<T>) => diagnosticOperation({ operation, bot, task: id }, call);
       if (request.method === 'GET' && !id) {

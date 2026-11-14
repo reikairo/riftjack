@@ -8,10 +8,11 @@ const action = async () => '{}';
 for (const kind of ['codex', 'claude', 'pi'] as const) test(`${kind} uses the common tool gates and closes every endpoint`, async () => {
   const tools = await startBackendTools({ kind, config: { ...config, sandbox: 'read-only' }, outbox: process.cwd(),
     signal: new AbortController().signal, allowPublication: true, publish: action,
-    hooks: { detached: action, confirmation: action, github: action, background: action } });
+    hooks: { detached: action, confirmation: action, github: action, background: action, releaseNotes: () => '{"markdown":"# Notes"}' } });
   const endpoints = [...tools.connections];
   assert.equal(tools.detached, undefined); assert.equal(tools.publication, undefined);
-  assert.ok(tools.github && tools.background);
+  assert.ok(tools.github && tools.background && tools.releaseNotes);
+  assert.match(tools.instructions, /release_notes/);
   assert.equal(!!tools.confirmation, kind !== 'pi');
   assert.equal(/run_detached/.test(tools.instructions), false);
   try {

@@ -5,6 +5,15 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Release notes available to agents
+
+- Codex, Claude and Pi can call `release_notes` with no arguments. External workers
+  can run `python3 worker-client.py release-notes` with their configured credentials.
+- Startup notices name the appropriate tool or command. Notes and revision metadata
+  are captured at connector startup, so updating the checkout cannot silently
+  replace the running version's notes. No GitHub connection or local file access
+  is needed. Missing notes are reported explicitly.
+
 ## Revision-aware startup notices
 
 - Startup notices identify the running code revision and distinguish an unchanged
