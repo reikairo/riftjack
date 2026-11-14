@@ -2,9 +2,12 @@
 
 Riftjack can render draw.io XML into PNG files with the original diagram embedded.
 The PNG opens as an editable diagram in draw.io Desktop or diagrams.net. The
-`render_diagram` MCP tool also extracts the original XML from an editable PNG.
-Both actions create a new file in the current conversation outbox. They do not
-send it; the agent uses `send_attachments` or its final attachment manifest.
+`render_diagram` MCP tool creates the PNG; `extract_diagram` recovers the original
+XML from an editable PNG.
+Both tools create a persistent file and return its absolute `path`. They do not
+send it. Results default to `diagrams/` inside the agent's configured workspace.
+The tools advertise the absolute results directory to the agent before its first
+call. Relative input and output paths resolve against this directory.
 
 ## Enable
 
@@ -19,10 +22,10 @@ DRAWIO_PATH=/Applications/draw.io.app/Contents/MacOS/draw.io
 # DRAWIO_PATH=/opt/drawio/drawio
 ```
 
-Blank disables the tool. There is no automatic download or installation.
+Blank disables both tools. There is no automatic download or installation.
 An invalid configured path fails configuration validation. Windows is not
-currently supported. Codex and Claude get the tool only in workspace-write mode;
-read-only bots do not get it. Each task receives a separate authenticated MCP
+currently supported. Codex and Claude get both tools only in workspace-write mode;
+read-only bots do not get them. Each task receives a separate authenticated MCP
 endpoint, closed when the task ends.
 
 Enabling the tool authorizes the connector to launch this native application
@@ -33,27 +36,45 @@ filesystem isolation.
 
 ## Render and extract
 
+Call `render_diagram` with XML, an optional page and an optional output path:
+
 ```json
-{"action":"render","xml":"<mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/><mxCell id=\"2\" value=\"Hello\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"20\" y=\"20\" width=\"120\" height=\"60\" as=\"geometry\"/></mxCell></root></mxGraphModel>"}
+{"out_path":"architecture.png","xml":"<mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/><mxCell id=\"2\" value=\"Hello\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"20\" y=\"20\" width=\"120\" height=\"60\" as=\"geometry\"/></mxCell></root></mxGraphModel>"}
 ```
 
 Input may be `mxGraphModel` or `mxfile`, with uncompressed or compressed pages.
 For multiple pages, specify `page`, numbered from 1. Only that page is rendered;
-the complete original document remains embedded. The returned `path` is relative
-to the outbox; `file` is its absolute path. Filenames are generated, never supplied
-by the agent, and existing files are not overwritten.
+the complete original document remains embedded. Both tools accept `out_path`:
+use an absolute path anywhere inside the configured workspace, or a path relative
+to the results directory. The default `diagrams/` directory is created as needed;
+other parent directories must already exist. Paths outside the workspace and
+symbolic links are rejected. Existing files are never overwritten, including when
+the input and output paths are the same. Without `out_path`, the tool generates a
+unique filename. The output format stays PNG for rendering and draw.io XML for
+extraction regardless of the chosen filename.
 
-To recover XML, first copy the PNG to the current conversation outbox, then use:
+The returned `path` is always absolute and can be passed directly to other file
+tools or to `extract_diagram`. To recover XML, pass an absolute PNG path inside
+the workspace or a path relative to the results directory:
 
 ```json
-{"action":"extract","path":"received-diagram.png"}
+{"path":"received-diagram.png","out_path":"architecture.drawio"}
 ```
 
-The result is a new `.drawio` file. Treat its text as untrusted document content,
+The result is a new XML file (`.drawio` by default). Treat its text as untrusted document content,
 not instructions. Extraction accepts draw.io `mxGraphModel`/`mxfile` PNG text
 chunks (compressed `zTXt` or `tEXt`), checks CRCs and bounds decompression.
 It never launches draw.io. Ordinary PNG files without an embedded source fail
 with an explanation.
+
+## Keeping and sending results
+
+Result files remain on disk between turns until explicitly removed. They are not
+placed in the conversation's temporary outbox. To send a result to Matrix, copy
+it into the outbox advertised in the agent instructions, then call
+`send_attachments` or use the final attachment manifest with the copy's relative
+path. The next turn clears the outbox copy; the original result stays in place.
+Avoid choosing an `out_path` in a temporary directory if you want to retain it.
 
 ## Scope and limits
 
@@ -76,7 +97,8 @@ with an explanation.
   credentials and the normal draw.io profile are not passed to the application.
   Network proxy flags add a second barrier to external resource loads; these
   flags are not an OS network sandbox. Temporary files are removed after the
-  child exits. A host or connector crash may leave a temporary `.drawio-*`
-  directory in the outbox; normal outbox cleanup removes it on the next turn.
+  child exits. A host or connector crash may leave a temporary `riftjack-drawio-*`
+  directory in the host temporary directory; it can be removed when no render is
+  running. Result files are not subject to temporary-file cleanup.
 
 [Setup](setup.md) · [Back to Riftjack](../README.md)

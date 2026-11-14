@@ -14,7 +14,7 @@ import { startRoomMessageMcp, ROOM_MESSAGE_SERVER, roomMessageInstructions } fro
 import { startFetchMcp, FETCH_SERVER, fetchInstructions } from './fetch-mcp.js';
 import { fetchAction } from './fetch.js';
 import { startDrawioMcp, DRAWIO_SERVER, drawioInstructions } from './drawio-mcp.js';
-import { drawioAction } from './drawio.js';
+import { drawioAction, diagramDirectory } from './drawio.js';
 
 type Connection = Awaited<ReturnType<typeof startBackgroundMcp>>;
 // All backends use the same permission gates and cleanup. Only conversion of
@@ -44,7 +44,7 @@ export async function startBackendTools(options: {
     const publication = publish && options.allowPublication && config.sandbox !== 'read-only'
       ? await add(PUBLISH_SERVER, startPublishMcp(publish, signal)) : undefined;
     const diagram = supports('drawio') && config.drawio && config.sandbox !== 'read-only'
-      ? await add(DRAWIO_SERVER, startDrawioMcp(drawioAction(config.drawio, outbox, config.maxMediaBytes), signal)) : undefined;
+      ? await add(DRAWIO_SERVER, startDrawioMcp(drawioAction(config.drawio, config.workspace, config.maxMediaBytes), signal, diagramDirectory(config.workspace))) : undefined;
     const rooms = hooks?.roomMessages ? await add(ROOM_MESSAGE_SERVER, startRoomMessageMcp((input, s) => hooks.roomMessages!(input, s, outbox), signal)) : undefined;
     const delivery = hooks?.sendAttachments ? attachmentDelivery(outbox, config.maxMediaBytes, async (files, s) => {
       await options.beforeAttachments?.(); s.throwIfAborted(); return hooks.sendAttachments!(files, s);
@@ -53,7 +53,7 @@ export async function startBackendTools(options: {
     const instructions = (rooms ? conversationInstructions : '') + (detached ? detachedInstructions : '') + (confirmation ? confirmationInstructions : '') +
       (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') +
       (rooms ? roomMessageInstructions : '') + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '') +
-      (diagram ? drawioInstructions : '') + (releaseNotes ? releaseNotesInstructions : '');
+      (diagram ? drawioInstructions(diagramDirectory(config.workspace)) : '') + (releaseNotes ? releaseNotesInstructions : '');
     return { releaseNotes, detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media, instructions, connections, close };
   } catch (error) { await close(); throw error; }
 }

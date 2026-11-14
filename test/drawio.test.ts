@@ -1,12 +1,12 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { basename, isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { crc32, deflateSync, deflateRawSync } from 'node:zlib';
 import { diagramSource, MAX_XML } from '../src/drawio-source.js';
 import { embedDiagram, extractDiagram } from '../src/drawio-png.js';
-import { drawioAction, loadDrawioConfig, renderDrawio, type Renderer } from '../src/drawio.js';
+import { diagramDirectory, drawioAction, loadDrawioConfig, renderDrawio, type Renderer } from '../src/drawio.js';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==', 'base64');
 const xml = '<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="2" value="Привет &amp; 世界" vertex="1" parent="1" style="rounded=1;html=1;"><mxGeometry x="20" y="20" width="120" height="60" as="geometry"/></mxCell></root></mxGraphModel>';
@@ -14,6 +14,7 @@ const config = { executable: '/opt/drawio' };
 const signal = () => new AbortController().signal;
 async function fixture(t: TestContext) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'drawio-')));
+  await mkdir(diagramDirectory(dir));
   t.after(() => rm(dir, { recursive: true, force: true })); return dir;
 }
 const render: Renderer = async (_exe, dir) => { await writeFile(join(dir, 'render.png'), png); };
@@ -58,37 +59,96 @@ test('PNG source round-trips Unicode and compressed documents and rejects corrup
   }
   assert.throws(() => extractDiagram(png), /embedded/);
 });
-test('render and extract create new outbox files with exact original source; nothing is sent', async t => {
+test('render and extract return absolute paths and preserve the original source', async t => {
   const dir = await fixture(t), action = drawioAction(config, dir, 1024 * 1024, render);
   const output = JSON.parse(await action({ action: 'render', xml }, signal()));
   assert.equal(output.editable, true); assert.equal(output.page, 1);
-  const saved = await readFile(output.file); assert.equal(extractDiagram(saved), xml);
+  const saved = await readFile(output.path); assert.equal(extractDiagram(saved), xml);
   const extracted = JSON.parse(await action({ action: 'extract', path: output.path }, signal()));
-  assert.equal(await readFile(extracted.file, 'utf8'), xml); assert.equal(extracted.untrusted, true);
+  assert.equal(await readFile(extracted.path, 'utf8'), xml); assert.equal(extracted.untrusted, true);
   assert.notEqual(extracted.path, output.path);
-  assert.deepEqual((await readdir(dir)).sort(), [output.path, extracted.path].sort());
+  assert.ok(isAbsolute(output.path) && isAbsolute(extracted.path));
+  assert.deepEqual((await readdir(diagramDirectory(dir))).sort(), [basename(output.path), basename(extracted.path)].sort());
 });
-test('extract refuses paths outside the outbox, links and oversize output; invalid requests never render', async t => {
+test('extract refuses paths outside the workspace, links and oversize output; invalid requests never render', async t => {
   const dir = await fixture(t); let calls = 0;
   const action = drawioAction(config, dir, 1024 * 1024, async (...args) => { calls++; await render(...args); });
-  for (const req of [{ action: 'render', xml, page: '1' }, { action: 'render', xml, output: '/x' }, { action: 'extract', path: '../x' }, { action: 'extract', path: '/x' }]) await assert.rejects(action(req, signal()));
-  await symlink('/etc/hosts', join(dir, 'link.png'));
+  for (const req of [{ action: 'render', xml, page: '1' }, { action: 'render', xml, output: '/x' }, { action: 'extract', path: '../../x' }, { action: 'extract', path: '/x' }]) await assert.rejects(action(req, signal()));
+  await symlink('/etc/hosts', join(diagramDirectory(dir), 'link.png'));
   await assert.rejects(action({ action: 'extract', path: 'link.png' }, signal()), /symlink/);
   assert.equal(calls, 0);
   await assert.rejects(drawioAction(config, dir, 1, render)({ action: 'render', xml }, signal()), /attachment size/);
-  assert.deepEqual(await readdir(dir), ['link.png']);
+  assert.deepEqual(await readdir(diagramDirectory(dir)), ['link.png']);
+});
+test('absolute paths select project files outside the default results directory', async t => {
+  const dir = await fixture(t), action = drawioAction(config, dir, MAX_XML, render);
+  const project = join(dir, 'project'); await mkdir(project);
+  const output = JSON.parse(await action({ action: 'render', xml, out_path: join(project, 'architecture.png') }, signal()));
+  assert.equal(output.path, join(project, 'architecture.png'));
+  const source = JSON.parse(await action({ action: 'extract', path: output.path, out_path: join(project, 'architecture.drawio') }, signal()));
+  assert.equal(source.path, join(project, 'architecture.drawio'));
+  assert.equal(await readFile(source.path, 'utf8'), xml);
+  assert.deepEqual(await readdir(diagramDirectory(dir)), []);
+  const relativeInput = JSON.parse(await action({ action: 'extract', path: '../project/architecture.png' }, signal()));
+  assert.equal(await readFile(relativeInput.path, 'utf8'), xml);
+});
+test('diagram out_path selects names and existing subdirectories without overwriting files', async t => {
+  const dir = await fixture(t), action = drawioAction(config, dir, MAX_XML, render);
+  await mkdir(join(diagramDirectory(dir), 'results'));
+  const output = JSON.parse(await action({ action: 'render', xml, out_path: 'results/схема.png' }, signal()));
+  assert.equal(output.path, join(diagramDirectory(dir), 'results/схема.png'));
+  const extracted = JSON.parse(await action({ action: 'extract', path: output.path, out_path: 'results/source.drawio' }, signal()));
+  assert.equal(extracted.path, join(diagramDirectory(dir), 'results/source.drawio'));
+  assert.equal(await readFile(extracted.path, 'utf8'), xml);
+  await assert.rejects(action({ action: 'extract', path: output.path, out_path: output.path }, signal()), /already exists/);
+  assert.equal(extractDiagram(await readFile(output.path)), xml);
+  await assert.rejects(action({ action: 'render', xml, out_path: extracted.path }, signal()), /already exists/);
+  assert.equal(await readFile(extracted.path, 'utf8'), xml);
+});
+test('diagram rejects invalid output paths before rendering', async t => {
+  const dir = await fixture(t), outside = await fixture(t);
+  await symlink(outside, join(diagramDirectory(dir), 'linked'));
+  await symlink(join(outside, 'missing'), join(diagramDirectory(dir), 'dangling.png'));
+  let renders = 0;
+  const action = drawioAction(config, dir, MAX_XML, async (...args) => { renders++; await render(...args); });
+  for (const out_path of ['', ' ', null, 5, '../../escape.png', join(outside, 'escape.png'), '.', 'missing/file.png', 'linked/file.png', 'dangling.png', 'bad\0.png']) {
+    await assert.rejects(action({ action: 'render', xml, out_path }, signal()));
+  }
+  assert.equal(renders, 0);
+  assert.deepEqual(await readdir(diagramDirectory(outside)), []);
+  assert.deepEqual(await readdir(outside), ['diagrams']);
+});
+test('diagram protects a competing output and rechecks output parents after rendering', async t => {
+  const dir = await fixture(t), outside = await fixture(t);
+  const competing = drawioAction(config, dir, MAX_XML, async (...args) => {
+    await writeFile(join(diagramDirectory(dir), 'chosen.png'), 'other writer');
+    await render(...args);
+  });
+  await assert.rejects(competing({ action: 'render', xml, out_path: 'chosen.png' }, signal()), /already exists/);
+  assert.equal(await readFile(join(diagramDirectory(dir), 'chosen.png'), 'utf8'), 'other writer');
+  await mkdir(join(diagramDirectory(dir), 'results'));
+  const replaced = drawioAction(config, dir, MAX_XML, async (...args) => {
+    await rm(join(diagramDirectory(dir), 'results'), { recursive: true });
+    await symlink(outside, join(diagramDirectory(dir), 'results'));
+    await render(...args);
+  });
+  await assert.rejects(replaced({ action: 'render', xml, out_path: 'results/result.png' }, signal()), /symlink/);
+  assert.deepEqual(await readdir(diagramDirectory(outside)), []);
+  assert.deepEqual(await readdir(outside), ['diagrams']);
 });
 test('one render across conversations; cancellation cleans job and releases capacity', async t => {
-  const dir = await fixture(t), controller = new AbortController(); let entered!: () => void;
+  const dir = await fixture(t), controller = new AbortController(); let entered!: () => void, temporary!: string;
   const started = new Promise<void>(r => { entered = r; });
-  const waiting: Renderer = async (_exe, _dir, sig) => new Promise((_resolve, reject) => {
+  const waiting: Renderer = async (_exe, renderDir, sig) => new Promise((_resolve, reject) => {
+    temporary = renderDir;
     sig.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }); entered();
   });
   const first = drawioAction(config, dir, MAX_XML, waiting)({ action: 'render', xml }, controller.signal);
   await started;
   await assert.rejects(drawioAction(config, dir, MAX_XML, render)({ action: 'render', xml }, signal()), /Another diagram/);
   controller.abort(); await assert.rejects(first, /cancelled/);
-  assert.deepEqual(await readdir(dir), []);
+  await assert.rejects(readdir(temporary), { code: 'ENOENT' });
+  assert.deepEqual(await readdir(diagramDirectory(dir)), []);
   await drawioAction(config, dir, MAX_XML, render)({ action: 'render', xml }, signal());
 });
 test('renderer uses a dedicated profile, fixed arguments and a minimal environment', async t => {

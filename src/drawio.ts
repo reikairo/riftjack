@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { accessSync, constants, realpathSync, statSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, sep } from 'node:path';
+import { lstat, mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 import { PublicError } from './errors.js';
-import { outgoingAttachments, readOutgoing } from './media.js';
+import { readOutgoing } from './media.js';
 import { diagramSource } from './drawio-source.js';
 import { embedDiagram, extractDiagram, MAX_PNG } from './drawio-png.js';
 import type { ToolAction } from './tool-mcp.js';
@@ -87,25 +88,63 @@ export const renderDrawio: Renderer = async (executable, directory, signal) => {
 // Shared across all conversations/backends in this connector process. Refuse
 // overlap instead of holding an unbounded queue of multi-megabyte XML requests.
 let rendering = false;
-export function drawioAction(config: DrawioConfig, outbox: string, maxMediaBytes: number, renderer: Renderer = renderDrawio): ToolAction {
+export function diagramDirectory(workspace: string): string { return join(workspace, 'diagrams'); }
+
+export function drawioAction(config: DrawioConfig, workspace: string, maxMediaBytes: number, renderer: Renderer = renderDrawio): ToolAction {
+  const directory = diagramDirectory(workspace);
+  const resolvePath = (value: unknown): string => {
+    if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new PublicError('Supply a nonempty diagram path.');
+    const path = resolve(directory, value), rel = relative(workspace, path);
+    if (!rel || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) throw new PublicError('Diagram paths must be inside the configured workspace.');
+    return path;
+  };
   return async (input, signal) => {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PublicError('Expected a diagram request.');
     const p = input as Record<string, unknown>;
-    const allowed = p.action === 'render' ? ['action', 'xml', 'page'] : p.action === 'extract' ? ['action', 'path'] : [];
-    if (!allowed.length || Object.keys(p).some(k => !allowed.includes(k))) throw new PublicError('Use render with xml and optional page, or extract with an outbox path.');
+    const allowed = p.action === 'render' ? ['action', 'xml', 'page', 'out_path'] : p.action === 'extract' ? ['action', 'path', 'out_path'] : [];
+    if (!allowed.length || Object.keys(p).some(k => !allowed.includes(k))) throw new PublicError('Use render_diagram with xml and optional page, or extract_diagram with a PNG path. Both accept an optional out_path.');
     signal.throwIfAborted();
-    if (await realpath(outbox) !== outbox) throw new PublicError('Outbox must not be a symlink.');
+    if (await realpath(workspace) !== workspace) throw new PublicError('Diagram workspace must not be a symlink.');
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    if (await realpath(directory) !== directory) throw new PublicError('Diagram directory must not be a symlink.');
+    let output: string | undefined;
+    const checkParent = async (path: string) => {
+      const parent = dirname(path);
+      let canonical: string;
+      try { canonical = await realpath(parent); }
+      catch (cause) { throw new PublicError('The output parent directory must already exist.', { cause }); }
+      if (canonical !== parent) throw new PublicError('Output directory symlinks are not allowed.');
+    };
+    if (p.out_path !== undefined) {
+      const target = resolvePath(p.out_path);
+      await checkParent(target);
+      // Fail before invoking the renderer; exclusive creation below also covers
+      // a competing writer that creates the path after this check.
+      let exists = false;
+      try { await lstat(target); exists = true; }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
+      }
+      if (exists) throw new PublicError('The output file already exists. Choose a different out_path.');
+      output = target;
+    }
+    signal.throwIfAborted();
     const save = async (data: Buffer | string, extension: string, metadata: object) => {
       signal.throwIfAborted();
       if (Buffer.byteLength(data) > maxMediaBytes) throw new PublicError('Result exceeds the configured attachment size limit.');
-      const path = 'diagram-' + randomUUID() + extension;
-      if (await realpath(outbox) !== outbox) throw new PublicError('Outbox must not be a symlink.');
-      await writeFile(join(outbox, path), data, { flag: 'wx', mode: 0o600 });
-      return JSON.stringify({ path, file: join(outbox, path), bytes: Buffer.byteLength(data), ...metadata });
+      const path = output ?? join(directory, 'diagram-' + randomUUID() + extension);
+      if (await realpath(workspace) !== workspace) throw new PublicError('Diagram workspace must not be a symlink.');
+      await checkParent(path);
+      signal.throwIfAborted();
+      try { await writeFile(path, data, { flag: 'wx', mode: 0o600 }); }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === 'EEXIST') throw new PublicError('The output file already exists. Choose a different out_path.', { cause });
+        throw cause;
+      }
+      return JSON.stringify({ path, bytes: Buffer.byteLength(data), ...metadata });
     };
     if (p.action === 'extract') {
-      if (typeof p.path !== 'string') throw new PublicError('Copy the PNG into this conversation outbox and pass its relative path.');
-      const [file] = outgoingAttachments({ files: [{ path: p.path }] }, outbox);
+      const file = { root: workspace, path: resolvePath(p.path) };
       const xml = extractDiagram(await readOutgoing(file, MAX_PNG));
       return save(xml, '.drawio', { untrusted: true });
     }
@@ -113,20 +152,20 @@ export function drawioAction(config: DrawioConfig, outbox: string, maxMediaBytes
     if (rendering) throw new PublicError('Another diagram is rendering. Retry after it completes.');
     const model = diagramSource(p.xml, p.page as number | undefined);
     rendering = true;
-    let directory: string | undefined;
+    let temporary: string | undefined;
     try {
-      directory = await mkdtemp(join(outbox, '.drawio-'));
-      await writeFile(join(directory, 'input.drawio'), model.renderXml, { mode: 0o600, flag: 'wx' });
+      temporary = await realpath(await mkdtemp(join(tmpdir(), 'riftjack-drawio-')));
+      await writeFile(join(temporary, 'input.drawio'), model.renderXml, { mode: 0o600, flag: 'wx' });
       const lifetime = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
-      await renderer(config.executable, directory, lifetime);
+      await renderer(config.executable, temporary, lifetime);
       lifetime.throwIfAborted();
-      const rendered = await readOutgoing({ root: directory, path: join(directory, 'render.png') }, MAX_PNG);
+      const rendered = await readOutgoing({ root: temporary, path: join(temporary, 'render.png') }, MAX_PNG);
       const png = embedDiagram(rendered, p.xml);
       if (png.readUInt32BE(16) > 2048 || png.readUInt32BE(20) > 2048) throw new PublicError('Rendered diagram exceeds 2048 pixels per side.');
       if (extractDiagram(png) !== p.xml) throw new PublicError('Embedded diagram source did not round-trip.');
       return await save(png, '.png', { page: model.page, pages: model.pages, editable: true });
     } finally {
-      try { if (directory) await rm(directory, { recursive: true, force: true }); }
+      try { if (temporary) await rm(temporary, { recursive: true, force: true }); }
       finally { rendering = false; }
     }
   };

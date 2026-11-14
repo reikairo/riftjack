@@ -2,7 +2,7 @@ import { startReleaseNotesMcp, RELEASE_NOTES_SERVER, RELEASE_NOTES_TOOL } from '
 import { startBackendTools } from './backend-tools.js';
 import { startDetachedMcp, DETACHED_SERVER, DETACHED_TOOL } from './detached-mcp.js';
 import { startConfirmationMcp, CONFIRMATION_SERVER, CONFIRMATION_TOOL } from './confirmation-mcp.js';
-import { startDrawioMcp, DRAWIO_SERVER, DRAWIO_TOOL } from './drawio-mcp.js';
+import { startDrawioMcp, DRAWIO_SERVER, DRAWIO_TOOLS } from './drawio-mcp.js';
 import { startGitHubMcp, GITHUB_SERVER, GITHUB_TOOL } from './github-mcp.js';
 import { routingInstructions } from './routing-instructions.js';
 import { claudeAuthenticationFailure } from './auth-diagnostics.js';
@@ -217,10 +217,10 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const allowed = readOnly ? ['Read', 'Glob', 'Grep'] : [];
   const servers: Record<string, object> = {};
   for (const [name, connection, tool] of [[PUBLISH_SERVER, !readOnly && publication, PUBLISH_TOOL],
-    [RELEASE_NOTES_SERVER, releaseNotes, RELEASE_NOTES_TOOL], [DETACHED_SERVER, !readOnly && detached, DETACHED_TOOL], [CONFIRMATION_SERVER, confirmation, CONFIRMATION_TOOL], [GITHUB_SERVER, github, GITHUB_TOOL], [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL], [ROOM_MESSAGE_SERVER, rooms, ROOM_MESSAGE_TOOL], [FETCH_SERVER, web, FETCH_TOOL], [DRAWIO_SERVER, !readOnly && diagram, DRAWIO_TOOL]] as const) {
+    [RELEASE_NOTES_SERVER, releaseNotes, RELEASE_NOTES_TOOL], [DETACHED_SERVER, !readOnly && detached, DETACHED_TOOL], [CONFIRMATION_SERVER, confirmation, CONFIRMATION_TOOL], [GITHUB_SERVER, github, GITHUB_TOOL], [BACKGROUND_SERVER, background, BACKGROUND_TOOL], [ATTACHMENT_SERVER, media, ATTACHMENT_TOOL], [ROOM_MESSAGE_SERVER, rooms, ROOM_MESSAGE_TOOL], [FETCH_SERVER, web, FETCH_TOOL], [DRAWIO_SERVER, !readOnly && diagram, DRAWIO_TOOLS]] as const) {
     if (!connection) continue;
     servers[name] = { type: 'http', url: connection.url, headers: connection.headers, timeout: config.timeoutMs };
-    allowed.push(tool);
+    allowed.push(...(typeof tool === 'string' ? [tool] : tool));
   }
   if (Object.keys(servers).length) args.push('--mcp-config', JSON.stringify({ mcpServers: servers }));
   if (allowed.length) args.push('--allowedTools', allowed.join(','));

@@ -4,14 +4,23 @@ import { errorMessage } from './errors.js';
 export type ToolAction = (input: unknown, signal: AbortSignal) => Promise<string>;
 export type ToolConnection = { url: string; headers: { Authorization: string } };
 export type ToolDefinition = { name: string; description: string; inputSchema: object; annotations: object };
+export type ToolRegistration = { definition: ToolDefinition; action: ToolAction };
+type ToolMessages = { server: string; cancelled: string; failed: string };
+type ToolOptions = { maxQueued?: number; maxRequestBytes?: number };
 
 const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
 
 // A task-local Streamable HTTP MCP endpoint. No persistent config, public listener,
 // Matrix credentials or API for approving requests. Each action enforces its own
 // destination scope; exposing this transport never authorizes arbitrary rooms.
-export async function startToolMcp(tool: ToolDefinition, action: ToolAction, signal: AbortSignal, messages: { server: string; cancelled: string; failed: string }, options: { maxQueued?: number; maxRequestBytes?: number } = {}): Promise<ToolConnection & { close(): Promise<void> }> {
+export function startToolMcp(tool: ToolDefinition, action: ToolAction, signal: AbortSignal, messages: ToolMessages, options: ToolOptions = {}) {
+  return startToolsMcp([{ definition: tool, action }], signal, messages, options);
+}
+
+export async function startToolsMcp(tools: readonly ToolRegistration[], signal: AbortSignal, messages: ToolMessages, options: ToolOptions = {}): Promise<ToolConnection & { close(): Promise<void> }> {
   signal.throwIfAborted();
+  const actions = new Map(tools.map(tool => [tool.definition.name, tool.action]));
+  if (!tools.length || actions.size !== tools.length) throw new Error('MCP tools must have distinct names and must not be empty.');
   const maxQueued = options.maxQueued ?? 0;
   const maxRequestBytes = options.maxRequestBytes ?? 16_384;
   if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes < 1 || maxRequestBytes > 8 * 1024 * 1024) throw new Error('Invalid tool request size limit.');
@@ -78,7 +87,7 @@ export async function startToolMcp(tool: ToolDefinition, action: ToolAction, sig
           capabilities: { tools: {} }, serverInfo: { name: messages.server, version: '1.0.0' } }); return;
       }
       if (method === 'ping') { result({}); return; }
-      if (method === 'tools/list') { result({ tools: [tool] }); return; }
+      if (method === 'tools/list') { result({ tools: tools.map(tool => tool.definition) }); return; }
       if (method !== 'tools/call') { error(-32601, 'Method not found.'); return; }
       if (used.has(id)) { error(-32600, 'Request ID already used. Tool calls are never replayed.'); return; }
       if (used.size >= 1024) { error(-32600, 'The task request limit was reached (1024 calls).'); return; }
@@ -86,7 +95,8 @@ export async function startToolMcp(tool: ToolDefinition, action: ToolAction, sig
         error(-32600, maxQueued ? 'The tool request queue is full. Retry after a pending call completes.' : 'A tool call is already pending.'); return;
       }
       used.add(id);
-      if (!record(params) || params.name !== tool.name) { error(-32602, 'Unknown tool.'); return; }
+      const action = record(params) && typeof params.name === 'string' ? actions.get(params.name) : undefined;
+      if (!action) { error(-32602, 'Unknown tool.'); return; }
       const controller = new AbortController();
       const callSignal = AbortSignal.any([signal, lifetime.signal, controller.signal]);
       const disconnected = () => controller.abort();
