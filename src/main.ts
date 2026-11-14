@@ -8,6 +8,7 @@ import { createConfirmationJobs, createRunApprovalJobs } from './decision-jobs.j
 import { PublicationJobs } from './publication-jobs.js';
 import { DetachedRuns } from './detached-runs.js';
 import { restartContext } from './restart-context.js';
+import { StartupVersion } from './startup-version.js';
 import { requestConfirmation } from './confirmation-mcp.js';
 import { checkPi } from './pi-backend.js';
 import { matrixTyping } from './matrix-typing.js';
@@ -109,6 +110,7 @@ async function main() {
     return;
   }
   configureHostDiagnostics(join(config.dataDir, 'diagnostics'));
+  const startupVersion = new StartupVersion(join(config.dataDir, 'startup-version.json'));
   const transport = installMatrixTransport(config.matrixHttpVersion, [config.homeserver, config.adminUrl], undefined, reportDiagnostic);
   matrixTransport = transport;
   console.log(JSON.stringify({ time: new Date().toISOString(), ...transportConfiguration(config.matrixHttpVersion, config.homeserver, config.adminUrl, !!config.sshTunnel, process.env) }));
@@ -751,15 +753,15 @@ async function main() {
       phase('deviceIdentity');
       // Reserve the bridge before sync admits new input. Recovery runs without
       // blocking Matrix controls or startup of the other accounts.
-      if (bridge instanceof Bridge && recoverMessages) {
+      if (recoverMessages || bridge instanceof WorkerBridge) {
         const home = linkedAgent?.home ?? account.roomId;
         const sender = linkedAgent?.owner ?? account.inviteUserId ?? config.owner;
         if (home) {
           const key = sessionKey(home, { sender, content: linkedAgent?.thread
             ? { 'm.relates_to': { rel_type: 'm.thread', event_id: linkedAgent.thread } } : undefined });
-          const session = state.session(key)[account.kind as 'codex' | 'claude' | 'pi'];
+          const session = state.session(key)[account.kind as 'codex' | 'claude' | 'pi' | 'grok'];
           if (session && (!linkedAgent || session === linkedAgent.session)) {
-            bridge.scheduleRestart(startupId, home, sender, session, linkedAgent?.thread);
+            await bridge.scheduleRestart(startupId, home, sender, session, linkedAgent?.thread, startupVersion.summary);
           }
         }
         void diagnosticOperation({ operation: 'message.recover', bot: account.userId }, () => bridge instanceof Bridge ? bridge.recoverMessages(routeIncoming) : Promise.resolve()).catch(report);
@@ -796,6 +798,7 @@ async function main() {
   starting = false;
   if (!clients.size) throw new PublicError('No bots could start. Check credentials, encryption support, and homeserver connectivity.');
   if (config.workerPort) await workerServer.start(config.workerPort);
+  try { startupVersion.ready(); } catch (error) { diagnostics(error, 'startup.version.save'); }
   // Time since process start, including module loading.
   console.log(JSON.stringify({ time: new Date().toISOString(), event: 'connector-startup',
     bots: clients.size, elapsedMs: Math.round(performance.now()) }));
@@ -825,7 +828,7 @@ async function main() {
           return manager && { botId: manager.userId, roomId: manager.roomId!, sender: access.owner };
         },
         body: `Connector restarted. This bot is online and ready. Bots online: ${clients.size}/${accounts.list().length}.` +
-          (clients.size < accounts.list().length ? ' Some bots failed to start; check the connector log.' : ''),
+          (clients.size < accounts.list().length ? ' Some bots failed to start; check the connector log.' : '') + '\n' + startupVersion.summary,
         client: botId => {
           const started = clients.get(botId);
           if (!started) return;

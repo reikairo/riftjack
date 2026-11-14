@@ -132,3 +132,16 @@ test('the restart turn lists unfinished work of its own conversation, read when 
   await h.bridge.resumeRestart();
   assert.deepEqual(h.prompts, [RESTART_PROMPT]);
 });
+
+test('revision information survives both a standalone restart and recovery into another turn', async t => {
+  const version = 'Revision: abc. Release notes: https://example.com/notes';
+  for (const recovery of [false, true]) {
+    const f = fixture(t);
+    f.bridge.scheduleRestart('boot-update', room, sender, 'session', undefined, version);
+    if (recovery) { f.bridge.capture(room, event()); await f.bridge.recoverMessages(); }
+    await f.bridge.resumeRestart();
+    assert.equal(f.prompts.length, 1);
+    assert.ok(f.prompts[0].endsWith(RESTART_PROMPT + '\n' + version));
+    assert.equal(f.prompts[0].split(version).length, 2);
+  }
+});
