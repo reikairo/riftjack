@@ -25,9 +25,13 @@ const path = require('node:path');
 const args = process.argv.slice(2);
 process.stderr.write(${JSON.stringify(options.stderr ?? '')});
 const record = value => fs.appendFileSync(__filename + '.calls', JSON.stringify(value) + '\\n');
-record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
+// Publishing the call is the readiness handshake used by timeout tests.
+// Install the signal handler first so the parent can safely abort immediately.
 if (args[0] === ${JSON.stringify(options.hangCheck)}) {
   process.on('SIGTERM', () => { fs.writeFileSync(__filename + '.terminated', 'yes'); process.exit(0); });
+}
+record({ args, cwd: process.cwd(), user: process.env.USER, logname: process.env.LOGNAME, secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'AWS_ACCESS_KEY_ID', 'SYNAPSE_ADMIN_TOKEN', 'MATRIX_OWNER_ID', 'ANTHROPIC_BASE_URL', 'CLAUDECODE'].filter(key => process.env[key]) });
+if (args[0] === ${JSON.stringify(options.hangCheck)}) {
   setInterval(() => {}, 1000); return;
 }
 if (args.includes('--help')) {
@@ -432,7 +436,6 @@ test('Claude permission prompts use stdio only for workspace-write bots with app
 for (const [name, decide, expected] of [
   ['approved', async (question: Interaction) => question.approve!, 'Permission allow'],
   ['declined', async (question: Interaction) => question.deny, 'Permission deny'],
-  ['unconfirmable', async () => { throw new Error('Matrix unavailable'); }, 'Permission deny'],
 ] as const) {
   test('Claude permission request is ' + name + ' through Matrix and answered on stdin', async t => {
     const f = setup(t);
@@ -952,4 +955,42 @@ test('unexpected Claude failures identify their stage without exposing exception
     return true;
   });
   assert.ok(f.calls().every(call => !call.args?.includes('--print')));
+});
+
+test('Claude confirmation transport failure is not a human decline and releases the conversation', async t => {
+  const f = setup(t);
+  const cause = Object.assign(new Error('private Matrix details'), { code: 'ETIMEDOUT' });
+  let requests = 0;
+  await assert.rejects(f.backend('claude', '[permission]', 'confirmation-failure', signal(), '@owner:test', [], async () => {
+    requests++;
+    throw cause;
+  }), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /confirmation failed/i);
+    assert.doesNotMatch(error.message, /user declined/i);
+    assert.doesNotMatch(error.message, /private Matrix details/);
+    assert.equal(error.cause, cause);
+    return true;
+  });
+  assert.equal(requests, 1);
+  assert.ok(!f.calls().some(call => call.response));
+  assert.equal(f.calls().filter(call => call.input).length, 1);
+  assert.equal(await f.backend('claude', 'retry', 'confirmation-failure', signal(), '@owner:test'), 'Claude answer');
+});
+
+test('Claude cancellation while awaiting confirmation preserves cancellation instead of a decline', async t => {
+  const f = setup(t), controller = new AbortController();
+  let shown!: () => void;
+  const ready = new Promise<void>(resolve => { shown = resolve; });
+  const reason = new Error('caller cancelled');
+  const task = f.backend('claude', '[permission]', 'cancel-confirmation', controller.signal, '@owner:test', [], (_question, requestSignal) =>
+    new Promise((_resolve, reject) => {
+      requestSignal.addEventListener('abort', () => reject(requestSignal.reason), { once: true });
+      shown();
+    }));
+  const rejected = assert.rejects(task, error => error === reason);
+  await ready;
+  controller.abort(reason);
+  await rejected;
+  assert.ok(!f.calls().some(call => call.response));
 });
