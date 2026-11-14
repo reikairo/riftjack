@@ -1379,3 +1379,15 @@ test('a tool-only attachment turn marks its last delivered attachment', async t 
   await f.bridge.handle('!dm:test', event());
   assert.deepEqual(marked, ['$image']);
 });
+
+test('owner cancellation does not send an additional error diagnostic', async t => {
+  const ready = gate(); let diagnostics = 0;
+  const f = fixture(t, 'codex', async (_mode, _prompt, _key, signal) => {
+    ready.release();
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+    signal.throwIfAborted(); return 'done';
+  }, true, { ownerDiagnostic: async () => { diagnostics++; } });
+  const task = f.bridge.handle('!dm:test', event()); await ready.promise;
+  await f.bridge.handle('!dm:test', event('!cancel', '$cancel')); await task;
+  assert.equal(diagnostics, 0);
+});

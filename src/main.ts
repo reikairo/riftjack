@@ -1,5 +1,5 @@
 import { matrixSdkLogger } from './matrix-sdk-logger.js';
-import { diagnosticOperation, reportDiagnostic, transportConfiguration } from './diagnostics.js';
+import { configureHostDiagnostics, configureOwnerDiagnostics, diagnosticOperation, reportDiagnostic, transportConfiguration } from './diagnostics.js';
 import { linkedToolConversation } from './tool-conversation.js';
 import { installMatrixTransport } from './matrix-transport.js';
 import { DeliveryReceipts } from './delivery-receipts.js';
@@ -14,7 +14,8 @@ import { matrixTyping } from './matrix-typing.js';
 import { GitHubSubscriptions, githubReader, loadGitHubPolicies } from './github-subscriptions.js';
 import { linkedRoomMessages, roomMessageDelivery } from './room-messages.js';
 import { sendCompactionNotice } from './compaction-notices.js';
-import { sendOwnerDiagnostic } from './owner-diagnostics.js';
+import { DiagnosticDelivery } from './diagnostic-delivery.js';
+import { sendOwnerDiagnostic, sendOwnerDiagnosticText } from './owner-diagnostics.js';
 import { withEngineSettings } from './engine-settings.js';
 import { parseBotSettingsRequest, manageBotSettings, showBotOptions } from './bot-settings.js';
 import { BackgroundTasks } from './background-tasks.js';
@@ -106,6 +107,7 @@ async function main() {
     process.exitCode = CONFIG_EXIT_CODE;
     return;
   }
+  configureHostDiagnostics(join(config.dataDir, 'diagnostics'));
   const transport = installMatrixTransport(config.matrixHttpVersion, [config.homeserver, config.adminUrl], undefined, reportDiagnostic);
   matrixTransport = transport;
   console.log(JSON.stringify({ time: new Date().toISOString(), ...transportConfiguration(config.matrixHttpVersion, config.homeserver, config.adminUrl, !!config.sshTunnel, process.env) }));
@@ -179,10 +181,36 @@ async function main() {
   let stopping = false;
   let creating = false;
   let starting = true;
+  const diagnosticDelivery = new DiagnosticDelivery();
+  configureOwnerDiagnostics((error, context) => diagnosticDelivery.record(error, context));
+  const diagnosticTimer = setInterval(() => {
+    if (stopping || starting) return;
+    void diagnosticDelivery.flush(async body => {
+      const targets = accounts.list().sort((a, b) => Number(b.kind === 'manager') - Number(a.kind === 'manager'));
+      for (const account of targets) {
+        const started = clients.get(account.userId);
+        const room = links.agent(account.userId)?.home ?? account.roomId;
+        if (!started || !room) continue;
+        const allowed = (target: string) => isPrivateRoom(started.client, target, account.userId, access.owner,
+          sender => sender === access.owner && access.has(sender, account.kind === 'manager' ? undefined : account.userId));
+        try { if (!await allowed(room)) continue; }
+        catch (error) { diagnostics(error, 'diagnostics.access', account.userId); continue; }
+        await sendOwnerDiagnosticText(body, room, {
+          allowed, stopping: () => stopping,
+          send: (target, content) => started.client.sendMessage(target, content),
+        });
+        return true;
+      }
+      return false;
+    });
+  }, 5000);
+  diagnosticTimer.unref();
   const shutdown = (code: number) => {
     if (stopping) return;
     stopping = true;
     clearInterval(restartNoticeTimer);
+    clearInterval(diagnosticTimer);
+    configureOwnerDiagnostics(undefined);
     clearInterval(workerTimer); clearInterval(discoveryTimer);
     clearInterval(backgroundTimer); clearInterval(githubTimer); githubLifetime.abort();
     for (const { client, bridge } of clients.values()) { bridge.stop(); client.stop(); }
@@ -400,7 +428,7 @@ async function main() {
           allowed: target => isPrivateRoom(client, target, account.userId, access.owner, authorized),
           stopping: () => stopping,
           send: (target, content) => client.sendMessage(target, content),
-        }),
+        }, { operation: 'task.failure', bot: account.userId }),
       compactionRoom: linkedAgent?.home,
       compaction: (phase, { room, sender }) => sendCompactionNotice(phase, room, {
           // Use the strict two-person check here, not privateRoom which also

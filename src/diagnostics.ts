@@ -1,3 +1,4 @@
+import { HostDiagnosticLog } from './host-diagnostics.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -79,7 +80,7 @@ export async function diagnosticOperation<T>(details: DiagnosticContext, run: ()
   });
 }
 
-export function diagnosticRecord(error: unknown, details: DiagnosticContext) {
+function resolvedContext(error: unknown, details: DiagnosticContext) {
   let failed: (DiagnosticContext & { elapsedMs: number; observedAt: number }) | undefined;
   let cause = error;
   const seen = new Set<unknown>();
@@ -90,6 +91,11 @@ export function diagnosticRecord(error: unknown, details: DiagnosticContext) {
   }
   const current = { ...context.getStore(), ...failed,
     ...Object.fromEntries(Object.entries(details).filter(([, value]) => value !== undefined)) };
+  return { current, failed };
+}
+
+export function diagnosticRecord(error: unknown, details: DiagnosticContext) {
+  const { current, failed } = resolvedContext(error, details);
   let summary: string;
   try { summary = safeErrorSummary(error); } catch { summary = 'Error (diagnostic fields unavailable)'; }
   let publicMessage: string | undefined;
@@ -116,13 +122,43 @@ export function diagnosticRecord(error: unknown, details: DiagnosticContext) {
   };
 }
 
+const ownerSuppressed = new AsyncLocalStorage<boolean>();
+let ownerSink: ((error: unknown, details: DiagnosticContext) => void) | undefined;
+export function configureOwnerDiagnostics(sink: typeof ownerSink): void { ownerSink = sink; }
+export function withoutOwnerDiagnostics<T>(run: () => T): T { return ownerSuppressed.run(true, run); }
+export function ownerDiagnosticContext(error: unknown, details: DiagnosticContext): DiagnosticContext {
+  return { ...resolvedContext(error, details).current, operation: details.operation };
+}
+
+let hostLog: HostDiagnosticLog | undefined;
+let hostLogFailed = false;
+export function configureHostDiagnostics(directory: string | undefined): void {
+  hostLog = directory === undefined ? undefined : new HostDiagnosticLog(directory);
+  hostLogFailed = false;
+}
+
 export function reportDiagnostic(error: unknown, details: DiagnosticContext): void {
-  // Logging must never replace the original failure or create an unhandled rejection.
-  try { console.error(JSON.stringify(diagnosticRecord(error, details))); } catch { /* Host log unavailable. */ }
+  // Each sink is independent: a broken console or journal cannot mask the
+  // original failure, or prevent the other sink from retaining evidence.
+  let record: ReturnType<typeof diagnosticRecord>;
+  try { record = diagnosticRecord(error, details); } catch { return; }
+  try { console.error(JSON.stringify(record)); } catch { /* Console unavailable. */ }
+  if (hostLog) try {
+    hostLog.write(error, { ...record, ownerContext: ownerDiagnosticContext(error, details) });
+    hostLogFailed = false;
+  } catch (cause) {
+    if (!hostLogFailed) {
+      hostLogFailed = true;
+      try { console.error(JSON.stringify(diagnosticRecord(cause, { operation: 'diagnostics.write' }))); }
+      catch { /* Both host sinks unavailable. Never recurse into the journal. */ }
+    }
+  }
+  if (!ownerSuppressed.getStore()) try { ownerSink?.(error, ownerDiagnosticContext(error, details)); }
+  catch { /* Diagnostic delivery cannot replace the reported failure. */ }
 }
 
 // Deliberately return categories, not redacted URLs: room IDs, media IDs,
-// transaction IDs, state keys and query strings must never reach host logs.
+// transaction IDs, state keys and query strings do not enter summary records.
 export function matrixEndpoint(endpoint: string): string {
   const path = endpoint.split('?')[0];
   if (/\/_synapse\/admin\//.test(path)) return 'admin';
