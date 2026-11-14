@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { errorMessage } from '../src/errors.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
@@ -175,4 +178,31 @@ for (const emoji of ['✅', '❌']) test(`manager creation completes via ${emoji
   assert.equal(f.calls.filter(c => c.init?.method === 'PUT').length, emoji === '✅' ? 1 : 0);
   assert.ok(replies.some(text => text.includes(emoji === '✅' ? 'Password:' : 'cancelled')));
   assert.deepEqual(errors, []);
+});
+
+for (const stage of ['network', 'json', 'storage', 'http']) test(`user creation preserves diagnostic cause for ${stage} failures`, async t => {
+  const f = fixture(t);
+  const cause = Object.assign(new Error('original diagnostic detail'), { code: 'EIO' });
+  let requests = 0;
+  if (stage === 'storage') {
+    t.mock.method(fs, 'writeFileSync', () => { throw cause; });
+    syncBuiltinESMExports();
+  }
+  try {
+    await assert.rejects(createMatrixUser(f.config, f.request, { ...f.options, fetcher: async (url, init) => {
+      requests++;
+      if (stage === 'network') throw cause;
+      if (stage === 'json') return { ok: true, status: 200, json: async () => { throw cause; } } as unknown as Response;
+      if (stage === 'http') return new Response('private server body', { status: 503 });
+      return f.options.fetcher(url, init);
+    } }), error => {
+      assert.ok(error instanceof Error);
+      if (stage === 'http') assert.deepEqual(error.cause, { status: 503 });
+      else assert.equal(error.cause, cause);
+      assert.doesNotMatch(errorMessage(error), /original diagnostic detail|private server body/);
+      return true;
+    });
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+  assert.equal(requests, stage === 'storage' ? 3 : 1);
+  assert.ok(f.calls.every(call => call.init?.method === 'GET'));
 });
