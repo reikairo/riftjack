@@ -42,8 +42,9 @@ create a Pi bot called Builder in projects/demo
 
 The normal workspace confirmation applies. The manager checks the Pi executable
 and version before creating an account. `set model bot Builder to MODEL` and
-`reset model bot Builder` apply to the next task. Pi has no Riftjack service-tier
-or reasoning setting in this adapter.
+`reset model bot Builder` apply to the next task. Thinking effort can also be
+configured; see [Model and thinking discovery](#model-and-thinking-discovery).
+Pi has no Riftjack service-tier setting in this adapter.
 
 ## Conversation behavior
 

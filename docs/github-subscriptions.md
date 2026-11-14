@@ -1,6 +1,6 @@
 # GitHub subscriptions
 
-Codex and Claude agents can use `github_subscriptions` to select GitHub PR events
+Codex, Claude and Pi agents can use `github_subscriptions` to select GitHub PR events
 for the current conversation. Riftjack polls GitHub without starting a model;
 changes enter the existing durable background inbox and resume the conversation
 when the bot can accept work. This is independent of `gh stack`.
@@ -32,8 +32,9 @@ no token. Each bot has its own policy entry; entries may share a credentials
 directory deliberately. Use one credentials directory for bots sharing the same
 GitHub account; separate directories are treated as independent accounts and do
 not share a local request budget. Repositories are explicit names, without wildcards.
-The agent cannot change the policy, credentials directory, host or delivery room
-through the tool. `GH_TOKEN`, `GITHUB_TOKEN` and host/repository overrides are
+The agent cannot change the policy, credentials directory or host through the
+tool. It can select its own linked conversation as described below.
+`GH_TOKEN`, `GITHUB_TOKEN` and host/repository overrides are
 removed from the polling subprocess environment so they do not override the
 configured account. Other CLI use by an agent is outside this tool's policy.
 
@@ -49,6 +50,42 @@ List the permitted repositories and this conversation's subscriptions:
 ```json
 {"action":"list"}
 ```
+
+Operations default to the current conversation. To manage subscriptions in your
+private home or a linked shared room, discover the room with `room_messages`
+`action=list`, then select it explicitly:
+
+```json
+{"action":"list","conversation":{"room":"!home:example.com"}}
+```
+
+The selector also accepts an optional `thread` root event ID, or `null` for the
+room timeline. Access remains scoped to the same bot, owner and pinned session.
+New subscriptions deliver to the selected conversation; existing records stay
+in their original conversation. Select that original conversation to list or
+cancel them. See [shared conversations](shared-conversations.md).
+
+### Read PRs and discussions
+
+Read the current PR without creating a subscription:
+
+```json
+{"action":"read","repository":"example/project","pull_request":12,"resource":"pull_request"}
+```
+
+`resource` also accepts `reviews` for submitted reviews, `comments` for discussion
+comments, and `review_comments` for inline remarks. These fixed GET requests use
+the owner-enabled repository policy and do not require shell approval. List reads
+accept `page` (default 1) and `per_page` (default 100, maximum 100). Follow the
+returned `next_page` until it is `null`, keeping the same page size; a full final
+page may be followed by an empty one.
+
+Reads return full bodies as untrusted external data. Check the current head and
+review commit IDs; after reading multiple pages, recheck the head before acting
+on a particular revision. Publishing, editing and merging require their usual
+authorization.
+
+### Subscribe to changes
 
 Subscribe to selected PRs:
 
@@ -85,7 +122,11 @@ fail visibly instead of advancing a partial baseline.
 | `checks` | Completed GitHub check runs and terminal commit statuses on the current PR head, including success and failure |
 | `reviews` | New reviews or changes to review state, including dismissal |
 | `comments` | New or edited issue comments and inline review comments |
-| `pull_request` | PR open/closed/merged state, draft status, head commit or base branch changes |
+| `pull_request` | PR open/closed/merged state, draft status, head commit or base branch changes, and merge conflict appearance or resolution |
+
+Conflict notices carry `conflict=true` or `false`. Temporary unknown mergeability
+is ignored until GitHub reports a definite result. A blocked check or pending
+review is not a merge conflict.
 
 Checks are fetched for the head SHA. A second PR read rejects a snapshot if the
 head changed during the requests. Notifications include repository, PR numbers,
