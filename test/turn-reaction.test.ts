@@ -189,3 +189,70 @@ test('the single persisted marker from the previous version can still be removed
   assert.deepEqual(removed, ['$old']);
   assert.deepEqual(new State(file).turnReactions('@bot:test'), []);
 });
+
+for (const removalFails of [false, true]) test(`failed receipt persistence retracts the marker and retries failed cleanup (${removalFails})`, async t => {
+  const { state } = fixture(t);
+  const diskError = Object.assign(new Error('receipt write failed'), { code: 'ENOSPC' });
+  const removeError = new Error('redaction offline');
+  const save = state.saveTurnReactions.bind(state);
+  let writes = 0, offline = removalFails, sends = 0;
+  t.mock.method(state, 'saveTurnReactions', (bot: string, markers: Parameters<State['saveTurnReactions']>[1]) => {
+    if (++writes === 1) throw diskError;
+    return save(bot, markers);
+  });
+  const removals: string[] = [];
+  const reaction = new TurnReaction(state, '@bot:test', {
+    send: async () => { sends++; return '$reaction-' + sends; },
+    remove: async (_room, id) => { removals.push(id); if (offline) throw removeError; },
+  });
+  await assert.rejects(reaction.completed('!room:test', '$reply', allowed), error => {
+    if (!removalFails) return error === diskError;
+    return error instanceof AggregateError && error.errors[0] === diskError;
+  });
+  assert.deepEqual(removals, ['$reaction-1']);
+  assert.equal(sends, 1);
+  if (removalFails) {
+    await assert.rejects(reaction.completed('!room:test', '$later', allowed), /Could not remove/);
+    assert.equal(sends, 1, 'do not accumulate markers while an unsaved receipt remains');
+  }
+  offline = false;
+  await reaction.started();
+  assert.deepEqual(state.turnReactions('@bot:test'), []);
+  await reaction.completed('!room:test', '$next', allowed);
+  assert.equal(sends, 2);
+  assert.deepEqual(state.turnReactions('@bot:test'), [{ room: '!room:test', eventId: '$reaction-2' }]);
+});
+
+test('a real receipt write failure retracts the sent marker even when cleanup cannot save state', async t => {
+  const { file, state } = fixture(t);
+  const { mkdirSync } = await import('node:fs');
+  const removed: string[] = [];
+  const reaction = new TurnReaction(state, '@bot:test', {
+    send: async () => { mkdirSync(file + '.tmp'); return '$sent'; },
+    remove: async (_room, id) => { removed.push(id); },
+  });
+  await assert.rejects(reaction.completed('!room:test', '$reply', allowed), error =>
+    error instanceof AggregateError && (error.errors[0] as NodeJS.ErrnoException).code === 'EISDIR');
+  assert.deepEqual(removed, ['$sent']);
+  rmSync(file + '.tmp', { recursive: true });
+  await reaction.started();
+  assert.deepEqual(new State(file).turnReactions('@bot:test'), []);
+});
+
+test('failed persistence of the home mirror clears both the durable and unsaved markers', async t => {
+  const { state } = fixture(t), removed: string[] = [];
+  const failure = new Error('second receipt failed'), save = state.saveTurnReactions.bind(state);
+  let writes = 0;
+  t.mock.method(state, 'saveTurnReactions', (bot: string, markers: Parameters<State['saveTurnReactions']>[1]) => {
+    if (++writes === 2) throw failure;
+    return save(bot, markers);
+  });
+  const reaction = new TurnReaction(state, '@bot:test', {
+    send: async room => room === '!home:test' ? '$home' : '$shared',
+    remove: async (_room, id) => { removed.push(id); },
+  }, '!home:test');
+  reaction.rememberReply('!home:test', '$last-home-reply');
+  await assert.rejects(reaction.completed('!shared:test', '$reply', allowed), error => error === failure);
+  assert.deepEqual(removed, ['$shared', '$home']);
+  assert.deepEqual(state.turnReactions('@bot:test'), []);
+});
