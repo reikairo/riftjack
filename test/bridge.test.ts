@@ -1379,3 +1379,24 @@ test('a tool-only attachment turn marks its last delivered attachment', async t 
   await f.bridge.handle('!dm:test', event());
   assert.deepEqual(marked, ['$image']);
 });
+
+test('failed cancellation persistence releases the active turn for the next message', async t => {
+  const ready = gate(), finish = gate();
+  let runs = 0;
+  const f = fixture(t, 'codex', async () => {
+    if (++runs === 1) { ready.release(); await finish.promise; }
+    return 'done';
+  }, true, { recoverMessages: true });
+  const task = f.bridge.handle('!dm:test', event());
+  await ready.promise;
+  await f.bridge.handle('!dm:test', event('!cancel', '$cancel'));
+  const failure = Object.assign(new Error('state storage unavailable'), { code: 'ENOSPC' });
+  const complete = f.state.completeMessages.bind(f.state);
+  f.state.completeMessages = () => { throw failure; };
+  const rejected = assert.rejects(task, error => error === failure);
+  finish.release(); await rejected;
+  f.state.completeMessages = complete;
+  assert.equal(f.bridge.busy, false);
+  await f.bridge.handle('!dm:test', event('Continue', '$next'));
+  assert.equal(runs, 2);
+});

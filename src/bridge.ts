@@ -753,19 +753,25 @@ export class Bridge {
         ? `Task ${timedOut ? 'timed out' : 'cancelled'}. Pending follow-ups were discarded. Changes already made are retained.`
         : errorMessage(error) + (current.followups.length ? ' Pending follow-ups were not run; please resend them.' : ''));
     } finally {
-      if (current.cancelled || !o.isAuthorized(current.sender)) {
-        for (const cancel of current.cancelContinuations ?? []) {
-          try { cancel(); } catch (error) { o.report(error); }
+      try {
+        if (current.cancelled || !o.isAuthorized(current.sender)) {
+          for (const cancel of current.cancelContinuations ?? []) {
+            try { cancel(); } catch (error) { o.report(error); }
+          }
+          background?.completed?.(true);
+          if (o.recoverMessages) o.state.completeMessages(o.botId, current.inputIds);
+          for (const id of current.inputIds) this.retained.delete(id);
         }
-        background?.completed?.(true);
-        if (o.recoverMessages) o.state.completeMessages(o.botId, current.inputIds);
-        for (const id of current.inputIds) this.retained.delete(id);
+      } finally {
+        // Persistence failures must propagate without retaining a finished turn.
+        current.interactions.close();
+        clearTimeout(timeout);
+        try { await current.typing?.close(); }
+        finally {
+          this.active = undefined;
+          void this.drainQueued().catch(o.report);
+        }
       }
-      current.interactions.close();
-      clearTimeout(timeout);
-      await current.typing?.close();
-      this.active = undefined;
-      void this.drainQueued().catch(o.report);
     }
   }
 
