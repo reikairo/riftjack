@@ -207,13 +207,22 @@ export class GitHubSubscriptions {
     if (!this.policy?.repositories.includes(input.repository.toLowerCase()) || !this.read) throw new PublicError('This repository is not enabled for this bot by the owner. Use list to see allowed repositories.');
     const s: Subscription = { ...target, id: randomUUID(), repository: input.repository.toLowerCase(), pull_requests: [...new Set<number>(input.pull_requests)].sort((a,b) => a-b),
       events: [...new Set<EventKind>(input.events)].sort(), interval_seconds: selection.interval_seconds, state: 'active', next: 0, failures: 0, snapshot: {} };
-    const existing = this.items.find(x => same(x, s) && x.state === 'active' && x.repository === s.repository &&
-      JSON.stringify(x.pull_requests) === JSON.stringify(s.pull_requests) && JSON.stringify(x.events) === JSON.stringify(s.events) && x.interval_seconds === s.interval_seconds);
+    const checkRegistration = () => {
+      const active = this.items.filter(x => x.state === 'active');
+      const existing = active.find(x => same(x, s) && x.repository === s.repository &&
+        JSON.stringify(x.pull_requests) === JSON.stringify(s.pull_requests) && JSON.stringify(x.events) === JSON.stringify(s.events) && x.interval_seconds === s.interval_seconds);
+      if (existing) return existing;
+      if (active.length >= MAX_GITHUB_SUBSCRIPTIONS || active.reduce((n, x) => n + x.pull_requests.length, 0) + s.pull_requests.length > MAX_GITHUB_PR_SELECTIONS) throw new PublicError(`Cancel an unused subscription first (maximum ${MAX_GITHUB_SUBSCRIPTIONS} subscriptions and ${MAX_GITHUB_PR_SELECTIONS} total PR selections per bot).`);
+      return undefined;
+    };
+    const existing = checkRegistration();
     if (existing) return JSON.stringify({ ...this.describe(existing), already_subscribed: true });
-    if (this.items.filter(x => x.state === 'active').length >= MAX_GITHUB_SUBSCRIPTIONS || this.items.filter(x => x.state === 'active').reduce((n, x) => n + x.pull_requests.length, 0) + s.pull_requests.length > MAX_GITHUB_PR_SELECTIONS) throw new PublicError(`Cancel an unused subscription first (maximum ${MAX_GITHUB_SUBSCRIPTIONS} subscriptions and ${MAX_GITHUB_PR_SELECTIONS} total PR selections per bot).`);
     // Baseline first, never replay existing comments or completed checks on registration.
     s.snapshot = await this.capture(s, signal);
     signal.throwIfAborted();
+    // Another registration may have committed while the baseline was loading.
+    const concurrent = checkRegistration();
+    if (concurrent) return JSON.stringify({ ...this.describe(concurrent), already_subscribed: true });
     s.last_success = new Date().toISOString(); s.next = Date.now() + s.interval_seconds * 1000;
     this.items = [...this.items.filter(x => x.state === 'active'), s]; this.save();
     return JSON.stringify({ ...this.describe(s), baseline_saved: true });

@@ -560,3 +560,26 @@ test('a single selection over 50 PRs is rejected before reading GitHub', async t
   await assert.rejects(f.subscriptions.action({ ...selection, pull_requests: Array.from({ length: 51 }, (_, i) => i + 1) }, target, signal()), /1–50/);
   assert.equal(f.requests.length, 0);
 });
+
+test('concurrent identical registrations share one saved subscription', async t => {
+  const f = fixture(t);
+  const replies = await Promise.all([1, 2].map(() => f.subscriptions.action(selection, target, signal())));
+  assert.equal(JSON.parse(replies[0]).id, JSON.parse(replies[1]).id);
+  const list = JSON.parse(await f.subscriptions.action({ action: 'list' }, target, signal()));
+  assert.equal(list.subscriptions.length, 1);
+  assert.equal(JSON.parse(readFileSync(f.path, 'utf8')).subscriptions.length, 1);
+});
+
+test('concurrent registrations cannot both consume the last PR slot', async t => {
+  const f = fixture(t);
+  const manager = new GitHubSubscriptions(f.path, f.policy, f.queue, async () => structuredClone(f.state.pr));
+  const spec = { ...selection, events: ['pull_request'] };
+  await manager.action({ ...spec, pull_requests: Array.from({ length: 49 }, (_, i) => i + 1) }, target, signal());
+  const results = await Promise.allSettled([50, 51].map(pr => manager.action({ ...spec, pull_requests: [pr] }, target, signal())));
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  const rejected = results.find(r => r.status === 'rejected') as PromiseRejectedResult;
+  assert.match(rejected.reason.message, /50 total PR selections/);
+  const restored = new GitHubSubscriptions(f.path, f.policy, f.queue, f.read);
+  const list = JSON.parse(await restored.action({ action: 'list' }, target, signal()));
+  assert.equal(list.subscriptions.reduce((n: number, s: any) => n + s.pull_requests.length, 0), 50);
+});
