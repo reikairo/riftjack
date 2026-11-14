@@ -216,7 +216,7 @@ export class MatrixMedia {
     const encrypted = await readLimited(response, o.maxBytes, downloadSignal);
     let data: Buffer;
     try { data = Buffer.from(Attachment.decrypt(new EncryptedAttachment(encrypted, JSON.stringify(file)))); }
-    catch { throw new PublicError('Could not decrypt or verify the attachment. Please resend it.'); }
+    catch (cause) { throw new PublicError('Could not decrypt or verify the attachment. Please resend it.', { cause }); }
     signal.throwIfAborted();
     const name = safeName(content.filename || content.body || 'attachment');
     const dir = await mediaDirectory(o.workspace, 'incoming', o.scope + ':' + key);
