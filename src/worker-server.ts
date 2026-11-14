@@ -41,7 +41,7 @@ export class WorkerServer {
         const until = Date.now() + seconds * 1000;
         do {
           controller.signal.throwIfAborted();
-          const task = await service.claim();
+          const task = await service.claim(controller.signal);
           if (task) { send(200, { task }); return; }
           if (Date.now() >= until) break;
           await new Promise<void>(resolve => {
