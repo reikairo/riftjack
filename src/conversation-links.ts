@@ -78,6 +78,7 @@ export class ConversationLinks {
   private history: History;
   private credits: Credits;
   private discovered: PeerState;
+  private committed: string;
   private joined = new Map<string, Map<string, { id: string; at: number }>>();
   private deliveries = new Map<string, Delivery>();
   constructor(file: string, private historyFile: string, private accounts: Account[], private state: State, owner: string) {
@@ -113,6 +114,7 @@ export class ConversationLinks {
     this.discovered = saved[PEERS_KEY] ?? {};
     delete saved[CREDITS_KEY]; delete saved[PEERS_KEY];
     this.history = saved;
+    this.committed = JSON.stringify({ ...this.history, [CREDITS_KEY]: this.credits, [PEERS_KEY]: this.discovered });
   }
   // A newly accepted human message to this agent restores its peer credit to the
   // cap and starts a new generation: its unused grants are voided, so reserve
@@ -446,8 +448,20 @@ export class ConversationLinks {
       ...(grants && { 'm.mentions': { user_ids: grants.map(g => g.to) }, [GRANT]: grants.length === 1 ? grants[0] : grants }) };
   }
   private saveHistory() {
-    writeFileSync(this.historyFile + '.tmp', JSON.stringify({ ...this.history, [CREDITS_KEY]: this.credits, [PEERS_KEY]: this.discovered }), { mode: 0o600 });
-    renameSync(this.historyFile + '.tmp', this.historyFile);
+    try {
+      const committed = JSON.stringify({ ...this.history, [CREDITS_KEY]: this.credits, [PEERS_KEY]: this.discovered });
+      writeFileSync(this.historyFile + '.tmp', committed, { mode: 0o600 });
+      renameSync(this.historyFile + '.tmp', this.historyFile);
+      this.committed = committed;
+    } catch (error) {
+      // A failed observation or consumed grant must remain retryable, and must
+      // not leak into an unrelated later save.
+      const previous = JSON.parse(this.committed);
+      this.credits = previous[CREDITS_KEY]; this.discovered = previous[PEERS_KEY];
+      delete previous[CREDITS_KEY]; delete previous[PEERS_KEY];
+      this.history = previous;
+      throw error;
+    }
   }
   acknowledge(bot: string): void {
     const delivery = this.deliveries.get(bot);
@@ -462,8 +476,8 @@ export class ConversationLinks {
       const firstUnread = Math.min(...local.map(id => log.readers[id]?.seq ?? 1));
       log.messages = log.messages.filter(entry => entry.seq >= firstUnread);
     }
-    this.deliveries.delete(bot);
     this.saveHistory();
+    this.deliveries.delete(bot);
   }
   addressed(bot: string, room: string, event: MatrixEvent): boolean {
     if (!this.room(bot, room) || event.type !== 'm.room.message') return true;
