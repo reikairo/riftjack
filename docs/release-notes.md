@@ -8,7 +8,9 @@ between the previous successful startup and the current one, including rollbacks
 ## Separate diagram tools
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
-  a PNG `path`. Each saves a new file in the conversation outbox without sending it.
+  a PNG `path`. Both accept an optional `out_path` relative to the conversation
+  outbox, with a generated filename by default. Existing files are never overwritten.
+  Each saves its result without sending it.
 - Both tools are available to configured Codex and Claude bots in workspace-write
   mode. See [diagrams](diagrams.md) for setup, examples and limits.
 

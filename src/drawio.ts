@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { accessSync, constants, realpathSync, statSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, sep } from 'node:path';
+import { lstat, mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { PublicError } from './errors.js';
 import { outgoingAttachments, readOutgoing } from './media.js';
 import { diagramSource } from './drawio-source.js';
@@ -91,16 +91,45 @@ export function drawioAction(config: DrawioConfig, outbox: string, maxMediaBytes
   return async (input, signal) => {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PublicError('Expected a diagram request.');
     const p = input as Record<string, unknown>;
-    const allowed = p.action === 'render' ? ['action', 'xml', 'page'] : p.action === 'extract' ? ['action', 'path'] : [];
-    if (!allowed.length || Object.keys(p).some(k => !allowed.includes(k))) throw new PublicError('Use render_diagram with xml and optional page, or extract_diagram with an outbox path.');
+    const allowed = p.action === 'render' ? ['action', 'xml', 'page', 'out_path'] : p.action === 'extract' ? ['action', 'path', 'out_path'] : [];
+    if (!allowed.length || Object.keys(p).some(k => !allowed.includes(k))) throw new PublicError('Use render_diagram with xml and optional page, or extract_diagram with an outbox path. Both accept an optional out_path.');
     signal.throwIfAborted();
     if (await realpath(outbox) !== outbox) throw new PublicError('Outbox must not be a symlink.');
+    let output: string | undefined;
+    const checkParent = async (path: string) => {
+      const parent = dirname(path);
+      let canonical: string;
+      try { canonical = await realpath(parent); }
+      catch (cause) { throw new PublicError('The output parent directory must already exist.', { cause }); }
+      if (canonical !== parent) throw new PublicError('Output directory symlinks are not allowed.');
+    };
+    if (p.out_path !== undefined) {
+      if (typeof p.out_path !== 'string' || !p.out_path.trim() || p.out_path.includes('\0')) throw new PublicError('out_path must be a nonempty path relative to the output directory.');
+      const target = outgoingAttachments({ files: [{ path: p.out_path }] }, outbox)[0].path;
+      await checkParent(target);
+      // Fail before invoking the renderer; exclusive creation below also covers
+      // a competing writer that creates the path after this check.
+      let exists = false;
+      try { await lstat(target); exists = true; }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
+      }
+      if (exists) throw new PublicError('The output file already exists. Choose a different out_path.');
+      output = relative(outbox, target);
+    }
+    signal.throwIfAborted();
     const save = async (data: Buffer | string, extension: string, metadata: object) => {
       signal.throwIfAborted();
       if (Buffer.byteLength(data) > maxMediaBytes) throw new PublicError('Result exceeds the configured attachment size limit.');
-      const path = 'diagram-' + randomUUID() + extension;
+      const path = output ?? 'diagram-' + randomUUID() + extension;
       if (await realpath(outbox) !== outbox) throw new PublicError('Outbox must not be a symlink.');
-      await writeFile(join(outbox, path), data, { flag: 'wx', mode: 0o600 });
+      await checkParent(join(outbox, path));
+      signal.throwIfAborted();
+      try { await writeFile(join(outbox, path), data, { flag: 'wx', mode: 0o600 }); }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === 'EEXIST') throw new PublicError('The output file already exists. Choose a different out_path.', { cause });
+        throw cause;
+      }
       return JSON.stringify({ path, file: join(outbox, path), bytes: Buffer.byteLength(data), ...metadata });
     };
     if (p.action === 'extract') {

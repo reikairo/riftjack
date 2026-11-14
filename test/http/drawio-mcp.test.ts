@@ -22,7 +22,10 @@ test('diagram MCP authenticates and accepts XML larger than the default tool req
   const listed = (await (await post(server, 2, {}, 'tools/list')).json()).result.tools;
   assert.deepEqual(listed.map((tool: any) => tool.name), ['render_diagram', 'extract_diagram']);
   assert.deepEqual(listed.map((tool: any) => tool.inputSchema.required), [['xml'], ['path']]);
-  for (const tool of listed) assert.equal(tool.inputSchema.properties.action, undefined);
+  for (const tool of listed) {
+    assert.equal(tool.inputSchema.properties.action, undefined);
+    assert.equal(tool.inputSchema.properties.out_path.type, 'string');
+  }
   const tool = listed[0];
   assert.equal(tool.name, 'render_diagram');
   assert.equal(tool.annotations.openWorldHint, false);
@@ -49,13 +52,15 @@ test('separate diagram tools round-trip source and reject mismatched arguments',
   t.after(async () => { await server.close(); rmSync(root, { recursive: true, force: true }); });
   let id = 0;
   const call = async (name: string, input: unknown) => (await (await post(server, ++id, input, 'tools/call', name)).json()).result;
-  const rendered = await call('render_diagram', { xml });
+  const rendered = await call('render_diagram', { xml, out_path: 'architecture.png' });
   assert.equal(rendered.isError, undefined);
   const output = JSON.parse(rendered.content[0].text);
+  assert.equal(output.path, 'architecture.png');
   assert.equal(output.editable, true);
-  const extracted = await call('extract_diagram', { path: output.path });
+  const extracted = await call('extract_diagram', { path: output.path, out_path: 'architecture.drawio' });
   assert.equal(extracted.isError, undefined);
   const source = JSON.parse(extracted.content[0].text);
+  assert.equal(source.path, 'architecture.drawio');
   assert.equal(source.untrusted, true);
   assert.equal(readFileSync(source.file, 'utf8'), xml);
   assert.notEqual(source.path, output.path);
