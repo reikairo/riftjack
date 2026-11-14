@@ -34,6 +34,7 @@ export class RateLimitedMatrixClient extends MatrixClient {
   private async requestAttempt(args: Parameters<MatrixClient['doRequest']>, attempt: number) {
     try {
       return await diagnosticOperation({ operation: 'matrix.request', bot: this.diagnosticBot,
+        reportsMatrixErrors: !!this.diagnosticReport,
         method: args[0], endpoint: matrixEndpoint(args[1]), destination: 'homeserver', attempt }, () => this.requestOnce(...args));
     } catch (error) {
       try { this.diagnosticReport?.(error, { operation: 'matrix.request' }); } catch { /* Keep the request failure. */ }

@@ -1,7 +1,7 @@
 import { getRequestFn, setRequestFn } from '@vector-im/matrix-bot-sdk';
 import { Agent, Dispatcher1Wrapper, type Dispatcher } from 'undici';
 import { format } from 'node:url';
-import { diagnosticOperation, matrixEndpoint, type DiagnosticContext } from './diagnostics.js';
+import { diagnosticContext, diagnosticOperation, matrixEndpoint, type DiagnosticContext } from './diagnostics.js';
 
 export type MatrixHttpVersion = 'auto' | '1.1';
 
@@ -30,7 +30,13 @@ export function installMatrixTransport(version: MatrixHttpVersion, origins: stri
     if (!report || !allowed.has(url.origin)) return run();
     const details: DiagnosticContext = { operation: 'matrix.http', endpoint: matrixEndpoint(url.pathname), method,
       transport: version, destination: url.origin === homeserver ? 'homeserver' : 'admin' };
-    const emit = (error: unknown) => { try { report(error, details); } catch { /* Observation must not affect transport. */ } };
+    // The SDK request owner reports after reading/decoding the body. Retain
+    // transport context, but do not emit a second record for that same attempt.
+    const requestOwnsError = diagnosticContext()?.reportsMatrixErrors;
+    const emit = (error: unknown) => {
+      if (requestOwnsError) return;
+      try { report(error, details); } catch { /* Observation must not affect transport. */ }
+    };
     try {
       return await diagnosticOperation(details, async () => {
         const response = await run();

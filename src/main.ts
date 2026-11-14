@@ -1,3 +1,4 @@
+import { matrixSdkLogger } from './matrix-sdk-logger.js';
 import { diagnosticOperation, reportDiagnostic, transportConfiguration } from './diagnostics.js';
 import { linkedToolConversation } from './tool-conversation.js';
 import { installMatrixTransport } from './matrix-transport.js';
@@ -47,7 +48,7 @@ import { ConversationLinks, mentionText } from './conversation-links.js';
 import { sendConfirmation } from './confirmation-message.js';
 import { createBackend } from './backends.js';
 import { Accounts, parseManagerRequest, provision, PublicError, type Account } from './accounts.js';
-import { errorMessage, safeErrorSummary } from './errors.js';
+import { errorMessage } from './errors.js';
 import { Access, parseAccessRequest } from './access.js';
 import { manageBotAccess, parseBotAccessRequest } from './bot-access.js';
 import { BotInvitations } from './bot-invitations.js';
@@ -75,11 +76,6 @@ let matrixTransport: ReturnType<typeof installMatrixTransport> | undefined;
 
 function diagnostics(error: unknown, operation = 'connector', bot?: string) {
   reportDiagnostic(error, { operation, bot });
-}
-
-function sdkOperation(module: string, warning = false): string {
-  const component = module === 'MatrixHttpClient' ? 'http' : module === 'MatrixClientLite' ? 'client' : 'other';
-  return `matrix.sdk.${component}${warning ? '-warning' : ''}`;
 }
 
 async function main() {
@@ -156,19 +152,7 @@ async function main() {
   if (!accounts.list().length) throw new PublicError('No bot accounts configured. Run bootstrap:codex, bootstrap:claude, bootstrap:pi or bootstrap:grok first (see README).');
 
   LogService.setLevel(LogLevel.WARN);
-  LogService.setLogger({
-    info() {}, debug() {}, trace() {},
-    warn(module, ...args) { reportDiagnostic(new AggregateError(args), { operation: sdkOperation(module, true) }); },
-    // SDK arguments can hold tokens and request bodies; only allow-listed codes are printed.
-    error(module, ...args) {
-      const details = args.map(error => { try { return safeErrorSummary(error); } catch { return 'Error (no safe diagnostic details available)'; } })
-        .filter(summary => !summary.startsWith('Error (no safe'));
-      // The HTTP layer logs every non-2xx response before callers handle it. M_NOT_FOUND is an
-      // expected answer (e.g. a bot has no m.direct account data at startup) and is handled there.
-      if (module === 'MatrixHttpClient' && details.length === 1 && details[0] === 'M_NOT_FOUND') return;
-      reportDiagnostic(new AggregateError(args), { operation: sdkOperation(module) });
-    },
-  });
+  LogService.setLogger(matrixSdkLogger());
   const state = new State(join(config.dataDir, 'sessions.json'));
   const links = new ConversationLinks(join(config.dataDir, 'conversation-links.json'),
     join(config.dataDir, 'shared-room-history.json'), accounts.list(), state, access.owner);

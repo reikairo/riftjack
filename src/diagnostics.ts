@@ -7,6 +7,8 @@ import { errorMessage, PublicError, safeErrorSummary } from './errors.js';
 // Call sites supply operation names, never exception text, URLs or request data.
 export type DiagnosticContext = {
   operation: string;
+  // Internal ownership of HTTP errors; deliberately absent from emitted records.
+  reportsMatrixErrors?: boolean;
   trace?: string;
   span?: string;
   parentSpan?: string;

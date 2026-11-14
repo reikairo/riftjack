@@ -156,9 +156,12 @@ authorization headers. The request boundary covers SDK response-body failures
 as well as connection/header failures. Explicit fetch diagnostics cover fetching
 response headers; subsequent streaming failures are reported by the consuming
 operation. HTTP error statuses can be expected protocol responses; their presence
-does not prove an unhandled task failure. SDK and caller reports may describe the
-same failure: use their trace/span and operation fields rather than counting log
-lines as failed tasks.
+does not prove an unhandled task failure. Instrumented SDK requests emit one
+`matrix.request` error per attempt; their transport and SDK HTTP loggers defer
+to that boundary. It includes body-reading failures and preserves the transport
+failure context. Direct HTTP calls retain their own diagnostics. A caller may
+also report the effect on a larger operation, so use trace/span and operation
+fields rather than counting log lines as failed tasks.
 
 `matrix-transport-config` records whether the admin API uses the configured SSH
 tunnel, whether its origin equals the homeserver origin, and whether proxy
