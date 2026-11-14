@@ -2,7 +2,7 @@ import { startReleaseNotesMcp, RELEASE_NOTES_SERVER } from './release-notes-mcp.
 import { startBackendTools } from './backend-tools.js';
 import { startDetachedMcp, DETACHED_SERVER } from './detached-mcp.js';
 import { startConfirmationMcp, CONFIRMATION_SERVER } from './confirmation-mcp.js';
-import { startDrawioMcp, DRAWIO_SERVER } from './drawio-mcp.js';
+import { startDrawioMcp, DRAWIO_SERVER, DRAWIO_TOOL_NAMES } from './drawio-mcp.js';
 import { startGitHubMcp, GITHUB_SERVER } from './github-mcp.js';
 import { routingInstructions } from './routing-instructions.js';
 import { compactionNotices } from './compaction-notices.js';
@@ -198,8 +198,8 @@ export function createCodexBackend(configuration: Config | (() => Config), state
             tools: { room_messages: { approval_mode: 'approve' } },
           } : disabledMcp,
           [`mcp_servers.${DRAWIO_SERVER}`]: diagram ? { url: diagram.url, http_headers: diagram.headers,
-            required: true, enabled: true, tool_timeout_sec: 75, enabled_tools: ['render_diagram'],
-            tools: { render_diagram: { approval_mode: 'approve' } },
+            required: true, enabled: true, tool_timeout_sec: 75, enabled_tools: DRAWIO_TOOL_NAMES,
+            tools: Object.fromEntries(DRAWIO_TOOL_NAMES.map(name => [name, { approval_mode: 'approve' }])),
           } : disabledMcp,
           // Read-only GET under human-configured URL prefixes; no approval needed.
           [`mcp_servers.${FETCH_SERVER}`]: web ? { url: web.url, http_headers: web.headers,

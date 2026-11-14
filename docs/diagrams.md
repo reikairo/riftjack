@@ -2,8 +2,9 @@
 
 Riftjack can render draw.io XML into PNG files with the original diagram embedded.
 The PNG opens as an editable diagram in draw.io Desktop or diagrams.net. The
-`render_diagram` MCP tool also extracts the original XML from an editable PNG.
-Both actions create a new file in the current conversation outbox. They do not
+`render_diagram` MCP tool creates the PNG; `extract_diagram` recovers the original
+XML from an editable PNG.
+Both tools create a new file in the current conversation outbox. They do not
 send it; the agent uses `send_attachments` or its final attachment manifest.
 
 ## Enable
@@ -19,10 +20,10 @@ DRAWIO_PATH=/Applications/draw.io.app/Contents/MacOS/draw.io
 # DRAWIO_PATH=/opt/drawio/drawio
 ```
 
-Blank disables the tool. There is no automatic download or installation.
+Blank disables both tools. There is no automatic download or installation.
 An invalid configured path fails configuration validation. Windows is not
-currently supported. Codex and Claude get the tool only in workspace-write mode;
-read-only bots do not get it. Each task receives a separate authenticated MCP
+currently supported. Codex and Claude get both tools only in workspace-write mode;
+read-only bots do not get them. Each task receives a separate authenticated MCP
 endpoint, closed when the task ends.
 
 Enabling the tool authorizes the connector to launch this native application
@@ -33,8 +34,10 @@ filesystem isolation.
 
 ## Render and extract
 
+Call `render_diagram` with XML and an optional page:
+
 ```json
-{"action":"render","xml":"<mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/><mxCell id=\"2\" value=\"Hello\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"20\" y=\"20\" width=\"120\" height=\"60\" as=\"geometry\"/></mxCell></root></mxGraphModel>"}
+{"xml":"<mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/><mxCell id=\"2\" value=\"Hello\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"20\" y=\"20\" width=\"120\" height=\"60\" as=\"geometry\"/></mxCell></root></mxGraphModel>"}
 ```
 
 Input may be `mxGraphModel` or `mxfile`, with uncompressed or compressed pages.
@@ -43,10 +46,10 @@ the complete original document remains embedded. The returned `path` is relative
 to the outbox; `file` is its absolute path. Filenames are generated, never supplied
 by the agent, and existing files are not overwritten.
 
-To recover XML, first copy the PNG to the current conversation outbox, then use:
+To recover XML, first copy the PNG to the current conversation outbox, then call `extract_diagram`:
 
 ```json
-{"action":"extract","path":"received-diagram.png"}
+{"path":"received-diagram.png"}
 ```
 
 The result is a new `.drawio` file. Treat its text as untrusted document content,

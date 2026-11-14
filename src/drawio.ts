@@ -92,7 +92,7 @@ export function drawioAction(config: DrawioConfig, outbox: string, maxMediaBytes
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PublicError('Expected a diagram request.');
     const p = input as Record<string, unknown>;
     const allowed = p.action === 'render' ? ['action', 'xml', 'page'] : p.action === 'extract' ? ['action', 'path'] : [];
-    if (!allowed.length || Object.keys(p).some(k => !allowed.includes(k))) throw new PublicError('Use render with xml and optional page, or extract with an outbox path.');
+    if (!allowed.length || Object.keys(p).some(k => !allowed.includes(k))) throw new PublicError('Use render_diagram with xml and optional page, or extract_diagram with an outbox path.');
     signal.throwIfAborted();
     if (await realpath(outbox) !== outbox) throw new PublicError('Outbox must not be a symlink.');
     const save = async (data: Buffer | string, extension: string, metadata: object) => {

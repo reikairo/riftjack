@@ -5,6 +5,13 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Separate diagram tools
+
+- `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
+  a PNG `path`. Each saves a new file in the conversation outbox without sending it.
+- Both tools are available to configured Codex and Claude bots in workspace-write
+  mode. See [diagrams](diagrams.md) for setup, examples and limits.
+
 ## Release notes available to agents
 
 - Codex, Claude and Pi can call `release_notes` with no arguments. External workers
