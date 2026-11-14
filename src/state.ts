@@ -12,12 +12,14 @@ type Data = { turnReactions?: Record<string, TurnReactionState | TurnReactionSta
 
 export class State {
   private data: Data;
+  private committed: string;
   constructor(private file: string) {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
     this.data = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { version: 1, sessions: {}, seen: [] };
     if (this.data.version !== 1 || !this.data.sessions || !Array.isArray(this.data.seen)) {
       throw new Error('Invalid state file. Restore it from a backup before restarting.');
     }
+    this.committed = JSON.stringify(this.data);
   }
   turnReactions(bot: string): TurnReactionState[] {
     const markers = this.data.turnReactions?.[bot];
@@ -125,7 +127,16 @@ export class State {
     return true;
   }
   private save() {
-    writeFileSync(`${this.file}.tmp`, JSON.stringify(this.data), { mode: 0o600 });
-    renameSync(`${this.file}.tmp`, this.file);
+    try {
+      const serialized = JSON.stringify(this.data);
+      writeFileSync(`${this.file}.tmp`, serialized, { mode: 0o600 });
+      renameSync(`${this.file}.tmp`, this.file);
+      this.committed = serialized;
+    } catch (error) {
+      // Failed claims/dequeues must remain retryable. A later successful save
+      // must not silently commit changes from an operation that threw.
+      this.data = JSON.parse(this.committed);
+      throw error;
+    }
   }
 }
