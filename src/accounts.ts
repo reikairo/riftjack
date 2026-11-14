@@ -22,29 +22,28 @@ export class Accounts {
     if (new Set(this.accounts.map(a => a.userId)).size !== this.accounts.length) throw new Error('Duplicate bot accounts in accounts.json');
   }
   list(): Account[] { return this.accounts.map(a => ({ ...a, ...(a.engineSettings ? { engineSettings: { ...a.engineSettings } } : {}) })); }
-  add(account: Account) { this.accounts.push(account); this.save(); }
+  add(account: Account) { this.save([...this.accounts, account]); }
   setEngineSettings(userId: string, settings: EngineSettings) {
     const account = this.accounts.find(a => a.userId === userId);
     if (!account) throw new PublicError('Bot account not found.');
     validateEngineSettings(settings, account.kind);
     const updated = this.accounts.map(a => a === account ? { ...a, engineSettings: { ...settings } } : a);
-    writeFileSync(`${this.file}.tmp`, JSON.stringify(updated, null, 2), { mode: 0o600 });
-    renameSync(`${this.file}.tmp`, this.file);
-    this.accounts = updated;
+    this.save(updated);
   }
   setName(userId: string, name: string) {
     const account = this.accounts.find(a => a.userId === userId);
     if (!account) throw new PublicError('Bot account not found.');
-    account.name = name;
-    this.save();
+    this.save(this.accounts.map(a => a === account ? { ...a, name } : a));
   }
   setRoom(userId: string, roomId: string) {
-    this.accounts.find(a => a.userId === userId)!.roomId = roomId;
-    this.save();
+    const account = this.accounts.find(a => a.userId === userId);
+    if (!account) throw new PublicError('Bot account not found.');
+    this.save(this.accounts.map(a => a === account ? { ...a, roomId } : a));
   }
-  private save() {
-    writeFileSync(`${this.file}.tmp`, JSON.stringify(this.accounts, null, 2), { mode: 0o600 });
+  private save(updated: Account[]) {
+    writeFileSync(`${this.file}.tmp`, JSON.stringify(updated, null, 2), { mode: 0o600 });
     renameSync(`${this.file}.tmp`, this.file);
+    this.accounts = updated;
   }
 }
 
