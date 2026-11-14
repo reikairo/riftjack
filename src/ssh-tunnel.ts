@@ -4,6 +4,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { PublicError, errorMessage, safeErrorSummary } from './errors.js';
 
 export type TunnelConfig = { target: string; port: number; localPort: number; remotePort: number; identity?: string };
+export type TunnelDiagnostic = { state: 'ready' | 'closed'; attempt: number; elapsedMs: number;
+  retryMs?: number; error?: string; reason?: string };
 
 export function loadTunnelConfig(env: NodeJS.ProcessEnv, adminUrl: URL): TunnelConfig | undefined {
   const target = env.SYNAPSE_SSH_TARGET?.trim();
@@ -48,11 +50,13 @@ export class SshTunnel {
   private stopped = true;
   private ready = false;
   private attempts = 0;
+  private launches = 0;
   private problem = 'SSH connection is starting.';
   private onExit = () => { this.child?.kill('SIGTERM'); };
 
   constructor(private config: TunnelConfig, private options: {
-    report: (message: string) => void; executable?: string; retryMs?: number; killMs?: number;
+    report: (message: string) => void; diagnostic?: (record: TunnelDiagnostic) => void;
+    executable?: string; retryMs?: number; killMs?: number;
   }) {}
 
   start(): void {
@@ -65,6 +69,13 @@ export class SshTunnel {
   private launch(): void {
     if (this.stopped) return;
     this.ready = false;
+    const attempt = ++this.launches, started = performance.now();
+    let reason = 'connection-closed';
+    let spawnFailure: unknown;
+    const diagnostic = (record: Omit<TunnelDiagnostic, 'attempt' | 'elapsedMs'>) => {
+      try { this.options.diagnostic?.({ ...record, attempt, elapsedMs: Math.round(performance.now() - started) }); }
+      catch { /* Observation must not interfere with reconnect or shutdown. */ }
+    };
     const child = spawn(this.options.executable || 'ssh', tunnelArguments(this.config), {
       env: tunnelEnvironment(), stdio: ['ignore', 'ignore', 'pipe'],
     });
@@ -77,7 +88,17 @@ export class SshTunnel {
         if (bound && line.startsWith('debug1: Entering interactive session.')) {
           this.ready = true; this.attempts = 0; this.problem = 'SSH connection closed.';
           this.options.report(`SSH tunnel ready on 127.0.0.1:${this.config.localPort}.`);
+          diagnostic({ state: 'ready' });
         }
+        if (/Permission denied|Too many authentication failures/i.test(line)) reason = 'authentication';
+        else if (/Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(line)) reason = 'host-key';
+        else if (/Address already in use|cannot listen to port/i.test(line)) reason = 'local-port';
+        else if (/Could not resolve hostname/i.test(line)) reason = 'dns';
+        else if (/Connection refused/i.test(line)) reason = 'refused';
+        else if (/Connection timed out|Operation timed out|No route to host|Network is unreachable/i.test(line)) reason = 'unreachable';
+        else if (/Timeout, server .* not responding/i.test(line)) reason = 'keepalive-timeout';
+        else if (/Broken pipe/i.test(line)) reason = 'broken-pipe';
+        else if (/Connection reset by|Connection closed by|Disconnected from/i.test(line)) reason = 'remote-closed';
         if (/Permission denied|Too many authentication failures/i.test(line)) this.problem = 'SSH authentication failed. Configure a key or ssh-agent for unattended login.';
         else if (/Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(line)) this.problem = 'SSH host key verification failed. Verify the server key and connect manually on the host first.';
         else if (/Address already in use|cannot listen to port/i.test(line)) this.problem = 'The local SSH tunnel port is already in use. Stop the manually started tunnel or choose a different SYNAPSE_ADMIN_URL port.';
@@ -85,12 +106,13 @@ export class SshTunnel {
         else if (/Connection refused/i.test(line)) this.problem = 'SSH connection was refused. Check the server address and SYNAPSE_SSH_PORT.';
         else if (/Connection timed out|Operation timed out|No route to host|Network is unreachable/i.test(line)) this.problem = 'SSH server is unreachable or timed out. Check the network and server availability.';
       });
-      child.once('error', error => { this.problem = errorMessage(error, 'Could not launch OpenSSH. Install ssh and ensure it is on the connector PATH.'); });
+      child.once('error', error => { reason = 'spawn'; spawnFailure = error; this.problem = errorMessage(error, 'Could not launch OpenSSH. Install ssh and ensure it is on the connector PATH.'); });
       child.once('close', (code, signal) => {
         lines.close(); this.child = undefined; this.ready = false;
         if (!this.stopped) {
           if (this.problem === 'SSH connection is starting.') this.problem = 'SSH connection closed.';
           const retryMs = this.options.retryMs ?? Math.min(30_000, 1000 * 2 ** Math.min(this.attempts++, 5));
+          diagnostic({ state: 'closed', retryMs, error: safeErrorSummary({ code, signal, cause: spawnFailure }), reason });
           this.options.report(`${this.problem} ${safeErrorSummary({ code, signal })}. Reconnecting in ${retryMs / 1000}s.`);
           this.retry = setTimeout(() => this.launch(), retryMs);
         }

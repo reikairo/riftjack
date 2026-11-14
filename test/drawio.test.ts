@@ -112,23 +112,38 @@ test('drawio is disabled by default and executable must be owner-controlled outs
 
 test('native renderer cancellation kills its own child group and settles before cleanup', async t => {
   const dir = await fixture(t), exe = join(dir, 'slow.cjs');
-  await writeFile(exe, `#!${process.execPath}\nconst c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); require('fs').writeFileSync('child.json',JSON.stringify({parent:process.pid,child:c.pid})); process.on('SIGTERM',()=>c.once('exit',()=>process.exit())); setInterval(()=>{},1000);`, { mode: 0o700 });
+  await writeFile(exe, `#!${process.execPath}
+    const c = require('child_process').spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+    let stopping = false, exited = false;
+    c.once('exit', () => { exited = true; if (stopping) process.exit(); });
+    process.on('SIGTERM', () => { stopping = true; if (exited) process.exit(); });
+    require('fs').writeFileSync('child.json', JSON.stringify({ parent: process.pid, child: c.pid }));
+    setInterval(()=>{},1000);
+  `, { mode: 0o700 });
   const controller = new AbortController();
   const pending = renderDrawio(exe, dir, controller.signal);
-  // Attach immediately so cancellation cannot become an unhandled rejection.
+  // Observe immediately and also cancel on a failed startup assertion.
   const failed = assert.rejects(pending, /cancelled/);
-  let ids: { parent: number; child: number } | undefined;
-  for (let n = 0; n < 100; n++) {
-    try { ids = JSON.parse(await readFile(join(dir, 'child.json'), 'utf8')); break; } catch {}
-    await new Promise(r => setTimeout(r, 10));
+  try {
+    let ids: { parent: number; child: number } | undefined;
+    // This is a readiness handshake. The deadline only guards a broken fixture;
+    // a loaded test runner can take more than one second to start Node.
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      try { ids = JSON.parse(await readFile(join(dir, 'child.json'), 'utf8')); break; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+      }
+      await new Promise(r => setTimeout(r, 10));
+    }
+    assert.ok(ids, 'fake renderer did not report readiness within 10 seconds');
+    controller.abort(); await failed;
+    // The fixture reaps its helper before exiting, including helper-first exit.
+    for (const pid of [ids.parent, ids.child]) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  } finally {
+    controller.abort();
+    await failed;
   }
-  assert.ok(ids, 'fake renderer started'); controller.abort(); await failed;
-  // Give the OS time to reap the killed helper.
-  for (let n = 0; n < 100; n++) {
-    try { process.kill(ids.child, 0); } catch { break; }
-    await new Promise(r => setTimeout(r, 10));
-  }
-  for (const pid of [ids.parent, ids.child]) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
 });
 
 

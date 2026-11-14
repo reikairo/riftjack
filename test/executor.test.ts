@@ -230,3 +230,66 @@ test('progress wakes require new output and requested interval; restart keeps th
   assert.equal(wakes().length, 2);
   for (const value of [-1, 1, 9, 86401, 1.5, '60']) assert.throws(() => parseExecutorRequest(`!exec ${bot} ${JSON.stringify({ ...f.run(), wakeIntervalSeconds: value })}`, bot, f.policy));
 });
+
+for (const stage of ['admission', 'launch']) test(`executor requires journal recovery after failed ${stage} persistence`, async t => {
+  const f = fixture(t), launches: string[] = [];
+  const q = new ExecutorQueue(f.dir, bot, f.policy, dir => launches.push(dir));
+  const event = f.event(f.run());
+  if (stage === 'launch') await q.receive(room, event, f.transport.allowed);
+  mkdirSync(join(f.dir, 'queue.json.tmp'));
+  if (stage === 'admission') await assert.rejects(q.receive(room, event, f.transport.allowed));
+  else await assert.rejects(q.tick(f.transport));
+  rmSync(join(f.dir, 'queue.json.tmp'), { recursive: true });
+  const durable = readFileSync(join(f.dir, 'queue.json'), 'utf8');
+  await assert.rejects(q.tick(f.transport), /journal.*restart/i);
+  await assert.rejects(q.receive(room, event, f.transport.allowed), /journal.*restart/i);
+  assert.throws(() => q.saveHeads({ [room]: '$later' }), /journal.*restart/i);
+  assert.equal(launches.length, 0);
+  assert.equal(readFileSync(join(f.dir, 'queue.json'), 'utf8'), durable);
+  const recovered = new ExecutorQueue(f.dir, bot, f.policy, dir => launches.push(dir));
+  await recovered.receive(room, event, f.transport.allowed);
+  await recovered.tick(f.transport);
+  assert.equal(launches.length, 1);
+});
+
+test('failed journal write during an awaited access check prevents the pending launch', async t => {
+  const f = fixture(t), launches: string[] = [];
+  const q = new ExecutorQueue(f.dir, bot, f.policy, dir => launches.push(dir));
+  await q.receive(room, f.event(f.run()), f.transport.allowed);
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(r => { entered = r; });
+  const gate = new Promise<void>(r => { release = r; });
+  const tick = q.tick({ ...f.transport, allowed: async () => { entered(); await gate; return true; } });
+  const failed = assert.rejects(tick, /journal.*restart/i);
+  await ready;
+  mkdirSync(join(f.dir, 'queue.json.tmp'));
+  assert.throws(() => q.saveHeads({ [room]: '$unsaved' }));
+  rmSync(join(f.dir, 'queue.json.tmp'), { recursive: true });
+  release(); await failed;
+  assert.equal(launches.length, 0);
+  assert.deepEqual(f.saved().heads, {});
+  assert.equal(f.saved().jobs[0].state, 'queued');
+});
+
+test('failed journal write during final delivery authorization prevents sending', async t => {
+  const f = fixture(t), q = new ExecutorQueue(f.dir, bot, f.policy);
+  await q.receive(room, f.event({ action: 'status', id: 'missing' }), f.transport.allowed);
+  let entered!: () => void, release!: () => void, checks = 0;
+  const ready = new Promise<void>(r => { entered = r; });
+  const gate = new Promise<void>(r => { release = r; });
+  const tick = q.tick({ ...f.transport, allowed: async () => {
+    if (++checks === 2) { entered(); await gate; }
+    return true;
+  } });
+  const failed = assert.rejects(tick, /journal.*restart/i);
+  await ready;
+  mkdirSync(join(f.dir, 'queue.json.tmp'));
+  assert.throws(() => q.saveHeads({ [room]: '$unsaved' }));
+  rmSync(join(f.dir, 'queue.json.tmp'), { recursive: true });
+  release(); await failed;
+  assert.equal(f.posts.length, 0);
+  assert.equal(f.saved().outbox.length, 1);
+  const recovered = new ExecutorQueue(f.dir, bot, f.policy);
+  await recovered.tick(f.transport);
+  assert.equal(f.posts.length, 1);
+});

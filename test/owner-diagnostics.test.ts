@@ -42,7 +42,7 @@ test('diagnostics require owner identity and a current encrypted two-person room
   const error = new OwnerDiagnosticError('Failed', 'full text');
   const send = () => sendOwnerDiagnostic(error, '@owner:test', '@owner:test', '!home:test', transport);
   await sendOwnerDiagnostic(error, '@guest:test', '@owner:test', '!home:test', transport);
-  await sendOwnerDiagnostic(new Error('not a provider diagnostic'), '@owner:test', '@owner:test', '!home:test', transport);
+  await sendOwnerDiagnostic(new Error('not a provider diagnostic'), '@guest:test', '@owner:test', '!home:test', transport);
   assert.equal(sends, 0);
   await send(); assert.equal(sends, 1);
   extraMember = true; await assert.rejects(send(), /withheld/);
@@ -65,4 +65,21 @@ test('multipart diagnostics recheck privacy and never automatically retry an unc
     send: async () => { sent++; throw new Error('uncertain'); },
   }), /uncertain/);
   assert.equal(sent, 1);
+});
+
+test('owner receives ordinary error stacks and causes while guest receives no details', async () => {
+  const cause = new Error('socket detail');
+  cause.stack = 'Error: socket detail\n    at dependency (/module.js:42:3)';
+  const error = new Error('request failed', { cause });
+  const sent: string[] = [];
+  const transport = { allowed: async () => true, stopping: () => false,
+    send: async (_room: string, content: { body: string }) => { sent.push(content.body); } };
+  await sendOwnerDiagnostic(error, 'guest', 'owner', 'home', transport);
+  assert.equal(sent.length, 0);
+  await sendOwnerDiagnostic(error, 'owner', 'owner', 'home', transport, { operation: 'matrix.request', bot: '@bot:test' });
+  const text = sent.join('');
+  assert.match(text, /request failed/); assert.match(text, /socket detail/);
+  assert.ok(text.includes('/module.js:42:3'));
+  assert.ok(text.includes('@bot:test'));
+  assert.doesNotMatch(errorMessage(error), /socket detail|module/);
 });

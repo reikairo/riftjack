@@ -8,6 +8,8 @@ import { GRANT, type MatrixEvent } from './bridge.js';
 import { attachmentDelivery, attachmentFingerprint } from './attachment-delivery.js';
 import { isMedia, outgoingAttachments, type IncomingAttachment, type OutgoingAttachment } from './media.js';
 
+class DestinationUnavailable extends PublicError {}
+
 // Use explicit recipients in groups; mention=true selects the sole peer in a pair room.
 export type MessageRequest = { action: 'list' }
   | { action: 'continue_private'; text: string; id: string }
@@ -36,7 +38,7 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       signal.throwIfAborted();
       const linked = () => (target === home || !!links.room(bot, target)) && links.key(bot, target, context.event) === context.key && !transport.stopping();
       if (!linked() || !(await transport.allowed(target, context.event.sender!)) || !linked()) {
-        throw new PublicError('Room message withheld: destination access, membership or privacy changed.');
+        throw new DestinationUnavailable('Room message withheld: destination access, membership or privacy changed.');
       }
       signal.throwIfAborted();
     };
@@ -45,7 +47,12 @@ export function linkedRoomMessages(links: ConversationLinks, bot: string,
       for (const target of [...links.sharedRooms(bot), ...home ? [home] : []]) {
         try { await allowed(target); rooms.push({ room: target, type: target === home ? 'private' : 'shared',
           ...(target !== home && { agents: links.bots(bot, target) }) }); }
-        catch { signal.throwIfAborted(); }
+        catch (error) {
+          signal.throwIfAborted();
+          if (!(error instanceof DestinationUnavailable)) {
+            throw new PublicError('Could not list linked rooms: destination access check failed.', { cause: error });
+          }
+        }
       }
       return JSON.stringify({ rooms });
     }

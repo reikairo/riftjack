@@ -1,3 +1,4 @@
+import { withoutOwnerDiagnostics } from './diagnostics.js';
 import { relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { DeliveryReceipts, type ScopedReceipts } from './delivery-receipts.js';
@@ -742,10 +743,11 @@ export class Bridge {
       current.failed = true;
       current.markReady();
       while (current.buffered) await current.steering;
-      o.report(error);
-      if (current.sender === o.owner && o.isAuthorized(current.sender)) {
+      if (current.cancelled || current.sender === o.owner) withoutOwnerDiagnostics(() => o.report(error));
+      else o.report(error);
+      if (!current.cancelled && current.sender === o.owner && o.isAuthorized(current.sender)) {
         try { await o.ownerDiagnostic?.(error, { room, sender: current.sender }); }
-        catch (deliveryError) { o.report(deliveryError); }
+        catch (deliveryError) { withoutOwnerDiagnostics(() => o.report(deliveryError)); }
       }
       await reply(o.recoverMessages && !current.cancelled && current.inputIds.some(id => o.state.recoverable(o.botId).some(m => m.event.event_id === id))
         ? errorMessage(error) + ' Your unfinished messages are saved. Restart Riftjack to resume them; actions already performed may need checking.'
@@ -753,19 +755,25 @@ export class Bridge {
         ? `Task ${timedOut ? 'timed out' : 'cancelled'}. Pending follow-ups were discarded. Changes already made are retained.`
         : errorMessage(error) + (current.followups.length ? ' Pending follow-ups were not run; please resend them.' : ''));
     } finally {
-      if (current.cancelled || !o.isAuthorized(current.sender)) {
-        for (const cancel of current.cancelContinuations ?? []) {
-          try { cancel(); } catch (error) { o.report(error); }
+      try {
+        if (current.cancelled || !o.isAuthorized(current.sender)) {
+          for (const cancel of current.cancelContinuations ?? []) {
+            try { cancel(); } catch (error) { o.report(error); }
+          }
+          background?.completed?.(true);
+          if (o.recoverMessages) o.state.completeMessages(o.botId, current.inputIds);
+          for (const id of current.inputIds) this.retained.delete(id);
         }
-        background?.completed?.(true);
-        if (o.recoverMessages) o.state.completeMessages(o.botId, current.inputIds);
-        for (const id of current.inputIds) this.retained.delete(id);
+      } finally {
+        // Persistence failures must propagate without retaining a finished turn.
+        current.interactions.close();
+        clearTimeout(timeout);
+        try { await current.typing?.close(); }
+        finally {
+          this.active = undefined;
+          void this.drainQueued().catch(o.report);
+        }
       }
-      current.interactions.close();
-      clearTimeout(timeout);
-      await current.typing?.close();
-      this.active = undefined;
-      void this.drainQueued().catch(o.report);
     }
   }
 
