@@ -7,6 +7,7 @@ import { open } from 'node:fs/promises';
 import { Attachment, EncryptedAttachment } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import type { EncryptedFile } from '@vector-im/matrix-bot-sdk';
 import { MatrixMedia, mediaDirectory, mediaInstructions, outboxDirectory, parseMediaReply, readOutgoing, readLimited, safeName } from '../src/media.js';
+import { errorMessage } from '../src/errors.js';
 import { loadConfig } from '../src/config.js';
 
 const signal = () => new AbortController().signal;
@@ -305,4 +306,22 @@ test('files changed after opening cannot deliver encryption keys', async t => {
     await assert.rejects(media.send('!dm:test', [{ root, path }], {}, signal(), async () => {}), /changed/);
   }
   assert.equal(sent, 0);
+});
+
+for (const status of [403, 404, 429, 503]) {
+  test(`attachment download preserves HTTP ${status} without response contents`, async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+    const response = new Response(body, { status, statusText: 'private server detail' });
+    await assert.rejects(readLimited(response, 100, signal()), error => {
+      assert.match(errorMessage(error), new RegExp(`HTTP ${status}`));
+      assert.doesNotMatch(errorMessage(error), /private server detail/);
+      return true;
+    });
+    assert.equal(cancelled, true);
+  });
+}
+
+test('attachment download distinguishes an empty successful response from an HTTP error', async () => {
+  await assert.rejects(readLimited(new Response(null), 100, signal()), /response has no body/);
 });

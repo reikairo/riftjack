@@ -159,10 +159,11 @@ export async function validateOutgoing(file: OutgoingAttachment, maxBytes: numbe
 }
 
 export async function readLimited(response: Response, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
-  if (!response.ok || !response.body) {
+  if (!response.ok) {
     await response.body?.cancel().catch(() => {});
-    throw new PublicError('Could not download the Matrix attachment.');
+    throw new PublicError('Could not download the Matrix attachment.', { cause: { status: response.status } });
   }
+  if (!response.body) throw new PublicError('Matrix attachment response has no body.');
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
   let size = 0;
