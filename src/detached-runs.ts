@@ -280,7 +280,9 @@ export class DetachedRuns {
       writeFileSync(join(directory, 'command.json'), spec, { flag: 'wx', mode: 0o600 });
       save(join(directory, 'status.json'), { id, status: 'prepared' });
       const run = { id, label: input.label, target, created, launchBy, sha256: digest(spec) };
-      this.runs.push(run); this.persist();
+      this.runs.push(run);
+      try { this.persist(); }
+      catch (error) { this.runs.pop(); throw error; }
       return JSON.stringify({ id, status: 'prepared', launch_by: new Date(launchBy).toISOString(),
         launch_argv: [process.execPath, launcher, directory, run.sha256],
         note: 'Not started yet. Invoke this argv once through the ordinary command tool. Do not bypass its sandbox or approvals. Then inspect status. Completion observation is already registered; no separate watch is needed.' });
