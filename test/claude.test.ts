@@ -55,6 +55,25 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   const prompt = message.message.content[0].text;
   output({ type: 'system', subtype: 'init', session_id: 'claude-session-1', ...(prompt.includes('[missing-status]') ? {} : { model: 'resolved-claude', cwd: process.cwd(), permissionMode: args[args.indexOf('--permission-mode') + 1], fast_mode_state: 'off', ...(prompt.includes('[fast-') ? { fast_mode_disabled_reason: 'preference' } : {}) }) });
   const finish = result => output({ type: 'result', subtype: 'success', is_error: false, result, session_id: 'claude-session-1' });
+  if (prompt.includes('[child-output]')) {
+    const assistant = (text, extra = {}) => output({ type: 'assistant', session_id: 'claude-session-1',
+      message: { model: 'real-model', content: [{ type: 'text', text }] }, ...extra });
+    assistant('Parent answer');
+    const parent_tool_use_id = 'child-task';
+    if (prompt.includes('[child-auth]')) {
+      assistant('Child authentication failed', { parent_tool_use_id, error: 'authentication_failed', isApiErrorMessage: true,
+        message: { model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in' }] } });
+    } else if (prompt.includes('[child-synthetic]')) {
+      assistant('Child placeholder', { parent_tool_use_id, message: { model: '<synthetic>', content: [{ type: 'text', text: 'No response requested.' }] } });
+    } else {
+      assistant('Child internal work', { parent_tool_use_id });
+      if (prompt.includes('[child-progress]')) {
+        assistant('Child final answer', { parent_tool_use_id });
+        assistant('Parent final answer');
+      }
+    }
+    finish(); return;
+  }
   if (prompt.includes('[fast-')) {
     const fast = prompt.includes('[fast-on]') ? { fast_mode_state: 'on' }
       : { fast_mode_state: 'off', fast_mode_disabled_reason: 'extra_usage_disabled' };
@@ -89,7 +108,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
     return;
   }
   if (prompt.includes('[permission]')) {
-    output({ type: 'control_request', request_id: 'perm-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'touch x', description: 'Create x', timeout: 5, dangerouslyDisableSandbox: true }, decision_reason: 'Outside the sandbox' } });
+    output({ type: 'control_request', request_id: 'perm-1', ...(prompt.includes('[child-permission]') ? { parent_tool_use_id: 'child-task' } : {}), request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'touch x', description: 'Create x', timeout: 5, dangerouslyDisableSandbox: true }, decision_reason: 'Outside the sandbox' } });
     onResponse = response => finish('Permission ' + response.response.response.behavior);
     return;
   }
@@ -952,4 +971,29 @@ test('unexpected Claude failures identify their stage without exposing exception
     return true;
   });
   assert.ok(f.calls().every(call => !call.args?.includes('--print')));
+});
+
+for (const mode of ['fallback', 'progress', 'auth', 'synthetic']) {
+  test(`Claude child assistant output does not replace parent output: ${mode}`, async t => {
+    const f = setup(t), updates: string[] = [];
+    f.state.update('parent', { claude: 'claude-session-1' });
+    const result = await f.backend('claude', `[child-output] [child-${mode}]`, 'parent', signal(), '@owner:test', [], undefined, undefined,
+      { progress: async text => { updates.push(text); } });
+    assert.equal(result, mode === 'progress' ? 'Parent final answer' : 'Parent answer');
+    assert.deepEqual(updates, mode === 'progress' ? ['Parent answer'] : []);
+    assert.equal(f.state.session('parent').claude, 'claude-session-1');
+    assert.equal(f.calls().filter(call => call.input).length, 1);
+  });
+}
+
+test('Claude child control requests still require permission', async t => {
+  const f = setup(t);
+  let requests = 0;
+  const result = await f.backend('claude', '[permission] [child-permission]', 'child-permission', signal(), '@owner:test', [], async question => {
+    requests++;
+    assert.match(question.text, /Command: touch x/);
+    return question.deny;
+  });
+  assert.equal(requests, 1);
+  assert.equal(result, 'Permission deny');
 });
