@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { PublicError } from './errors.js';
 
 // Code that a restarted connector loads. node_modules, .env and data/ are deliberately excluded.
 export const CODE_FILES = ['src', 'scripts', 'package.json', 'package-lock.json', 'tsconfig.json'];
@@ -20,6 +21,9 @@ export class CodeHistory {
       const path = join(base, relative);
       let stat;
       try { stat = lstatSync(path); } catch { hash.update('missing\0' + relative + '\0'); return; }
+      // Copying a link does not freeze its target. Do not certify or restore a
+      // snapshot whose executable contents can change without changing its hash.
+      if (stat.isSymbolicLink()) throw new PublicError('Code snapshots do not support symbolic links. Use regular files and directories in snapshot source paths.');
       if (stat.isDirectory()) {
         hash.update('dir\0' + relative + '\0');
         for (const entry of readdirSync(path).sort()) walk(join(relative, entry));
