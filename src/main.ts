@@ -74,6 +74,7 @@ process.channel?.unref();
 const notifySupervisor = (message: SupervisorMessage) => { process.send?.(message, undefined, undefined, () => {}); };
 let tunnel: SshTunnel | undefined;
 let matrixTransport: ReturnType<typeof installMatrixTransport> | undefined;
+let stopConnector: ((code: number) => void) | undefined;
 
 function diagnostics(error: unknown, operation = 'connector', bot?: string) {
   reportDiagnostic(error, { operation, bot });
@@ -213,9 +214,22 @@ async function main() {
     configureOwnerDiagnostics(undefined);
     clearInterval(workerTimer); clearInterval(discoveryTimer);
     clearInterval(backgroundTimer); clearInterval(githubTimer); githubLifetime.abort();
-    for (const { client, bridge } of clients.values()) { bridge.stop(); client.stop(); }
-    void Promise.all([tunnel?.stop(), transport.destroy(), workerServer.stop(), new Promise(resolve => setTimeout(resolve, 1500))])
-      .then(() => process.exit(code));
+    let failed = false;
+    const stop = async (component: string, action: () => unknown) => {
+      try { await action(); }
+      catch (error) {
+        failed = true;
+        try { diagnostics(new PublicError(`Could not stop ${component} during shutdown.`, { cause: error })); }
+        catch { /* A logging failure must not interrupt the remaining cleanup. */ }
+      }
+    };
+    const cleanup = [...clients].flatMap(([bot, { client, bridge }]) => [
+      stop(`bridge for ${bot}`, () => bridge.stop()), stop(`client for ${bot}`, () => client.stop()),
+    ]);
+    void Promise.all([...cleanup, stop('SSH tunnel', () => tunnel?.stop()),
+      stop('Matrix transport', () => transport.destroy()), stop('worker', () => workerServer.stop()),
+      new Promise(resolve => setTimeout(resolve, 1500))])
+      .then(() => process.exit(failed ? 1 : code));
   };
   const restart = new RestartController({
     supported: process.env.MATRIX_CONNECTOR_SUPERVISED === '1',
@@ -223,6 +237,7 @@ async function main() {
     busy: () => starting || creating || stopping || notifyingRestart || [...clients.values()].some(({ bridge }) => bridge.busy),
     shutdown, notice: restartNotice,
   });
+  stopConnector = shutdown;
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => shutdown(0));
   tunnel?.start();
 
@@ -757,7 +772,23 @@ async function main() {
       console.log(account.name + ' (' + account.kind + ') online: ' + account.userId);
       console.log(JSON.stringify({ time: new Date().toISOString(), event: 'bot-startup', bot: account.userId,
         totalMs: Math.round(performance.now() - startedAt), phases }));
-    } catch (error) { client.stop(); discoveries.delete(account.userId); clients.delete(account.userId); workers.get(account.userId)?.stop(); workers.delete(account.userId); workerServer.remove(account.userId); throw error; }
+    } catch (error) {
+      const worker = workers.get(account.userId);
+      clients.delete(account.userId); discoveries.delete(account.userId);
+      githubPumps.delete(account.userId); backgroundPumps.delete(account.userId);
+      workers.delete(account.userId); workerServer.remove(account.userId);
+      const cleanup = (component: string, stop: () => void) => {
+        try { stop(); }
+        catch (cause) {
+          try { diagnostics(new PublicError(`Could not stop ${component} after startup failure for ${account.userId}.`, { cause })); }
+          catch { /* Preserve the original startup error even if logging fails. */ }
+        }
+      };
+      cleanup('bridge', () => bridge.stop());
+      cleanup('client', () => client.stop());
+      cleanup('worker', () => worker?.stop());
+      throw error;
+    }
   }
   for (const account of accounts.list()) {
     try { await diagnosticOperation({ operation: 'bot.start', bot: account.userId }, () => startAccount(account)); } catch (error) { diagnostics(error, 'bot.start', account.userId); }
@@ -820,4 +851,11 @@ async function main() {
   await notifyRestart();
 }
 
-main().catch(async error => { diagnostics(error, 'connector.start'); await Promise.all([tunnel?.stop(), matrixTransport?.destroy()]); process.exitCode = 1; });
+main().catch(async error => {
+  diagnostics(error, 'connector.start');
+  // Startup can fail after bots have begun syncing (for example, a worker
+  // listener bind failure). exitCode alone leaves their handles and work alive.
+  if (stopConnector) { stopConnector(1); return; }
+  await Promise.all([tunnel?.stop(), matrixTransport?.destroy()]);
+  process.exitCode = 1;
+});
