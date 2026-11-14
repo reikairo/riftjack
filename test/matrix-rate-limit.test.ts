@@ -141,6 +141,7 @@ test('twelve sequential approvals survive 429 on messages, seeds and permission 
 
 test('manual approval remains actionable while a seed is rate limited', async () => {
   const client = new Client(), interactions = new Interactions();
+  let delivered!: Promise<void>;
   let target = '', seedAttempts = 0, authorizations = 0;
   client.respond = async ([, endpoint]) => {
     if (endpoint.includes('/send/m.reaction/') && ++seedAttempts === 1) throw limited();
@@ -151,7 +152,7 @@ test('manual approval remains actionable while a seed is rate limited', async ()
     assert.match(interactions.react(target, '✅')!, /Answer sent/);
   };
   const result = await interactions.ask({ text: 'Approve action?', approve: { approved: true }, deny: {} },
-    new AbortController().signal, (text, controls) => sendConfirmation(text, controls, {
+    new AbortController().signal, (text, controls) => delivered = sendConfirmation(text, controls, {
       authorize: async () => {
         assert.ok(++authorizations <= 2, 'no new authorization after manual decision');
       },
@@ -160,5 +161,6 @@ test('manual approval remains actionable while a seed is rate limited', async ()
       report: error => { throw error; },
     }));
   assert.deepEqual(result, { approved: true });
+  await delivered;
   assert.equal(seedAttempts, 2, 'second seed is skipped once answered');
 });

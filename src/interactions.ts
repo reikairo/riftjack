@@ -38,7 +38,10 @@ export class Interactions {
     this.pending.set(id, { request, delivered: false, finish: value => { cleanup(); resolve(value); }, cancel: abort });
     signal.addEventListener('abort', abort, { once: true });
     const prompt = confirmationPrompt(id, request);
-    try {
+    // Full text delivery still gates answers via bind/delivered. Once an
+    // answer or cancellation settles result, optional reaction seeding must
+    // not retain that decision until a network request finishes.
+    void (async () => {
       const keys = request.approve !== undefined ? ['✅', '❌'] : ['❌'];
       if (request.answer && request.answerReaction) keys.push(request.answerReaction.key);
       await send(prompt.text, {
@@ -48,7 +51,7 @@ export class Interactions {
       }, prompt.markdown);
       const pending = this.pending.get(id);
       if (pending) pending.delivered = true;
-    } catch (error) { cleanup(); reject(error); }
+    })().catch(error => { cleanup(); reject(error); });
     return result;
   }
 
