@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { nextReminder, validSchedule, type CalendarSchedule } from '../src/reminder-schedule.js';
+import { nextReminder, validSchedule, occurrenceInWindow, remainingOccurrences, type CalendarSchedule } from '../src/reminder-schedule.js';
 
 const daily: CalendarSchedule = { frequency: 'daily', time: '09:00', timezone: 'Europe/London' };
 const next = (schedule: CalendarSchedule, after: string) => new Date(nextReminder(schedule, Date.parse(after))).toISOString();
@@ -63,5 +63,31 @@ test('series validation rejects ambiguous rules and unbounded daily windows', ()
     { ...calendar, weekdays: [] }, { ...calendar, weekdays: [1,1] }, { ...calendar, weekdays: [0] },
     { ...calendar, interval_minutes: undefined }, { ...calendar, frequency: 'weekly', weekday: 1, weekdays: [1] }]) {
     assert.equal(validSchedule(s), false, JSON.stringify(s));
+  }
+});
+
+test('second intervals preserve sub-minute anchors, finite windows and remaining counts', () => {
+  const s = { frequency: 'interval' as const, interval_seconds: 1, count: 3, start_at: '2026-10-27T10:00:00.250Z' };
+  const start = Date.parse(s.start_at);
+  assert.equal(nextReminder(s, start - 1), start);
+  assert.equal(nextReminder(s, start), start + 1000);
+  assert.equal(nextReminder(s, start + 1999), start + 2000);
+  assert.equal(nextReminder(s, start + 2000), null);
+  assert.equal(remainingOccurrences(s, start + 2000), 1);
+  assert.equal(remainingOccurrences(s, start + 2000, true), 0);
+  assert.equal(occurrenceInWindow(s, start, start + 2999), true);
+  assert.equal(occurrenceInWindow(s, start, start + 3000), false);
+  assert.equal(nextReminder({ ...s, count: undefined }, start + 86400_500), start + 86401_000);
+});
+
+test('second intervals require one integer unit and keep calendar schedules minute-based', () => {
+  const s = { frequency: 'interval', interval_seconds: 1 };
+  for (const value of [1, 60, 5_184_000]) assert.ok(validSchedule({ ...s, interval_seconds: value }));
+  for (const value of [0, -1, 0.5, 5_184_001, null, '1', NaN, Infinity]) {
+    assert.equal(validSchedule({ ...s, interval_seconds: value }), false);
+  }
+  for (const invalid of [{ frequency: 'interval' }, { ...s, interval_minutes: 1 },
+    { ...daily, interval_seconds: 1, count: 3 }, { ...s, count: 0 }, { ...s, timezone: 'UTC' }]) {
+    assert.equal(validSchedule(invalid), false);
   }
 });

@@ -78,6 +78,24 @@ For a recurring reminder, use `schedule` instead of `at` or `delay_minutes`:
 {"action":"remind","label":"Daily check","message":"Check for useful project updates.","deliver":"agent","schedule":{"frequency":"daily","time":"09:00","timezone":"Europe/London"}}
 ```
 
+For elapsed intervals, set `frequency` to `interval` and supply exactly one of
+`interval_seconds` (1–5184000) or `interval_minutes` (1–86400). For example, a
+continuation that checks for a free agent turn every second uses:
+
+```json
+{"action":"remind","label":"Continue review","message":"Continue the saved review plan. Cancel this series when finished or blocked.","deliver":"agent","schedule":{"frequency":"interval","interval_seconds":1}}
+```
+
+The connector checks dispatch approximately once per second. This is not a
+real-time deadline: an active turn, access checks or a busy connector can delay
+it. Agent reminders start only when the bot is idle; elapsed slots never build
+up a queue of turns. Optional `count` (1–10000) includes missed slots; omit it
+for an unlimited series and cancel the series when its work is complete.
+`start_at` optionally sets a future ISO 8601 anchor within 60 days; otherwise the
+first occurrence is one interval after registration. `update` can change the
+interval of a waiting reminder while keeping its ID. Calendar schedules retain
+minute precision.
+
 Weekly schedules also require `weekday` (Monday=1 through Sunday=7).
 Recurrence uses the named timezone's local clock, including daylight saving
 changes. A nonexistent local time is skipped; a repeated local time fires only
