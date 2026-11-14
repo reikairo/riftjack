@@ -560,3 +560,58 @@ test('a single selection over 50 PRs is rejected before reading GitHub', async t
   await assert.rejects(f.subscriptions.action({ ...selection, pull_requests: Array.from({ length: 51 }, (_, i) => i + 1) }, target, signal()), /1–50/);
   assert.equal(f.requests.length, 0);
 });
+
+for (const operation of ['cancel', 'reconcile'] as const) {
+  for (const stage of ['write', 'rename'] as const) {
+    test(`${operation} preserves subscription and queued notice after failed ${stage}`, async t => {
+      const f = fixture(t);
+      const first = JSON.parse(await f.subscriptions.action(selection, target, signal()));
+      f.state.pr.draft = true;
+      t.mock.timers.tick(61_000);
+      await f.subscriptions.pump(() => true, signal());
+      const notice = f.notices()[0];
+      // The inbox was saved, but the process stopped before clearing its outbox.
+      const persisted = JSON.parse(readFileSync(f.path, 'utf8'));
+      const pending = { id: notice.id, message: notice.message };
+      persisted.subscriptions[0].pending = pending;
+      writeFileSync(f.path, JSON.stringify(persisted));
+      const subscriptions = new GitHubSubscriptions(f.path, f.policy, f.queue, f.read);
+      const blocker = stage === 'write' ? f.path + '.tmp' : f.path;
+      if (stage === 'rename') rmSync(f.path);
+      mkdirSync(blocker);
+      const cancel = async () => {
+        if (operation === 'cancel') await subscriptions.action({ action: 'cancel', id: first.id }, target, signal());
+        else subscriptions.reconcile(() => false);
+      };
+      await assert.rejects(cancel());
+      const listed = JSON.parse(await subscriptions.action({ action: 'list' }, target, signal()));
+      assert.equal(listed.subscriptions[0].state, 'active');
+      assert.equal(f.notices().length, 1);
+      rmSync(blocker, { recursive: true });
+      // A later unrelated successful save must not commit the failed cancellation.
+      await subscriptions.action(selection, { ...target, room: '!other:example.com' }, signal());
+      assert.equal(f.stored().state, 'active');
+      assert.deepEqual(f.stored().pending, pending);
+      await cancel();
+      assert.equal(f.stored().state, 'cancelled');
+      assert.equal(f.stored().pending, undefined);
+      assert.equal(f.notices().length, 0);
+    });
+  }
+}
+
+test('reconcile retries inbox cancellation after subscription cancellation was saved', async t => {
+  const f = fixture(t);
+  await f.subscriptions.action(selection, target, signal());
+  f.state.pr.draft = true;
+  t.mock.timers.tick(61_000);
+  await f.subscriptions.pump(() => true, signal());
+  const cancel = f.queue.cancelNotifications.bind(f.queue);
+  t.mock.method(f.queue, 'cancelNotifications', () => { throw new Error('Inbox write failed'); }, { times: 1 });
+  assert.throws(() => f.subscriptions.reconcile(() => false), /Inbox write failed/);
+  assert.equal(f.stored().state, 'cancelled');
+  assert.equal(f.notices().length, 1);
+  t.mock.method(f.queue, 'cancelNotifications', cancel);
+  f.subscriptions.reconcile(() => true);
+  assert.equal(f.notices().length, 0);
+});

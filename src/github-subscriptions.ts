@@ -196,8 +196,7 @@ export class GitHubSubscriptions {
     if (input.action === 'cancel' && Object.keys(input).every(k => ['action', 'id'].includes(k))) {
       const s = this.items.find(s => s.id === input.id && same(s, target));
       if (!s) throw new PublicError('No such GitHub subscription in this conversation.');
-      s.state = 'cancelled'; delete s.pending; this.save();
-      this.background.cancelNotifications(group(s), target);
+      this.cancelSubscriptions([s]);
       return JSON.stringify(this.describe(s));
     }
     const selection = { ...input, interval_seconds: input.interval_seconds ?? DEFAULT_GITHUB_POLL_SECONDS };
@@ -311,15 +310,27 @@ export class GitHubSubscriptions {
     if (Object.keys(snapshot).length > 25000) throw new PublicError('GitHub snapshot exceeds the limit; narrow the subscription.');
     return snapshot;
   }
-  reconcile(valid: (target: BackgroundTarget) => boolean): void {
-    let changed = false;
-    for (const s of this.items) {
-      if (s.state === 'active' && valid(s) && this.allowed(s)) continue;
-      if (s.state !== 'cancelled' || s.pending) changed = true;
-      s.state = 'cancelled'; delete s.pending;
-      this.background.cancelNotifications(group(s), s);
+  private cancelSubscriptions(items: Subscription[]): void {
+    const previous = items.map(s => ({ subscription: s, state: s.state, pending: s.pending }));
+    if (items.some(s => s.state !== 'cancelled' || s.pending)) {
+      for (const s of items) { s.state = 'cancelled'; delete s.pending; }
+      try { this.save(); }
+      catch (error) {
+        // Keep the same objects: an in-flight poll may still hold a reference.
+        for (const { subscription: s, state, pending } of previous) {
+          s.state = state;
+          if (pending) s.pending = pending;
+          else delete s.pending;
+        }
+        throw error;
+      }
     }
-    if (changed) this.save();
+    // Only revoke queued deliveries after cancellation is durable. Retry this
+    // even for cancelled records if a previous inbox write failed.
+    for (const s of items) this.background.cancelNotifications(group(s), s);
+  }
+  reconcile(valid: (target: BackgroundTarget) => boolean): void {
+    this.cancelSubscriptions(this.items.filter(s => s.state !== 'active' || !valid(s) || !this.allowed(s)));
   }
   async pump(valid: (target: BackgroundTarget) => boolean, signal: AbortSignal): Promise<void> {
     this.reconcile(valid);
