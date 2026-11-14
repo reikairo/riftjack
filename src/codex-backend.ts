@@ -1,3 +1,4 @@
+import { startReleaseNotesMcp, RELEASE_NOTES_SERVER } from './release-notes-mcp.js';
 import { startBackendTools } from './backend-tools.js';
 import { startDetachedMcp, DETACHED_SERVER } from './detached-mcp.js';
 import { startConfirmationMcp, CONFIRMATION_SERVER } from './confirmation-mcp.js';
@@ -77,6 +78,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
     let checkpointSender: ReturnType<typeof checkpointDelivery> | undefined;
     const seenCompactions = new Set<string>();
     let compactingId: string | undefined;
+    let releaseNotes: Awaited<ReturnType<typeof startReleaseNotesMcp>> | undefined;
     let detached: Awaited<ReturnType<typeof startDetachedMcp>> | undefined;
     let confirmation: Awaited<ReturnType<typeof startConfirmationMcp>> | undefined;
     let github: Awaited<ReturnType<typeof startGitHubMcp>> | undefined;
@@ -93,7 +95,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       const outbox = await outboxDirectory(config.workspace, key);
       tools = await startBackendTools({ kind: 'codex', config, outbox, hooks, publish,
         allowPublication: !!interact, signal: AbortSignal.any([signal, mediaLifetime.signal]), beforeAttachments: () => progress });
-      ({ detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media } = tools);
+      ({ releaseNotes, detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media } = tools);
       signal.throwIfAborted();
       const server = current.server = new AppServer(config, notification => {
         const p = notification.params;
@@ -177,6 +179,10 @@ export function createCodexBackend(configuration: Config | (() => Config), state
           [`mcp_servers.${GITHUB_SERVER}`]: github ? { url: github.url, http_headers: github.headers,
             required: true, enabled: true, tool_timeout_sec: Math.ceil(config.timeoutMs / 1000), enabled_tools: ['github_subscriptions'],
             tools: { github_subscriptions: { approval_mode: 'approve' } },
+          } : disabledMcp,
+          [`mcp_servers.${RELEASE_NOTES_SERVER}`]: releaseNotes ? { url: releaseNotes.url, http_headers: releaseNotes.headers,
+            required: true, enabled: true, enabled_tools: ['release_notes'],
+            tools: { release_notes: { approval_mode: 'approve' } },
           } : disabledMcp,
           [`mcp_servers.${BACKGROUND_SERVER}`]: background ? { url: background.url, http_headers: background.headers,
             required: true, enabled: true, enabled_tools: ['background_tasks'],

@@ -24,6 +24,7 @@ def main():
     parser.add_argument('--bot', default=os.getenv('RIFTJACK_WORKER_BOT'))
     parser.add_argument('--token-file', default=os.getenv('RIFTJACK_WORKER_TOKEN_FILE'))
     sub = parser.add_subparsers(dest='command', required=True)
+    sub.add_parser('release-notes', help='Read release notes captured by the running connector at startup')
     wait = sub.add_parser('wait'); wait.add_argument('--seconds', type=int, default=300)
     initiate = sub.add_parser('initiate', help='Queue a background turn in an existing conversation (owner opt-in)')
     initiate.add_argument('task', help='Saved task JSON from the existing conversation; no live lease required')
@@ -48,7 +49,7 @@ def main():
     if not args.bot or not args.token_file: parser.error('--bot and --token-file are required')
     token = Path(args.token_file).read_text().strip()
     opener = urllib.request.build_opener(NoRedirect())
-    endpoint = args.url.rstrip('/') + '/v1/bots/' + urllib.parse.quote(args.bot, safe='') + '/tasks'
+    endpoint = args.url.rstrip('/') + '/v1/bots/' + urllib.parse.quote(args.bot, safe='') + ('/release-notes' if args.command == 'release-notes' else '/tasks')
 
     def request(path='', body=None):
         req = urllib.request.Request(endpoint + path,
@@ -57,6 +58,8 @@ def main():
         with opener.open(req, timeout=650 if args.command in ('attachment', 'rooms') else 45) as response:
             return json.load(response)
 
+    if args.command == 'release-notes':
+        print(json.dumps(request(), ensure_ascii=False)); return
     if args.command == 'wait':
         if args.seconds < 1: parser.error('--seconds must be positive')
         deadline = time.monotonic() + args.seconds

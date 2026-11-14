@@ -1,3 +1,4 @@
+import { startReleaseNotesMcp, RELEASE_NOTES_SERVER, releaseNotesInstructions } from './release-notes-mcp.js';
 import { conversationInstructions } from './tool-conversation.js';
 import type { BackendHooks } from './bridge.js';
 import type { Config } from './config.js';
@@ -37,6 +38,7 @@ export async function startBackendTools(options: {
       ? await add(CONFIRMATION_SERVER, startConfirmationMcp(hooks.confirmation, signal)) : undefined;
     const github = hooks?.github ? await add(GITHUB_SERVER, startGitHubMcp(hooks.github, signal)) : undefined;
     const background = hooks?.background ? await add(BACKGROUND_SERVER, startBackgroundMcp(hooks.background, signal)) : undefined;
+    const releaseNotes = hooks?.releaseNotes ? await add(RELEASE_NOTES_SERVER, startReleaseNotesMcp(hooks.releaseNotes, signal)) : undefined;
     const web = supports('fetch') && config.fetch && config.sandbox !== 'read-only'
       ? await add(FETCH_SERVER, startFetchMcp(fetchAction(config.fetch, config.workspace), signal)) : undefined;
     const publication = publish && options.allowPublication && config.sandbox !== 'read-only'
@@ -51,7 +53,7 @@ export async function startBackendTools(options: {
     const instructions = (rooms ? conversationInstructions : '') + (detached ? detachedInstructions : '') + (confirmation ? confirmationInstructions : '') +
       (publication ? publicationInstructions : '') + (github ? githubInstructions : '') + (background ? backgroundInstructions : '') +
       (rooms ? roomMessageInstructions : '') + (web && config.fetch ? fetchInstructions(config.fetch.allow.map(p => p.text)) : '') +
-      (diagram ? drawioInstructions : '');
-    return { detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media, instructions, connections, close };
+      (diagram ? drawioInstructions : '') + (releaseNotes ? releaseNotesInstructions : '');
+    return { releaseNotes, detached, confirmation, github, background, web, publication, diagram, rooms, delivery, media, instructions, connections, close };
   } catch (error) { await close(); throw error; }
 }

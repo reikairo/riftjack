@@ -252,3 +252,13 @@ Matrix sync checkpoints are saved only after inbox handling succeeds. If saving
 fails, the connector stops and its supervisor restarts it from the last checkpoint.
 Access and full room privacy are rechecked before handing tasks or attachments to
 the worker and before delivering replies.
+
+## Release notes
+
+Run `python3 worker-client.py release-notes` with the same URL, bot and token-file
+configuration as `wait`. It returns the connector's startup revision, dirty status
+and release-notes Markdown as JSON, or an explicit reason if the notes were
+unavailable at startup. No saved task or live lease is required, and no task is
+claimed. The authenticated endpoint is `GET /v1/bots/:bot/release-notes`.
+Startup notices include this command. Copy the updated client script to the worker
+when installing this capability.

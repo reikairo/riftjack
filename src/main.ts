@@ -162,7 +162,7 @@ async function main() {
   const links = new ConversationLinks(join(config.dataDir, 'conversation-links.json'),
     join(config.dataDir, 'shared-room-history.json'), accounts.list(), state, access.owner);
   const clients = new Map<string, { client: MatrixClient; bridge: Bridge | WorkerBridge; privateRoom: (room: string, sender: string) => Promise<boolean> }>();
-  const workerServer = new WorkerServer();
+  const workerServer = new WorkerServer(undefined, () => startupVersion.releaseNotes);
   const workers = new Map<string, WorkerService>();
   const discoveries = new Map<string, PeerDiscovery>();
   const discoveryTimer = setInterval(() => { for (const [bot, discovery] of discoveries) void diagnosticOperation({ operation: 'discovery.pump', bot }, () => discovery.pump()).catch(error => diagnostics(error, 'discovery.pump', bot)); }, 30_000);
@@ -456,6 +456,7 @@ async function main() {
         }),
       queuedUpdateMessage: account.kind === 'pi' ? 'Your update is queued for Pi after the current task.' : account.kind === 'claude' ? 'Your update is queued for Claude Code in this conversation. It will run after the current step.' : undefined,
       since, recoverMessages, timeoutMs: config.timeoutMs, state, report,
+      releaseNotes: () => startupVersion.releaseNotes,
       typing: matrixTyping({ homeserver: config.homeserver, userId: account.userId, accessToken: account.accessToken }, transport.fetch),
       typingMeasurement: (room, measurement) => console.log(JSON.stringify({ time: new Date().toISOString(),
         bot: account.userId, room, ...measurement })),
@@ -761,7 +762,7 @@ async function main() {
             ? { 'm.relates_to': { rel_type: 'm.thread', event_id: linkedAgent.thread } } : undefined });
           const session = state.session(key)[account.kind as 'codex' | 'claude' | 'pi' | 'grok'];
           if (session && (!linkedAgent || session === linkedAgent.session)) {
-            await bridge.scheduleRestart(startupId, home, sender, session, linkedAgent?.thread, startupVersion.summary);
+            await bridge.scheduleRestart(startupId, home, sender, session, linkedAgent?.thread, startupVersion.notice(bridge instanceof WorkerBridge));
           }
         }
         void diagnosticOperation({ operation: 'message.recover', bot: account.userId }, () => bridge instanceof Bridge ? bridge.recoverMessages(routeIncoming) : Promise.resolve()).catch(report);

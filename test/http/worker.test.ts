@@ -259,3 +259,29 @@ test('worker room endpoint and Python client keep operations scoped to a live le
   allowed = false; assert.equal((await request(task.lease!)).status, 403);
   assert.equal(queue.get(task.id).status, 'cancelled');
 });
+
+test('Python release-notes command needs bot credentials but no task or lease and never claims work', async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const service = new WorkerService(queue, join(dir, 'files'), 100, {
+    allowed: async () => true, receive: async () => undefined, prepare: async () => [], send: async () => {}, report: () => {},
+  });
+  const task = queue.enqueue('!dm:test', event(), 'conversation');
+  const notes = { revision: '1'.repeat(40), dirty: false, source: 'startup snapshot', markdown: '# Notes\nCafé.' };
+  const server = new WorkerServer(() => {}, () => JSON.stringify(notes));
+  server.add('@grok:test', 'a'.repeat(43), service);
+  const port = await server.start(0);
+  t.after(async () => { service.stop(); await server.stop(); queue.close(); });
+  const base = `http://127.0.0.1:${port}`, url = base + '/v1/bots/%40grok%3Atest/release-notes';
+  const headers = { Authorization: 'Bearer ' + 'a'.repeat(43) };
+  assert.equal((await fetch(url)).status, 401);
+  assert.equal((await fetch(url, { headers: { Authorization: 'Bearer wrong' } })).status, 401);
+  assert.equal((await fetch(url, { headers: { ...headers, Origin: 'https://example.com' } })).status, 403);
+  assert.equal((await fetch(url, { method: 'POST', headers })).status, 404);
+  assert.equal((await fetch(url + '/' + task.id, { headers })).status, 404);
+  assert.equal((await fetch(url + '?path=other', { headers })).status, 404);
+  const tokenFile = join(dir, 'token'); writeFileSync(tokenFile, 'a'.repeat(43), { mode: 0o600 });
+  const result = await promisify(execFile)('python3', [fileURLToPath(new URL('../../scripts/worker-client.py', import.meta.url)),
+    '--url', base, '--bot', '@grok:test', '--token-file', tokenFile, 'release-notes']);
+  assert.deepEqual(JSON.parse(result.stdout), notes);
+  assert.equal(queue.get(task.id).status, 'queued');
+});

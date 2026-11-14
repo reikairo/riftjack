@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, renameSync, mkdirSync, realpathSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, mkdirSync, realpathSync, openSync, readSync, closeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,7 +24,27 @@ export function codeVersion(directory = fileURLToPath(new URL('..', import.meta.
 
 export class StartupVersion {
   readonly summary: string;
-  constructor(private file: string, private current = codeVersion()) {
+  readonly releaseNotes: string;
+
+  constructor(private file: string, private current = codeVersion(), notesFile = fileURLToPath(new URL('../docs/release-notes.md', import.meta.url))) {
+    // Keep the running instance's notes even if its checkout is later updated.
+    let markdown: string | undefined;
+    let unavailable: string | undefined;
+    try {
+      const fd = openSync(notesFile, 'r');
+      try {
+        const buffer = Buffer.alloc(256 * 1024 + 1);
+        let size = 0, count: number;
+        while (size < buffer.length && (count = readSync(fd, buffer, size, buffer.length - size, null))) size += count;
+        if (size === buffer.length) unavailable = 'Release notes exceed the 256 KiB limit.';
+        else markdown = buffer.subarray(0, size).toString('utf8');
+      } finally { closeSync(fd); }
+    } catch { unavailable = 'Release notes were unavailable at connector startup.'; }
+    this.releaseNotes = JSON.stringify({
+      revision: current && isRevision(current.revision) ? current.revision : null,
+      dirty: current && isRevision(current.revision) ? current.dirty : null,
+      source: 'startup snapshot', markdown, unavailable,
+    });
     let previous: unknown;
     try { previous = JSON.parse(readFileSync(file, 'utf8')).revision; } catch { /* No trustworthy baseline. */ }
     if (!current || !isRevision(current.revision)) {
@@ -42,6 +62,12 @@ export class StartupVersion {
       this.summary += `\nRelease notes: ${repository}/blob/${revision}/docs/release-notes.md`;
       if (changed) this.summary += `\nRevision comparison: ${repository}/compare/${previous}..${revision}`;
     }
+  }
+
+  notice(worker = false): string {
+    return this.summary + '\nRead the running version’s release notes with ' + (worker
+      ? 'worker-client.py release-notes (using your configured worker credentials).'
+      : 'the Riftjack release_notes tool (no arguments).');
   }
 
   // Call only after the connector is ready. Failed startups must not erase the baseline.
