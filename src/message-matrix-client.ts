@@ -32,7 +32,7 @@ export class MessageMatrixClient extends WorkerMatrixClient {
     } catch (error) {
       // The SDK otherwise continues with the new in-memory sync token even
       // when processing fails. Stop so a restart reuses the saved checkpoint.
-      this.stop(); this.emit('worker.inbox_failure', error); throw error;
+      this.stopForInboxFailure(error); throw error;
     }
   }
 }
