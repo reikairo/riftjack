@@ -5,12 +5,14 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
-## Separate diagram tools
+## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
-  a PNG `path`. Both accept an optional `out_path` relative to the conversation
-  outbox, with a generated filename by default. Existing files are never overwritten.
-  Each saves its result without sending it.
+  a PNG `path`. Both accept optional `out_path`. Input and output paths may be
+  absolute within the workspace or relative to the advertised results directory.
+- Results default to `diagrams/` in the workspace, survive subsequent turns, and
+  return an absolute `path`. Existing files are never overwritten. To send a
+  result to Matrix, copy it into the outbox; clearing the outbox keeps the original.
 - Both tools are available to configured Codex and Claude bots in workspace-write
   mode. See [diagrams](diagrams.md) for setup, examples and limits.
 

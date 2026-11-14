@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { drawioAction } from '../../src/drawio.js';
+import { diagramDirectory, drawioAction } from '../../src/drawio.js';
 import { startDrawioMcp } from '../../src/drawio-mcp.js';
 import { createBackend } from '../../src/backends.js';
 import { loadConfig } from '../../src/config.js';
@@ -16,7 +16,7 @@ function post(server: ToolConnection, id: number, args: unknown, method = 'tools
 }
 test('diagram MCP authenticates and accepts XML larger than the default tool request budget', async t => {
   let received: unknown;
-  const server = await startDrawioMcp(async input => { received = input; return '{"path":"diagram.png"}'; }, new AbortController().signal);
+  const server = await startDrawioMcp(async input => { received = input; return '{"path":"diagram.png"}'; }, new AbortController().signal, '/tmp/diagrams');
   t.after(() => server.close());
   assert.equal((await post({ ...server, headers: { Authorization: 'wrong' } }, 1, {})).status, 401);
   const listed = (await (await post(server, 2, {}, 'tools/list')).json()).result.tools;
@@ -25,6 +25,7 @@ test('diagram MCP authenticates and accepts XML larger than the default tool req
   for (const tool of listed) {
     assert.equal(tool.inputSchema.properties.action, undefined);
     assert.equal(tool.inputSchema.properties.out_path.type, 'string');
+    assert.ok(tool.description.includes('/tmp/diagrams'));
   }
   const tool = listed[0];
   assert.equal(tool.name, 'render_diagram');
@@ -48,21 +49,21 @@ test('separate diagram tools round-trip source and reject mismatched arguments',
   const server = await startDrawioMcp(drawioAction({ executable: '/opt/drawio' }, root, 1024 * 1024, async (_exe, dir) => {
     renders++;
     writeFileSync(join(dir, 'render.png'), png);
-  }), new AbortController().signal);
+  }), new AbortController().signal, diagramDirectory(root));
   t.after(async () => { await server.close(); rmSync(root, { recursive: true, force: true }); });
   let id = 0;
   const call = async (name: string, input: unknown) => (await (await post(server, ++id, input, 'tools/call', name)).json()).result;
   const rendered = await call('render_diagram', { xml, out_path: 'architecture.png' });
   assert.equal(rendered.isError, undefined);
   const output = JSON.parse(rendered.content[0].text);
-  assert.equal(output.path, 'architecture.png');
+  assert.equal(output.path, join(diagramDirectory(root), 'architecture.png'));
   assert.equal(output.editable, true);
   const extracted = await call('extract_diagram', { path: output.path, out_path: 'architecture.drawio' });
   assert.equal(extracted.isError, undefined);
   const source = JSON.parse(extracted.content[0].text);
-  assert.equal(source.path, 'architecture.drawio');
+  assert.equal(source.path, join(diagramDirectory(root), 'architecture.drawio'));
   assert.equal(source.untrusted, true);
-  assert.equal(readFileSync(source.file, 'utf8'), xml);
+  assert.equal(readFileSync(source.path, 'utf8'), xml);
   assert.notEqual(source.path, output.path);
   for (const [name, args] of [
     ['render_diagram', { path: output.path }], ['extract_diagram', { xml }],
@@ -94,7 +95,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
   const c=servers.riftjack_drawio,allowed=args.includes('--allowedTools')?args[args.indexOf('--allowedTools')+1].split(','):[];
   const instructions=args[args.indexOf('--append-system-prompt')+1]||'';
   const addDir=args.includes('--add-dir')?args[args.indexOf('--add-dir')+1]:null;
-  record({connection:c?{url:c.url,headers:c.headers}:null,allowed:['render_diagram','extract_diagram'].every(n=>allowed.includes('mcp__riftjack_drawio__'+n)),addDir,instructions:instructions.includes('render_diagram MCP tool'),tools:await listed(c)});
+  record({connection:c?{url:c.url,headers:c.headers}:null,allowed:['render_diagram','extract_diagram'].every(n=>allowed.includes('mcp__riftjack_drawio__'+n)),addDir,instructions:instructions.includes('render_diagram MCP tool'),directory:instructions.includes(JSON.stringify(require('node:path').join(process.cwd(),'diagrams'))),tools:await listed(c)});
   send({type:'system',subtype:'init',session_id:'s'});
   send({type:'result',subtype:'success',result:'done',session_id:'s'});return;
  }
@@ -108,7 +109,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',async 
   const c=p.config['mcp_servers.riftjack_drawio'];
   const on=c&&c.enabled!==false;
   record({connection:on?{url:c.url,headers:c.http_headers}:null,enabled:!!on,policy:on?[c.required,c.enabled_tools.join(),...c.enabled_tools.map(n=>c.tools[n].approval_mode)].join():null,
-   instructions:instructions.includes('render_diagram MCP tool'),tools:on?await listed({url:c.url,headers:c.http_headers}):null});
+   instructions:instructions.includes('render_diagram MCP tool'),directory:instructions.includes(JSON.stringify(require('node:path').join(process.cwd(),'diagrams'))),tools:on?await listed({url:c.url,headers:c.http_headers}):null});
   reply({thread:{id:'s'}});
  }
  if(method==='thread/inject_items') reply({});
@@ -140,6 +141,7 @@ for (const kind of ['codex', 'claude'] as const) test(`${kind} offers draw.io on
   for (const on of seen.slice(0, 2)) {
     assert.deepEqual(on.tools, ['render_diagram', 'extract_diagram']);
     assert.equal(on.instructions, true);
+    assert.equal(on.directory, true);
     if (kind === 'claude') { assert.equal(on.allowed, true); assert.equal(on.addDir, null); }
     else assert.equal(on.policy, 'true,render_diagram,extract_diagram,approve,approve');
   }
