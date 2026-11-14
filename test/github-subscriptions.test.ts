@@ -560,3 +560,19 @@ test('a single selection over 50 PRs is rejected before reading GitHub', async t
   await assert.rejects(f.subscriptions.action({ ...selection, pull_requests: Array.from({ length: 51 }, (_, i) => i + 1) }, target, signal()), /1–50/);
   assert.equal(f.requests.length, 0);
 });
+
+for (const stage of ['write', 'rename']) test(`failed registration ${stage} is not retained or persisted by a later subscription`, async t => {
+  const f = fixture(t), blocker = stage === 'write' ? f.path + '.tmp' : f.path;
+  mkdirSync(blocker);
+  await assert.rejects(f.subscriptions.action(selection, target, signal()));
+  rmSync(blocker, { recursive: true });
+  const list = JSON.parse(await f.subscriptions.action({ action: 'list' }, target, signal()));
+  assert.equal(list.subscriptions.length, 0);
+  const other = { ...selection, events: ['pull_request'] };
+  await f.subscriptions.action(other, target, signal());
+  assert.equal(JSON.parse(readFileSync(f.path, 'utf8')).subscriptions.length, 1);
+  const retried = JSON.parse(await f.subscriptions.action(selection, target, signal()));
+  assert.equal(retried.baseline_saved, true);
+  assert.equal(retried.already_subscribed, undefined);
+  assert.equal(JSON.parse(readFileSync(f.path, 'utf8')).subscriptions.length, 2);
+});
