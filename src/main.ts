@@ -71,6 +71,7 @@ process.channel?.unref();
 const notifySupervisor = (message: SupervisorMessage) => { process.send?.(message, undefined, undefined, () => {}); };
 let tunnel: SshTunnel | undefined;
 let matrixTransport: ReturnType<typeof installMatrixTransport> | undefined;
+let stopConnector: ((code: number) => void) | undefined;
 
 function diagnostics(error: unknown, bot?: string) {
   console.error(JSON.stringify({ time: new Date().toISOString(), event: 'connector-error', bot, message: errorMessage(error) }));
@@ -202,6 +203,7 @@ async function main() {
     busy: () => starting || creating || stopping || notifyingRestart || [...clients.values()].some(({ bridge }) => bridge.busy),
     shutdown, notice: restartNotice,
   });
+  stopConnector = shutdown;
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => shutdown(0));
   tunnel?.start();
 
@@ -796,4 +798,11 @@ async function main() {
   await notifyRestart();
 }
 
-main().catch(async error => { diagnostics(error); await Promise.all([tunnel?.stop(), matrixTransport?.destroy()]); process.exitCode = 1; });
+main().catch(async error => {
+  diagnostics(error);
+  // Startup can fail after bots have begun syncing (for example, a worker
+  // listener bind failure). exitCode alone leaves their handles and work alive.
+  if (stopConnector) { stopConnector(1); return; }
+  await Promise.all([tunnel?.stop(), matrixTransport?.destroy()]);
+  process.exitCode = 1;
+});
