@@ -733,7 +733,23 @@ async function main() {
       console.log(account.name + ' (' + account.kind + ') online: ' + account.userId);
       console.log(JSON.stringify({ time: new Date().toISOString(), event: 'bot-startup', bot: account.userId,
         totalMs: Math.round(performance.now() - startedAt), phases }));
-    } catch (error) { client.stop(); discoveries.delete(account.userId); clients.delete(account.userId); workers.get(account.userId)?.stop(); workers.delete(account.userId); workerServer.remove(account.userId); throw error; }
+    } catch (error) {
+      const worker = workers.get(account.userId);
+      clients.delete(account.userId); discoveries.delete(account.userId);
+      githubPumps.delete(account.userId); backgroundPumps.delete(account.userId);
+      workers.delete(account.userId); workerServer.remove(account.userId);
+      const cleanup = (component: string, stop: () => void) => {
+        try { stop(); }
+        catch (cause) {
+          try { diagnostics(new PublicError(`Could not stop ${component} after startup failure for ${account.userId}.`, { cause })); }
+          catch { /* Preserve the original startup error even if logging fails. */ }
+        }
+      };
+      cleanup('bridge', () => bridge.stop());
+      cleanup('client', () => client.stop());
+      cleanup('worker', () => worker?.stop());
+      throw error;
+    }
   }
   for (const account of accounts.list()) {
     try { await startAccount(account); } catch (error) { console.error('Could not start ' + account.userId + '.'); diagnostics(error); }
