@@ -59,23 +59,39 @@ export class WorkerService {
     const accepted = this.queue.enqueueInitiative(task, option.intervalMs);
     return { id: accepted.id, status: accepted.status, conversation: accepted.conversation };
   }
-  async claim() {
+  async claim(signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const candidate = this.queue.candidate();
     if (candidate) {
       try { await this.allowed(candidate); }
       catch (error) { if (error instanceof WorkerError && error.status === 403) return null; throw error; }
+      signal?.throwIfAborted();
       const task = this.queue.claim(candidate.id);
       if (!task) return null;
-      try { await this.transport.started?.(); } catch (error) { this.transport.report(error); }
-      await this.allowed(task);
-      this.queue.checkLease(task.id, task.lease!);
-      if (task.prompt === undefined && this.transport.prompt) {
-        task.prompt = this.queue.cachePrompt(task.id, task.lease!, this.transport.prompt(task));
-        this.transport.prompted?.();
+      try {
+        try { await this.transport.started?.(); } catch (error) { this.transport.report(error); }
+        signal?.throwIfAborted();
+        await this.allowed(task);
+        signal?.throwIfAborted();
+        this.queue.checkLease(task.id, task.lease!);
+        if (task.prompt === undefined && this.transport.prompt) {
+          task.prompt = this.queue.cachePrompt(task.id, task.lease!, this.transport.prompt(task));
+          this.transport.prompted?.();
+        }
+        return { id: task.id, room: task.room, type: task.context?.type ?? 'private', agents: task.context?.agents ?? [], conversation: task.conversation, sender: task.event.sender,
+          text: task.prompt ?? task.event.content?.body ?? '', hasAttachment: !!task.event.content?.file,
+          lease: task.lease, leaseUntil: task.leaseUntil, attempt: task.attempt };
+      } catch (error) {
+        // The worker never received this lease. Do not block its next poll
+        // until expiry, or overwrite cancellation/a lease issued meanwhile.
+        try { this.queue.release(task.id, task.lease!); }
+        catch (releaseError) {
+          if (!(releaseError instanceof WorkerError && releaseError.status === 409)) {
+            throw new AggregateError([error, releaseError], 'Worker claim failed and its lease could not be released');
+          }
+        }
+        throw error;
       }
-      return { id: task.id, room: task.room, type: task.context?.type ?? 'private', agents: task.context?.agents ?? [], conversation: task.conversation, sender: task.event.sender,
-        text: task.prompt ?? task.event.content?.body ?? '', hasAttachment: !!task.event.content?.file,
-        lease: task.lease, leaseUntil: task.leaseUntil, attempt: task.attempt };
     }
     return null;
   }

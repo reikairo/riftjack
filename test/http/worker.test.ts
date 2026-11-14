@@ -19,6 +19,42 @@ function directory(t: { after(fn: () => void): void }) {
 }
 const idle = async (service: WorkerService) => { while (service.busy) await new Promise(resolve => setTimeout(resolve, 1)); };
 
+test('disconnecting a claim request during authorization releases its undisclosed lease', { timeout: 10000 }, async t => {
+  const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
+  const task = queue.enqueue('!dm:test', event(), 'conversation');
+  let checked!: () => void, release!: () => void, disconnected!: () => void, finished!: () => void;
+  const checking = new Promise<void>(resolve => { checked = resolve; });
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const closed = new Promise<void>(resolve => { disconnected = resolve; });
+  const done = new Promise<void>(resolve => { finished = resolve; });
+  let checks = 0;
+  const service = new WorkerService(queue, join(dir, 'files'), 100, {
+    allowed: async () => { if (++checks === 2) { checked(); await waiting; } return true; },
+    receive: async () => undefined, prepare: async () => [], send: async () => {}, report: () => {},
+  });
+  const claim = service.claim.bind(service);
+  service.claim = async signal => {
+    signal?.addEventListener('abort', disconnected, { once: true });
+    try { return await claim(signal); }
+    finally { finished(); }
+  };
+  const server = new WorkerServer(); server.add('@grok:test', 'a'.repeat(43), service);
+  const port = await server.start(0);
+  t.after(async () => { release(); service.stop(); await server.stop(); queue.close(); });
+  const url = `http://127.0.0.1:${port}/v1/bots/%40grok%3Atest/tasks`;
+  const headers = { Authorization: 'Bearer ' + 'a'.repeat(43) };
+  const controller = new AbortController();
+  const request = fetch(url, { headers, signal: controller.signal });
+  const rejected = assert.rejects(request, { name: 'AbortError' });
+  await checking;
+  controller.abort(); await rejected; await closed;
+  release(); await done;
+  assert.equal(queue.get(task.id).status, 'queued');
+  const retry = await fetch(url, { headers });
+  assert.equal(retry.status, 200);
+  assert.equal((await retry.json()).task.id, task.id);
+});
+
 test('Python client can initiate from a finished task without a lease, with per-bot HTTP authorization', async t => {
   const dir = directory(t), queue = new WorkerQueue(join(dir, 'queue.sqlite'));
   const state = new State(join(dir, 'state.json')), bot = '@grok:test';
