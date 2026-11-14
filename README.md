@@ -40,9 +40,9 @@ The manager shows the workspace path for confirmation before creating a bot. Eac
 - **Node.js 24 or newer**, **Python 3**, and **lsof** on the computer where the agents will work. The host launcher uses Python and lsof to replace an existing instance safely. Keep that computer and Riftjack running to keep the bots reachable.
 - **A Synapse Matrix server you administer**, with native account registration and login. Provisioning needs an admin token or shared registration secret. Matrix Authentication Service is not supported by the provisioning adapter.
 - **A Matrix account and client**, such as Element X, for your conversations.
-- **At least one agent:** Codex signed in with a ChatGPT account, Claude Code signed in with a Claude account, or a Grok worker running in its own environment. Only your chosen provider is needed.
+- **At least one agent:** Codex signed in with a ChatGPT account, Claude Code signed in with a Claude account, Pi configured with a supported provider, or a Grok worker running in its own environment. Only your chosen provider is needed.
 
-Install your chosen CLI separately: [Codex](https://developers.openai.com/codex/cli) or [Claude Code](docs/claude.md). Riftjack does not install or update either engine. Each uses its own account and usage limits. No model-provider API key is needed.
+Install your chosen CLI separately: [Codex](https://developers.openai.com/codex/cli), [Claude Code](docs/claude.md), or [Pi](docs/pi.md). Riftjack does not install or update these engines. Each uses its own account and usage limits. Codex and Claude use subscription authentication; Pi authentication depends on the selected provider.
 
 Riftjack makes outbound connections to Matrix. Codex and Claude need no publicly reachable inbound port. Connector MCP tools use authenticated, temporary HTTP listeners on loopback. External workers use an optional loopback HTTP interface, reachable locally or through an SSH tunnel; see [Grok setup](docs/grok.md).
 
@@ -96,6 +96,9 @@ npm --prefix riftjack run check:claude
 
 Leave `CLAUDE_MODEL` blank for its default. You can skip the Codex login entirely.
 
+For **Pi**, follow [Pi setup](docs/pi.md#setup) to install the CLI and authenticate
+with your chosen provider, then use `bootstrap:pi`.
+
 For **Grok**, enable `WORKER_PORT` and follow [worker setup](docs/grok.md); use `bootstrap:grok` without installing Codex or Claude.
 
 Then, still from `my-riftjack/`, check the configuration and bootstrap your chosen engine:
@@ -104,6 +107,7 @@ Then, still from `my-riftjack/`, check the configuration and bootstrap your chos
 npm --prefix riftjack run check:config
 npm --prefix riftjack run bootstrap:codex
 # Or: npm --prefix riftjack run bootstrap:claude
+# Or: npm --prefix riftjack run bootstrap:pi
 # Or, with WORKER_PORT enabled: npm --prefix riftjack run bootstrap:grok
 npm --prefix riftjack start
 ```
@@ -142,7 +146,7 @@ See [working through Matrix](docs/chat.md) for confirmations, attachments, plugi
 
 **Approvals apply to the displayed request.** Codex defaults to a workspace-write sandbox with command network access disabled and approval requests routed to Matrix. Claude uses its own sandbox and permission settings. You can set either backend’s approval policy to `never`. Existing host restrictions still apply.
 
-**Local tasks are not replayed after interruption.** Codex and Claude ignore messages missed while Riftjack is stopped. Already accepted messages in a linked-room queue survive restart, but interrupted active tasks are not replayed. Sessions, accounts, and files persist. External workers have separate [durable inbox and lease rules](docs/grok.md#wait-work-reply).
+**Interrupted work can resume after restart.** Codex, Claude and Pi recover unfinished human messages and catch up on accessible Matrix history from their saved checkpoint. A recovered turn may already have changed files or sent a reply; the agent must inspect existing effects before continuing. This does not guarantee exactly-once actions or renew expired approvals. See [message recovery](docs/chat.md#delivery-and-formatting). External workers have separate [durable inbox and lease rules](docs/grok.md#wait-work-reply).
 
 [Access and encryption](docs/security.md) explains these boundaries. [Restarts and recovery](docs/operations.md) explains the supervisor and rollback behavior.
 
