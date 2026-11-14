@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, utimesSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, utimesSync, rmSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DetachedRuns } from '../src/detached-runs.js';
@@ -280,4 +280,27 @@ test('restart context checks processes of a saved lost run now, and omits it onc
   await manager.action({ action: 'close', id: run.id, evidence }, target, signal, approve, async () => {});
   assert.deepEqual(manager.unfinished(target), []);
   assert.deepEqual(new DetachedRuns(f.directory, f.workspace, f.hooks).unfinished(target), []);
+});
+
+for (const failure of ['write', 'rename']) test(`failed run preparation preserves active capacity after ${failure} failure`, async t => {
+  const f = setup();
+  t.after(() => rmSync(f.workspace, { recursive: true, force: true }));
+  const first = await f.action(f.request);
+  const before = await f.action({ action: 'list' });
+  const index = join(f.directory, 'index.json'), backup = index + '.before';
+  const blocked = failure === 'write' ? index + '.tmp' : index;
+  if (failure === 'rename') renameSync(index, backup);
+  mkdirSync(blocked);
+  try { await assert.rejects(f.action(f.request)); }
+  finally {
+    rmSync(blocked, { recursive: true });
+    if (failure === 'rename') renameSync(backup, index);
+  }
+  // No launch argv was returned, so no new prepared run may consume capacity.
+  assert.deepEqual(await f.action({ action: 'list' }), before);
+  const second = await f.action(f.request);
+  const restored = new DetachedRuns(f.directory, f.workspace, f.hooks);
+  const runs = JSON.parse(await restored.action({ action: 'list' }, target, signal, approve, async () => {}));
+  assert.deepEqual(runs.map((run: { id: string }) => run.id), [first.id, second.id]);
+  await assert.rejects(f.action(f.request), /Two runs/);
 });
