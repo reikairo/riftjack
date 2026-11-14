@@ -1,3 +1,4 @@
+import { PublicError } from '../src/errors.js';
 import { routingInstructions } from '../src/routing-instructions.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -226,6 +227,40 @@ test('outbound room messages enforce destination privacy and session binding wit
   live = roomState(); stopping = true; await assert.rejects(send());
   stopping = false; resetDuringCheck = true; await assert.rejects(send());
   assert.equal(calls, 4);
+});
+
+for (const publicFailure of [false, true]) test(`room listing reports ${publicFailure ? 'public' : 'transport'} access-check failures`, async t => {
+  const f = fixture(t), signal = new AbortController().signal;
+  const cause = Object.assign(new Error('transport detail'), { code: 'ETIMEDOUT' });
+  const failure = publicFailure ? new PublicError('Room state unavailable.', { cause }) : cause;
+  let mode: 'denied' | 'failed' = 'denied';
+  const action = linkedRoomMessages(f.links, bot, { room: home, event: message('List rooms'), key: canonical }, {
+    stopping: () => false,
+    allowed: async room => {
+      if (room === home) return true;
+      if (mode === 'failed') throw failure;
+      return false;
+    },
+    send: async () => assert.fail('Listing must not send'),
+  });
+  assert.deepEqual(JSON.parse(await action({ action: 'list' }, signal)), { rooms: [{ room: home, type: 'private' }] });
+  mode = 'failed';
+  await assert.rejects(action({ action: 'list' }, signal), (error: unknown) => {
+    assert.ok(error instanceof PublicError);
+    assert.equal(error.cause, failure);
+    assert.match(error.message, /list linked rooms/);
+    return true;
+  });
+});
+
+test('room listing preserves cancellation during an access check', async t => {
+  const f = fixture(t), controller = new AbortController(), cancelled = new Error('Turn cancelled');
+  const action = linkedRoomMessages(f.links, bot, { room: home, event: message('List rooms'), key: canonical }, {
+    stopping: () => false,
+    allowed: async () => { controller.abort(cancelled); throw new Error('Concurrent transport failure'); },
+    send: async () => assert.fail('Listing must not send'),
+  });
+  await assert.rejects(action({ action: 'list' }, controller.signal), error => error === cancelled);
 });
 
 test('an agent can return a result to its own private chat, but not mention anyone there', async t => {
