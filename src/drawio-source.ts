@@ -5,7 +5,10 @@ import { PublicError } from './errors.js';
 
 export const MAX_XML = 1024 * 1024;
 function fail(message: string): never { throw new PublicError(message); }
-const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// XML normalizes literal attribute whitespace. Retain decoded line breaks and
+// tabs as character references when passing labels to the renderer.
+const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  .replace(/\n/g, '&#10;').replace(/\r/g, '&#13;').replace(/\t/g, '&#9;');
 type Element = { name: string; attrs: Record<string, string>; children: Element[]; text: string };
 const children: Record<string, string[]> = {
   mxfile: ['diagram'], diagram: ['mxGraphModel'], mxGraphModel: ['root'],
