@@ -48,6 +48,19 @@ test('diagram rejects resources and active content before launching a renderer',
     'x'.repeat(MAX_XML + 1),
   ]) assert.throws(() => diagramSource(bad));
 });
+test('render XML preserves character-reference whitespace in cell and object labels', () => {
+  const value = 'First&#10;Second&#9;Tab&#13;Return';
+  for (const container of ['mxCell', 'object', 'UserObject']) {
+    const cell = container === 'mxCell'
+      ? `<mxCell id="2" value="${value}" style="html=0;" vertex="1" parent="1"/>`
+      : `<${container} id="2" label="${value}"><mxCell style="html=0;" vertex="1" parent="1"/></${container}>`;
+    const source = `<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>${cell}</root></mxGraphModel>`;
+    const rendered = diagramSource(source).renderXml;
+    // Literal attribute whitespace is normalized to spaces by XML parsers.
+    // Character references must survive reserialization for multiline labels.
+    assert.ok(rendered.includes(`${container === 'mxCell' ? 'value' : 'label'}="${value}"`), rendered);
+  }
+});
 test('PNG source round-trips Unicode and compressed documents and rejects corruption', () => {
   for (const source of [xml, '<mxfile><diagram>' + deflateRawSync(Buffer.from(encodeURIComponent(xml))).toString('base64') + '</diagram></mxfile>']) {
     const editable = embedDiagram(png, source);
