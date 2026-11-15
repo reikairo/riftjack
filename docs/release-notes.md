@@ -17,6 +17,12 @@ between the previous successful startup and the current one, including rollbacks
   and preserves its cause for owner diagnostics. It no longer sends Pi a
   fabricated human refusal. Explicit approvals and declines are unchanged.
 
+## Workspace failure diagnostics
+
+- Workspace lookup, access and creation failures retain filesystem error codes
+  in public summaries and the original exception in owner diagnostics. This
+  distinguishes missing folders, permissions and symbolic-link loops.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
