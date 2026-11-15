@@ -103,13 +103,13 @@ export function githubReader(policy: GitHubPolicy): GitHubRead {
               shared.notBefore = Math.max(shared.notBefore, resume);
             }
             if (error) {
-              // Do not expose stderr or the untrusted API response body.
+              // Keep provider details in the owner diagnostic cause, not the public reply.
               reject(new PublicError(secondary || exhausted || retry > 0
                 ? `GitHub request failed (HTTP ${status || 'unknown'} rate limit). Requests sharing these credentials are paused until ${new Date(shared.notBefore).toISOString()}.`
-                : `GitHub request failed (${safeErrorSummary(Object.assign(new Error(), { cause: error, status }))}). ${status === 401 ? 'Authentication was rejected; check the configured gh account.' : status === 403 ? 'Access was denied; check repository permissions and organization policy.' : status === 404 ? 'Repository or resource was not found, or the account cannot access it.' : status >= 500 ? 'GitHub returned a server error; retry later.' : 'Check gh availability, authentication and connectivity.'}`));
+                : `GitHub request failed (${safeErrorSummary(Object.assign(new Error(), { cause: error, status }))}). ${status === 401 ? 'Authentication was rejected; check the configured gh account.' : status === 403 ? 'Access was denied; check repository permissions and organization policy.' : status === 404 ? 'Repository or resource was not found, or the account cannot access it.' : status >= 500 ? 'GitHub returned a server error; retry later.' : 'Check gh availability, authentication and connectivity.'}`, { cause: error }));
               return;
             }
-            try { resolve(JSON.parse(body)); } catch { reject(new PublicError('GitHub returned an invalid JSON response.')); }
+            try { resolve(JSON.parse(body)); } catch (cause) { reject(new PublicError('GitHub returned an invalid JSON response.', { cause })); }
           });
       });
     });
