@@ -20,7 +20,10 @@ export class CodeHistory {
     const walk = (relative: string) => {
       const path = join(base, relative);
       let stat;
-      try { stat = lstatSync(path); } catch { hash.update('missing\0' + relative + '\0'); return; }
+      try { stat = lstatSync(path); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        hash.update('missing\0' + relative + '\0'); return;
+      }
       // Copying a link does not freeze its target. Do not certify or restore a
       // snapshot whose executable contents can change without changing its hash.
       if (stat.isSymbolicLink()) throw new PublicError('Code snapshots do not support symbolic links. Use regular files and directories in snapshot source paths.');
