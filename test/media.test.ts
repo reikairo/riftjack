@@ -8,6 +8,7 @@ import { Attachment, EncryptedAttachment } from '@matrix-org/matrix-sdk-crypto-n
 import type { EncryptedFile } from '@vector-im/matrix-bot-sdk';
 import { MatrixMedia, mediaDirectory, mediaInstructions, outboxDirectory, parseMediaReply, readOutgoing, readLimited, safeName } from '../src/media.js';
 import { errorMessage } from '../src/errors.js';
+import { hostErrorDetails } from '../src/host-diagnostics.js';
 import { loadConfig } from '../src/config.js';
 
 const signal = () => new AbortController().signal;
@@ -160,6 +161,23 @@ test('tampering, plaintext attachments, unsafe URLs and excessive declared sizes
   await assert.rejects(f.media.receive({ file: { ...file, url: 'https://example.test/file' } }, 'key', signal(), async () => {}), /media URL/);
   await assert.rejects(f.media.receive({ file, info: { size: 1025 } }, 'key', signal(), async () => {}), /limit/);
   assert.equal(f.fetches(), 1);
+});
+
+test('failed attachment verification preserves the crypto error for owner diagnostics', async t => {
+  const f = setup(t);
+  const file = f.encrypted(png); f.corrupt();
+  await assert.rejects(f.media.receive({ file }, 'key', signal(), async () => {}), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /decrypt or verify/);
+    assert.ok(error.cause instanceof Error);
+    assert.ok(error.cause.message.length > 0);
+    const details = hostErrorDetails(error);
+    assert.equal(details.nodes.length, 2);
+    assert.equal(details.nodes[1].message, error.cause.message);
+    assert.equal(details.nodes[1].stack, error.cause.stack);
+    return true;
+  });
+  assert.deepEqual(incomingFiles(f.dir), []);
 });
 
 test('actual download size is bounded even with absent or false size metadata', async t => {
