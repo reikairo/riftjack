@@ -391,6 +391,9 @@ export class GitHubSubscriptions {
             }
           }
           if (s.pending && valid(s) && s.state === 'active' && !signal.aborted) {
+            // A previous snapshot write may have failed with pending only in memory.
+            // Re-establish the durable outbox before handing off on every retry.
+            this.save();
             this.background.notify(s.pending.id, s, s.pending.message, { group: group(s), progress: false }, 'GitHub PR events');
             delete s.pending; this.save();
           }

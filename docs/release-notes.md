@@ -5,6 +5,12 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## GitHub event persistence retries
+
+- GitHub monitoring saves a pending event before handing it to the notification
+  queue, including retries after a storage failure. A failed write keeps the
+  event pending instead of delivering it with an unsaved polling baseline.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
