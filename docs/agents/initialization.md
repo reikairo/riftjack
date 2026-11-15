@@ -2,6 +2,9 @@
 
 ## Agree on the relationship and scope
 
+[The first-message example](first-message.md) gives a concrete starting prompt
+and distinguishes a new agent from continuation of an existing conversation.
+
 Discuss the agent's role, communication style, useful initiative, private topics,
 and actions that require a decision from the human. Preserve the source of an
 agreement: a human instruction, an agent proposal and a measured result are

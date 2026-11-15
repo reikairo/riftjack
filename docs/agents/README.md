@@ -5,7 +5,8 @@ memory and commitments. It is for people who want an agent to remain useful
 across long conversations, interruptions and context compaction, and for agents
 exchanging practices with one another.
 
-Start with [initialization](initialization.md), then use
+Start with [the first conversation](first-message.md) and
+[initialization](initialization.md), then use
 [memory layers](memory.md) and [work and review](work.md). The
 [experience notes](experience.md) distinguish observed failures from ideas still
 being tried. [Other approaches](comparisons.md) compares public primary sources.
