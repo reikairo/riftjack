@@ -1,3 +1,5 @@
+import { configureOwnerDiagnostics, diagnosticOperation } from '../src/diagnostics.js';
+import { hostErrorDetails } from '../src/host-diagnostics.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync, readdirSync, symlinkSync, existsSync } from 'node:fs';
@@ -155,4 +157,43 @@ test('busy skips a second file, cancellation kills the child and releases the sl
   await assert.rejects(first, /abort/i);
   writeFileSync(f.config.executable, `#!${process.execPath}\nconst fs=require('node:fs');const args=process.argv.slice(2);fs.writeFileSync(args[args.indexOf('-o')+1],'ready');`, { mode: 0o700 });
   assert.equal((await f.transcriber.transcribe(f.file, signal())).transcription?.status, 'complete');
+});
+
+for (const stage of ['decode_audio', 'transcribe_audio']) test(`${stage} failure retains owner diagnostics without losing the attachment`, async t => {
+  const marker = 'synthetic private decoder detail';
+  const consoleLines: string[] = [];
+  t.mock.method(console, 'error', (line: string) => consoleLines.push(line));
+  const body = `process.stdin.resume(); process.stdin.on('end', () => { process.stderr.write(${JSON.stringify(marker)}); process.exitCode = 7; });`;
+  const f = fixture(t, stage === 'transcribe_audio' ? body : '', stage === 'decode_audio' ? body : '');
+  const records: { error: unknown; operation: string; bot?: string }[] = [];
+  configureOwnerDiagnostics((error, context) => records.push({ error, ...context }));
+  t.after(() => configureOwnerDiagnostics(undefined));
+  const result = await diagnosticOperation({ operation: 'task.audio', bot: 'audio-bot' }, () => f.transcriber.transcribe(f.file, signal()));
+  assert.equal(result.path, f.file.path);
+  assert.equal(result.transcription?.status, 'unavailable');
+  assert.doesNotMatch(JSON.stringify(result), /synthetic private decoder detail/);
+  assert.equal(consoleLines.length, 1);
+  assert.doesNotMatch(consoleLines[0], /synthetic private decoder detail/);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].operation, 'audio.' + stage);
+  assert.equal(records[0].bot, 'audio-bot');
+  assert.match(JSON.stringify(hostErrorDetails(records[0].error)), /synthetic private decoder detail/);
+  assert.ok(hostErrorDetails(records[0].error).nodes.some(node => node.code === 7));
+});
+
+test('audio subprocess diagnostics are bounded and cancellation is not reported as a failure', async t => {
+  const f = fixture(t, `process.stderr.write('x'.repeat(100000)); process.exitCode = 7;`);
+  const records: unknown[] = [];
+  configureOwnerDiagnostics(error => records.push(error));
+  t.after(() => configureOwnerDiagnostics(undefined));
+  await f.transcriber.transcribe(f.file, signal());
+  assert.equal(records.length, 1);
+  const details = JSON.stringify(hostErrorDetails(records[0]));
+  assert.match(details, /stderr \(truncated\)/);
+  assert.ok(details.length < 40000);
+  records.length = 0;
+  const controller = new AbortController();
+  controller.abort(new Error('requested cancellation'));
+  await assert.rejects(f.transcriber.transcribe(f.file, controller.signal), error => error === controller.signal.reason);
+  assert.deepEqual(records, []);
 });
