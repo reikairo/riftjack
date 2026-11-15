@@ -4,6 +4,9 @@
   including the final slot of a recurring series. A storage failure before agent
   execution or room sending no longer strands an unsent reminder in progress.
 
+- Model discovery for Claude and Pi preserves JSON parsing and input-pipe error
+  causes, plus child exit status, for owner diagnostics when listing models fails.
+
 These notes describe user-visible changes. Startup notices link to this file at
 the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes

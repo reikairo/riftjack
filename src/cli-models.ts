@@ -32,7 +32,7 @@ function catalogRpc(config: Config, kind: 'claude' | 'pi', args: string[], signa
     const abort = () => fail(signal.reason);
     signal.addEventListener('abort', abort, { once: true });
     child.once('error', cause => fail(new PublicError(`Could not start ${kind} for model discovery. Check its executable and login on the host.`, { cause })));
-    child.stdin.on('error', () => { if (answer === undefined) fail(new PublicError(`${kind} closed the model catalog connection.`)); });
+    child.stdin.on('error', cause => { if (answer === undefined) fail(new PublicError(`${kind} closed the model catalog connection.`, { cause })); });
     child.stderr.resume(); // Never forward credentials or raw CLI diagnostics.
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
@@ -60,16 +60,16 @@ function catalogRpc(config: Config, kind: 'claude' | 'pi', args: string[], signa
             break;
           }
         } catch (error) {
-          fail(error instanceof PublicError ? error : new PublicError(`${kind} returned an invalid model catalog response.`));
+          fail(error instanceof PublicError ? error : new PublicError(`${kind} returned an invalid model catalog response.`, { cause: error }));
           break;
         }
       }
     });
-    child.once('close', code => {
+    child.once('close', (code, killed) => {
       clearTimeout(killTimer); clearTimeout(closeTimer); signal.removeEventListener('abort', abort);
       if (signal.aborted) reject(signal.reason);
       else if (failure) reject(failure);
-      else if (answer === undefined || (code !== 0 && !stopping)) reject(new PublicError(`${kind} did not return a complete model catalog. Check its installed version and login.`));
+      else if (answer === undefined || (code !== 0 && !stopping)) reject(new PublicError(`${kind} did not return a complete model catalog. Check its installed version and login.`, { cause: { code, signal: killed } }));
       else resolve(answer);
     });
     for (const request of requests) child.stdin.write(JSON.stringify(request) + '\n');
