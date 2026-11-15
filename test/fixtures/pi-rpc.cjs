@@ -27,6 +27,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
   send({type:'agent_settled'});
  }
  if (record.type === 'extension_ui_response') {
+  fs.appendFileSync('decisions', JSON.stringify(record) + '\n');
   message(record.confirmed ? 'Approved.' : 'Denied.'); send({type:'agent_settled'});
  }
 });

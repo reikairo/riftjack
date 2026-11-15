@@ -5,6 +5,12 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Pi confirmation delivery failures
+
+- A failed confirmation request now stops the Pi task with a technical error
+  and preserves its cause for owner diagnostics. It no longer sends Pi a
+  fabricated human refusal. Explicit approvals and declines are unchanged.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
