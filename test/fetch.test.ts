@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fetchAction, isPublicAddress, loadFetchConfig, parsePrefix, publicLookup, type FetchResponse, type Transport } from '../src/fetch.js';
+import { hostErrorDetails } from '../src/host-diagnostics.js';
+import { PublicError } from '../src/errors.js';
 
 const signal = new AbortController().signal;
 const API = 'https://api.github.com/repos/ydb-platform/ydb/';
@@ -240,3 +242,27 @@ test('a stream error while the helper starts is reported, and cancel ends a hung
   await assert.rejects(fetchAction(hung, dir, second)({ url: `${API}hang` }, controller.signal));
   assert.ok(Date.now() - started < 2_000, `cancel took ${Date.now() - started} ms`);
 });
+
+for (const stage of ['request', 'body'] as const) {
+  test(`fetch preserves the original ${stage} failure for owner diagnostics`, async t => {
+    const { dir, config } = setup(t);
+    const cause = Object.assign(new Error('private upstream detail'), { code: 'ECONNRESET' });
+    const destroyed = { value: false };
+    let requests = 0;
+    const transport: Transport = async () => {
+      requests++;
+      if (stage === 'request') throw cause;
+      return { status: 200, contentType: 'text/plain', body: body(['partial', cause], destroyed) };
+    };
+    await assert.rejects(fetchAction(config, dir, transport)({ url: `${API}pulls/1` }, signal), error => {
+      assert.ok(error instanceof PublicError);
+      assert.equal(error.cause, cause);
+      assert.doesNotMatch(error.message, /private upstream detail/);
+      assert.match(JSON.stringify(hostErrorDetails(error)), /private upstream detail/);
+      return true;
+    });
+    assert.equal(requests, 1);
+    assert.deepEqual(files(dir), []);
+    if (stage === 'body') assert.equal(destroyed.value, true);
+  });
+}
