@@ -145,12 +145,25 @@ export class BackgroundTasks {
   }
   // Cancel undelivered notices when a subscription is removed or loses access.
   cancelNotifications(group: string, target: BackgroundTarget): void {
-    let changed = false;
-    for (const w of this.watches) {
-      if (w.notification?.group !== group || !this.visible(w, target) || w.state === 'cancelled' || w.state === 'delivered') continue;
-      w.state = 'cancelled'; delete w.delivery; changed = true;
+    this.cancelWatches(this.watches.filter(w => w.notification?.group === group && this.visible(w, target) &&
+      w.state !== 'cancelled' && w.state !== 'delivered'));
+  }
+  private cancelWatches(watches: Watch[]) {
+    if (!watches.length) return;
+    const replacements = new Map(watches.map(w => {
+      const next: Watch = { ...w, state: 'cancelled' };
+      delete next.delivery;
+      if (w.timer?.lastRun?.state === 'dispatching' || w.timer?.lastRun?.state === 'interrupted') {
+        next.timer = { ...w.timer, lastRun: { ...w.timer.lastRun, state: 'cancelled' } };
+      }
+      return [w, next] as const;
+    }));
+    this.save(this.watches.map(w => replacements.get(w) ?? w));
+    // In-flight delivery callbacks retain these objects. Invalidate them only
+    // after persistence succeeds; replacing the array alone would not stop them.
+    for (const [watch, next] of replacements) {
+      Object.assign(watch, next); delete watch.delivery; this.nextCheck.delete(watch.id);
     }
-    if (changed) this.save();
   }
   private visible(w: Watch, target: Omit<BackgroundTarget, 'session'> & { session?: string }): boolean {
     return w.key === target.key && w.session === target.session && w.room === target.room &&
@@ -201,26 +214,17 @@ export class BackgroundTasks {
         throw new PublicError('Use remind (or update with id) with label, message (up to 4000 characters), deliver (agent or room), and either delay_minutes (1–86400), at (ISO 8601 with offset, within 60 days), or a valid schedule. Interval schedules need exactly one of interval_minutes (1–86400) or interval_seconds (1–5184000), optional future start_at and count. Calendar schedules need time and timezone; an interval series needs count or end_time.');
       }
       if (!updating && this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length >= 100) throw new PublicError('Too many active background watches. Cancel an unused watch first.');
-      this.prune();
       const timer: Watch = { ...(existing ?? target), id: existing?.id ?? randomUUID(), workspace: this.workspace, label: input.label, file: '', field: '', terminal: [],
         expires: due, state: 'waiting', timer: { message: input.message, deliver: input.deliver as 'agent' | 'room', ...(recurring && { schedule: schedule as ReminderSchedule }) } };
       delete timer.result;
-      if (existing) {
-        // Invalidate a pending asynchronous room-access check for the old specification.
-        existing.state = 'cancelled';
-        this.watches[this.watches.indexOf(existing)] = timer;
-      }
-      else this.watches.push(timer);
-      this.save();
+      this.register(timer, existing);
       return JSON.stringify(describe(timer));
     }
     if (input.action === 'cancel' && Object.keys(input).every(k => ['action', 'id'].includes(k))) {
       const watch = this.watches.find(w => w.id === input.id && visible(w));
       if (!watch) throw new PublicError('No such watch in this conversation.');
       if (watch.state !== 'delivered' && watch.state !== 'cancelled') {
-        watch.state = 'cancelled'; delete watch.delivery; this.nextCheck.delete(watch.id);
-        if (watch.timer?.lastRun?.state === 'dispatching' || watch.timer?.lastRun?.state === 'interrupted') watch.timer.lastRun.state = 'cancelled';
-        this.save();
+        this.cancelWatches([watch]);
       }
       return JSON.stringify({ id: watch.id, state: watch.state, processStopped: false });
     }
@@ -235,11 +239,10 @@ export class BackgroundTasks {
         !w.timer && (w.state === 'waiting' || !!w.delivery) && w.conditions && conditionKey(w.conditions) === conditionKey(conditions));
       if (duplicate) return JSON.stringify({ ...describe(duplicate), alreadyWatching: true });
       if (this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length >= 100) throw new PublicError('Too many active background watches. Cancel an unused watch first.');
-      this.prune();
       const watch: Watch = { ...target, id: randomUUID(), workspace: this.workspace, label: input.label,
         file: '', field: '', terminal: [], conditions, state: 'waiting',
         expires: Date.now() + ((input.timeout_hours as number | undefined) ?? 24) * 3600000 };
-      this.watches.push(watch); this.save();
+      this.register(watch);
       return JSON.stringify(describe(watch));
     }
     if (input.action !== 'watch' || Object.keys(input).some(k => !['action', 'label', 'status_file', 'field', 'terminal', 'timeout_hours', 'stale_after_minutes', 'pid'].includes(k)) ||
@@ -263,20 +266,24 @@ export class BackgroundTasks {
       return JSON.stringify({ id: duplicate.id, state: duplicate.state, expires: new Date(duplicate.expires).toISOString(), alreadyWatching: true });
     }
     if (this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length >= 100) throw new PublicError('Too many active background watches. Cancel an unused watch first.');
-    this.prune();
     const watch: Watch = { ...target, id: randomUUID(), workspace: this.workspace, label: input.label, file, field: input.field,
       terminal: input.terminal as string[], expires: Date.now() + ((input.timeout_hours as number | undefined) ?? 24) * 3_600_000, state: 'waiting',
       ...(input.pid !== undefined && { pid: input.pid as number }),
       ...(input.stale_after_minutes !== undefined && { stale: { minutes: input.stale_after_minutes as number, updated: Date.now() } }) };
-    this.watches.push(watch); this.save();
+    this.register(watch);
     return JSON.stringify({ id: watch.id, state: watch.state, expires: new Date(watch.expires).toISOString() });
   }
   // Keeps every active watch or timer and the latest finished ones, within the
   // 200 entries the loader accepts.
-  private prune() {
-    this.nextCheck.clear();
-    this.watches = this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).concat(
+  private register(watch: Watch, existing?: Watch) {
+    const retained = this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).concat(
       this.watches.filter(w => w.state !== 'waiting' && w.state !== 'dispatching' && !w.delivery).slice(-99));
+    const watches = existing ? retained.map(w => w === existing ? watch : w) : [...retained, watch];
+    this.save(watches);
+    // An access check may still be awaiting the old reminder specification.
+    if (existing) existing.state = 'cancelled';
+    this.watches = watches;
+    this.nextCheck.clear();
   }
   // For the restart notice: file watches of one conversation that are still waiting, or whose
   // notification turn was interrupted. `observed` is read now; the watch itself is not changed.
