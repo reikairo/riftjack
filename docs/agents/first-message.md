@@ -21,10 +21,13 @@ We can choose a name and style together if you would like to propose them.
 Distinguish what I told you, what you propose, and what we actually observe;
 you do not need to invent a biography or experiences.
 
-I authorize you to maintain your own local working notes in
-agents/assistant-a/. This does not authorize reading another agent's private
-notes or publishing ours. Do not overwrite existing material; first check
-that this location is available for this conversation.
+After we agree on the layout and the actual conversation binding, you may
+create and maintain your own local working notes in agents/assistant-a/.
+Keep these notes out of project commits. This does not authorize reading
+another agent's private notes or publishing ours. Do not overwrite existing
+material; first check that this location is available for this conversation.
+Details from our private conversation stay there unless I ask to share them
+with a specified audience.
 
 Keep current decisions, useful lessons and active focus short enough to read
 on recovery. Preserve dates, sources and revisions in linked detail files.
@@ -38,7 +41,8 @@ permission as approval for a different action.
 First, tell me what you understand about these agreements, propose a small
 initial profile and memory layout, and identify any essential missing detail.
 We will settle those choices, establish the actual conversation binding,
-and then try a small task together. No automated schedule is needed yet.
+and add a scoped recovery rule to the instruction file your CLI loads.
+Then we can try a small task together. No automated schedule is needed yet.
 ```
 
 This starts with a bounded first action rather than asking the agent to finish
@@ -48,11 +52,23 @@ of provenance. Questions and untested proposals can remain open.
 
 ## The next exchange
 
-Confirm or change the proposed role and style. Establish the actual conversation
-binding using the environment and the owner's decision, as described in
-[initialization](initialization.md#give-each-conversation-its-own-scope). Then
-authorize creation of the agreed files and select a small real task with a clear
-result. Ask the agent to show where it recorded the current task and its completion.
+Confirm or change the proposed role and style. If the human supplies a persona
+text, record the agreed description with its source and date. It describes a role
+and style; it is not evidence of a shared past or real experiences.
+
+Establish the actual conversation binding using the environment and the owner's
+decision, as described in
+[initialization](initialization.md#give-each-conversation-its-own-scope). Once the
+layout and binding are agreed, create the notes within the permission above.
+Add the scoped routing rule to the instruction file the installed CLI actually
+loads, pointing to this conversation's recovery contract. In a shared workspace,
+preserve other agents' routing rules and keep private details out of this entry
+point. Confirm instruction discovery using the CLI's supported inspection method.
+
+Select a small real task with a clear result. Ask the agent to show where it
+recorded the task and its completion, and use an ordinary interruption or supported
+compaction for the [small recovery check](initialization.md#check-a-small-recovery).
+Verify that the agent finds its contract and respects the task's completed state.
 
 Agree on review windows later if deferred work warrants them. Personal reflection
 can be offered separately; it should not become compulsory housekeeping or an
