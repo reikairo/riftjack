@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync, utimesSync, renameSync, symlinkSync, truncateSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync, utimesSync, renameSync, symlinkSync, truncateSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BackgroundTasks, type BackgroundTarget } from '../src/background-tasks.js';
@@ -163,4 +163,20 @@ test('a reused PID in zombie state cannot supply the original process exit code'
   writeFileSync(join(f.root, 'result'), 'exit 0');
   const result = observeConditions(spec, f.root, Date.now(), () => ({ birth: 'Thu Oct 29 00:01:00 2026', state: 'Z' }));
   assert.equal(result.status, 'watch_process_reused'); assert.equal(result.exit_code, undefined);
+});
+
+test('an idle observation is saved after storage recovers without resetting its clock on restart', async t => {
+  const f = setup(t), now = Date.now();
+  f.register({ action: 'watch', label: 'Log', mode: 'idle', idle_file: 'log', idle_seconds: 60 });
+  writeFileSync(join(f.root, 'log'), 'new activity');
+  mkdirSync(f.file + '.tmp');
+  await assert.rejects(f.queue.pump(f.options, now + 10000), { code: 'EISDIR' });
+  rmSync(f.file + '.tmp', { recursive: true });
+  await f.queue.pump(f.options, now + 25000);
+  assert.equal(f.received.length, 0);
+  const resumed = new BackgroundTasks(f.file, f.root);
+  await resumed.pump(f.options, now + 70000);
+  assert.equal(f.received.length, 1, 'the original observed change time survives restart');
+  assert.equal(f.received[0].status, 'watch_file_idle');
+  assert.equal(f.received[0].idle_seconds, 60);
 });

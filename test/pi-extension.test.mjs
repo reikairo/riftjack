@@ -33,3 +33,36 @@ for (const policy of [{}, { readOnly: true }, { denyWrites: true }]) {
     }
   });
 }
+
+for (const phase of ['listing', 'execution']) for (const kind of ['http', 'rpc']) {
+  test(`Pi ${phase} reports the ${kind} status without response text`, async t => {
+    const previous = process.env.RIFTJACK_PI_BRIDGE;
+    process.env.RIFTJACK_PI_BRIDGE = JSON.stringify({ nonce: 'test', connections: [
+      { name: 'service', url: 'http://127.0.0.1:1/mcp', headers: {} },
+    ] });
+    t.after(() => {
+      if (previous === undefined) delete process.env.RIFTJACK_PI_BRIDGE;
+      else process.env.RIFTJACK_PI_BRIDGE = previous;
+    });
+    t.mock.method(globalThis, 'fetch', async (_url, request) => {
+      const { method } = JSON.parse(request.body);
+      if (phase === 'execution' && method === 'tools/list') return Response.json({ result: { tools: [
+        { name: 'inspect', description: 'Inspect', inputSchema: { type: 'object' } },
+      ] } });
+      return kind === 'http' ? new Response('private service body', { status: 503 })
+        : Response.json({ error: { code: -32602, message: 'private service message', data: { private: true } } });
+    });
+    let registered;
+    const load = () => extension({ on: () => {}, registerTool: tool => { registered = tool; } });
+    const run = phase === 'listing' ? load : async () => {
+      await load();
+      return registered.execute('id', {}, new AbortController().signal);
+    };
+    await assert.rejects(run(), error => {
+      assert.match(error.message, kind === 'http' ? /HTTP 503/ : /JSON-RPC -32602/);
+      assert.equal(kind === 'http' ? error.status : error.code, kind === 'http' ? 503 : -32602);
+      assert.doesNotMatch(error.message, /private service/);
+      return true;
+    });
+  });
+}

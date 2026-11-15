@@ -1,3 +1,4 @@
+import { hostErrorDetails } from './host-diagnostics.js';
 import { errorMessage } from './errors.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -24,13 +25,19 @@ type Options = {
 };
 
 // Modules loaded by the supervisor process itself; main.ts reloads everything else on !restart.
-const SUPERVISOR_MODULES = ['supervisor.ts', 'restart.ts', 'restart-notice.ts', 'history.ts', 'errors.ts'];
+const SUPERVISOR_MODULES = ['supervisor.ts', 'restart.ts', 'restart-notice.ts', 'history.ts', 'errors.ts', 'host-diagnostics.ts'];
 export function supervisorCodeHash(dir = dirname(fileURLToPath(import.meta.url))): string {
   const hash = createHash('sha256');
   for (const file of SUPERVISOR_MODULES) {
     try { hash.update(file + '\0').update(readFileSync(join(dir, file))).update('\0'); } catch { hash.update(file + '\0missing\0'); }
   }
   return hash.digest('hex');
+}
+
+// Supervisor output is a host-operator channel; no Matrix message uses this record.
+function supervisorDiagnostic(error: unknown, operation: string, summary: string): string {
+  return JSON.stringify({ time: new Date().toISOString(), event: 'supervisor-error', operation,
+    summary: errorMessage(error, summary), errorDetails: hostErrorDetails(error) });
 }
 
 function rollbackMessage(afterRestart: boolean, snapshot: string, failed: string): string {
@@ -75,13 +82,13 @@ export async function supervise(options: Options = {}): Promise<number> {
     try {
       const saved = snapshot && options.history?.promote(snapshot);
       if (saved) log(`Saved working connector version ${saved}.`);
-    } catch (error) { log(errorMessage(error, 'Could not save a snapshot of the working connector version. Check disk space and permissions.')); }
+    } catch (error) { log(supervisorDiagnostic(error, 'supervisor.promote', 'Could not save a snapshot of the working connector version. Check disk space and permissions.')); }
   };
   try {
     while (!stopping) {
       let candidate: Snapshot | undefined;
       try { candidate = options.history?.capture(); }
-      catch (error) { log(errorMessage(error, 'Could not capture the launch version. This run will not create a working snapshot.')); }
+      catch (error) { log(supervisorDiagnostic(error, 'supervisor.capture', 'Could not capture the launch version. This run will not create a working snapshot.')); }
       let stable = false;
       let stableTimer: ReturnType<typeof setTimeout> | undefined;
       const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
@@ -101,9 +108,11 @@ export async function supervise(options: Options = {}): Promise<number> {
                   options.history.discard(candidate); candidate = undefined;
                   log('Code changed during startup; no working snapshot will be saved for this run.');
                 }
-              } catch {
-                try { if (candidate) options.history.discard(candidate); } catch {}
-                candidate = undefined; log('Could not verify the launch version; no working snapshot will be saved.');
+              } catch (error) {
+                log(supervisorDiagnostic(error, 'supervisor.verify', 'Could not verify the launch version; no working snapshot will be saved.'));
+                try { if (candidate) options.history.discard(candidate); }
+                catch (cause) { log(supervisorDiagnostic(cause, 'supervisor.discard', 'Could not remove the unverified launch snapshot.')); }
+                candidate = undefined;
               }
             }
             stableTimer = setTimeout(() => { stable = true; healthy(candidate); }, stableMs);
@@ -114,7 +123,7 @@ export async function supervise(options: Options = {}): Promise<number> {
         child.once('close', (code, signal) => { clearTimeout(stableTimer); resolve({ code, signal }); });
       }).finally(() => {
         try { if (candidate) options.history?.discard(candidate); }
-        catch (error) { log(errorMessage(error, 'Could not remove the pending launch snapshot. Check disk space and permissions.')); }
+        catch (error) { log(supervisorDiagnostic(error, 'supervisor.discard', 'Could not remove the pending launch snapshot. Check disk space and permissions.')); }
       });
       child = undefined;
       if (stopping) return 0;
@@ -153,7 +162,7 @@ export async function supervise(options: Options = {}): Promise<number> {
             if (!target) { try { target = notice.target(); } catch {} }
             notice.save(target, rollbackMessage(!!requester, rolled.snapshot, rolled.failed));
           }
-        } catch (error) { log(errorMessage(error, 'Automatic rollback failed. Check .connector-history and restore the code manually.')); }
+        } catch (error) { log(supervisorDiagnostic(error, 'supervisor.rollback', 'Automatic rollback failed. Check .connector-history and restore the code manually.')); }
       }
       const delay = retryMs(failures);
       log(`Connector exited unexpectedly (${result.signal || 'code ' + result.code}). Restarting in ${delay / 1000}s.`);
@@ -179,7 +188,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
     history: new CodeHistory(root, resolve('.connector-history')),
     upgrade: { changed: () => supervisorCodeHash() !== started, args: [...process.execArgv, ...process.argv.slice(1)] },
   }).then(code => { process.exitCode = code; }).catch(error => {
-    console.error(errorMessage(error, 'Could not launch the connector process. Check the Node executable and connector files.'));
+    console.error(supervisorDiagnostic(error, 'supervisor.launch', 'Could not launch the connector process. Check the Node executable and connector files.'));
     process.exitCode = 1;
   });
 }

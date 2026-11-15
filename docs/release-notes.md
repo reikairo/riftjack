@@ -5,6 +5,102 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Reminder, recovery and diagnostic improvements
+
+- Failed reminder admission writes now leave the occurrence waiting for retry,
+  including the final slot of a recurring series. A storage failure before agent
+  execution or room sending no longer strands an unsent reminder in progress.
+
+- Model discovery for Claude and Pi preserves JSON parsing and input-pipe error
+  causes, plus child exit status, for owner diagnostics when listing models fails.
+
+- Failed audio decoding or transcription now reports the original error through
+  owner diagnostics, including up to 8 KiB of subprocess stderr on unsuccessful
+  exit. The original audio attachment remains available with a brief failure summary.
+
+- Optional audio configuration warnings retain their original filesystem causes
+  in the host diagnostic journal and private owner notice. Invalid audio settings
+  still disable only transcription; the connector continues starting normally.
+
+- The local publication-review CLI writes bounded original error details to stderr
+  on failure, including output-file errors and malformed request causes. Stdout
+  remains reserved for successful review metadata; preparation does not publish.
+
+- Pi tool connection failures now include the HTTP status or numeric JSON-RPC
+  error code during discovery and execution, without copying response bodies.
+
+- Rollback prepares and verifies replacement code before moving live files. If a
+  filesystem operation fails during replacement, already moved files are restored.
+  If recovery also fails, both errors and recovery directories are retained.
+
+- Supervisor snapshot, rollback and launch errors now retain bounded original
+  exception details in structured host-log records, including recovery paths and
+  nested failures that were previously reduced to a generic summary.
+
+- Remote executors use structured Matrix and lifecycle diagnostics with executor
+  identity and operation context. Original SDK, room-join, inbox, verification and
+  queue failures are retained under `EXECUTOR_DATA_DIR/diagnostics`; console
+  summaries omit request bodies and credentials.
+
+- A reminder whose completion could not be saved now retries that write on later
+  queue scans without repeating delivery. Persistent storage failures remain
+  visible, and storage recovery can persist completion before another restart.
+
+## Codex confirmation failure details
+
+- When confirmation handling fails, owner diagnostics retain the original
+  exception and stack. The response to Codex still contains only the public
+  summary and does not invent a human refusal.
+
+## Pi confirmation delivery failures
+
+- A failed confirmation request now stops the Pi task with a technical error
+  and preserves its cause for owner diagnostics. It no longer sends Pi a
+  fabricated human refusal. Explicit approvals and declines are unchanged.
+
+## Workspace failure diagnostics
+
+- Workspace lookup, access and creation failures retain filesystem error codes
+  in public summaries and the original exception in owner diagnostics. This
+  distinguishes missing folders, permissions and symbolic-link loops.
+
+## Pi startup diagnostics
+
+- Pi version checks, process startup and input-pipe failures preserve the original
+  exception for owner diagnostics and expose available system or exit codes in
+  public summaries. Task cancellation keeps its original reason.
+
+## Snapshot inspection failures
+
+- Code snapshot hashing now reports filesystem inspection errors instead of
+  treating inaccessible files as absent. Missing optional files remain supported.
+  A failed inspection prevents capture or rollback from using an incomplete view.
+
+## GitHub polling diagnostics
+
+- Failed PR polls and notification handoffs retain their original errors in host
+  diagnostics and the configured owner diagnostic channel. Subscription status
+  and agent notifications keep concise summaries. Other PRs continue polling,
+  retries keep their existing backoff, and cancellation is not reported as a fault.
+
+## GitHub event persistence retries
+
+- GitHub monitoring saves a pending event before handing it to the notification
+  queue, including retries after a storage failure. A failed write keeps the
+  event pending instead of delivering it with an unsaved polling baseline.
+
+## Watch observation persistence
+
+- Background watches retry failed observation writes when storage recovers.
+  File inactivity timestamps therefore survive a later restart even if the
+  watched file has not changed again. Scanning waits for the pending write.
+
+## Model catalog failure details
+
+- Claude and Pi model discovery retain bounded stderr and failed protocol
+  responses for owner diagnostics. Ordinary replies keep actionable summaries;
+  cancellation still returns its original reason and stops the child process.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts

@@ -192,8 +192,11 @@ with a generic message before the formatter can inspect its cause. The formatter
 follows a bounded cause/aggregate chain and retains only allowed error names,
 system and Matrix codes, HTTP status, process exit code, signal and syscall.
 Unknown exception text, command arguments, paths, environment, response bodies
-and stderr are not public diagnostics. Codex provider details retain their existing
-separate owner-only delivery route.
+and stderr are not public diagnostics. Original exception text, stacks and causes,
+including retained provider details, use the separate owner journal and private
+chat delivery described in [operations](operations.md#error-diagnostics). Preserve
+the original exception as a cause even when a public summary is already available;
+formatting the summary alone loses evidence needed by the owner.
 
 | Failure surface | Where to inspect the diagnostic |
 | --- | --- |

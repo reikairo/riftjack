@@ -142,8 +142,9 @@ twice. A failed backend call is not immediately repeated for the same notice.
 Authorization, encrypted room privacy and the original session are checked
 before admission. Resetting the session or cancelling the pending home task
 withdraws the notice. It grants no new permissions or confirmation approvals.
-New bots without an established conversation, Bot Manager and externally driven
-Grok workers do not receive a startup model turn.
+New bots without an established conversation and Bot Manager do not receive a
+startup turn. External Grok workers receive the queued notice described above;
+the connector does not launch a local model process for them.
 
 ## Detached-run observation recovery
 

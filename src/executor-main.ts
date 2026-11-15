@@ -8,7 +8,9 @@ import { ExecutorQueue, type ExecutorTransport } from './executor-queue.js';
 import { executorPolicy, executorRoomAllowed } from './executor-protocol.js';
 import { lockInstance } from './instance-lock.js';
 import { MatrixMedia } from './media.js';
-import { errorMessage, safeErrorSummary } from './errors.js';
+import { configureHostDiagnostics, diagnosticOperation, reportDiagnostic } from './diagnostics.js';
+import { matrixSdkLogger } from './matrix-sdk-logger.js';
+import { PublicError } from './errors.js';
 import { ensureDeviceIdentity } from './device-identity.js';
 
 export function bindExecutorInbox(client: Pick<MessageMatrixClient, 'on' | 'inbox'>, queue: Pick<ExecutorQueue, 'receive'>, allowed: ExecutorTransport['allowed']) {
@@ -40,11 +42,13 @@ export async function executorMain() {
   if (process.argv.includes('--check-config')) { console.log(`Executor configuration valid; mode ${policy.mode}. No network requests made.`); return; }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const release = lockInstance(realpathSync(dir));
-  LogService.setLevel(LogLevel.ERROR);
-  // Do not print SDK request objects, which can contain tokens or command content.
-  LogService.setLogger({ info() {}, debug() {}, trace() {}, warn() {}, error() { console.error('Matrix transport error; retrying saved work.'); } });
+  configureHostDiagnostics(join(dir, 'diagnostics'));
+  const report: typeof reportDiagnostic = (error, context) => reportDiagnostic(error, { ...context, bot });
+  LogService.setLevel(LogLevel.WARN);
+  LogService.setLogger(matrixSdkLogger(report));
   const client = new MessageMatrixClient(env.MATRIX_HOMESERVER, env.MATRIX_ACCESS_TOKEN,
     new SimpleFsStorageProvider(join(dir, 'matrix.json')), new RustSdkCryptoStorageProvider(join(dir, 'crypto'), StoreType.Sqlite));
+  client.diagnosticBot = bot; client.diagnosticReport = report;
   const queue = new ExecutorQueue(dir, bot, policy);
   client.history = { since: queue.since, heads: () => queue.heads, save: heads => queue.saveHeads(heads) };
   let stopped = false;
@@ -70,10 +74,11 @@ export async function executorMain() {
   bindExecutorInbox(client, queue, allowed);
   client.on('room.invite', async (room, event) => {
     if (policy.rooms.includes(room) && policy.senders.includes(event.sender)) {
-      try { await client.joinRoom(room); } catch { console.error('Could not join configured executor room.'); }
+      try { await diagnosticOperation({ operation: 'executor.join', bot }, () => client.joinRoom(room)); }
+      catch (error) { report(error, { operation: 'executor.join' }); }
     }
   });
-  client.on('worker.inbox_failure', () => { stopped = true; console.error('Executor inbox failed. Restart to recover the saved sync checkpoint.'); process.exit(1); });
+  client.on('worker.inbox_failure', error => { stopped = true; report(new PublicError('Executor inbox failed. Restart to recover the saved sync checkpoint.', { cause: error }), { operation: 'executor.inbox_failure' }); process.exit(1); });
   const me = await client.getWhoAmI();
   if (me.user_id !== bot || !me.device_id) throw new Error('Use a device-bound access token belonging to MATRIX_USER_ID.');
   await client.crypto.prepare();
@@ -82,14 +87,15 @@ export async function executorMain() {
     console.log('Executor device cross-signing verified.');
   } catch (error) {
     console.warn('Executor device verification incomplete; encrypted messaging remains available.');
-    console.error(safeErrorSummary(error));
+    report(error, { operation: 'executor.device_verification' });
   }
   await client.start();
-  const timer = setInterval(() => { if (!stopped) void queue.tick(transport).catch(e => console.error(errorMessage(e, 'Executor queue failed'))); }, 2000);
+  const timer = setInterval(() => { if (!stopped) void diagnosticOperation({ operation: 'executor.queue', bot }, () => queue.tick(transport))
+    .catch(error => report(error, { operation: 'executor.queue' })); }, 2000);
   const shutdown = () => { stopped = true; clearInterval(timer); client.stop(); release(); process.exit(0); };
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
   console.log(`Executor started; mode ${policy.mode}. No model backend is configured.`);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  void executorMain().catch(error => { console.error(safeErrorSummary(error)); process.exit(1); });
+  void executorMain().catch(error => { reportDiagnostic(error, { operation: 'executor.start', bot: process.env.MATRIX_USER_ID }); process.exit(1); });
 }

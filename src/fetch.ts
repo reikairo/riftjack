@@ -244,7 +244,7 @@ export function fetchAction(config: FetchConfig, workspace: string, transport: T
       } catch (cause) {
         if (signal.aborted) throw cause;
         if ((cause as { code?: string })?.code === 'ERR_RIFTJACK_NON_PUBLIC') throw new PublicError('Refused: the host resolves to a non-public address.');
-        throw new PublicError(`Request failed: ${deadline.aborted ? 'timed out' : safeErrorSummary(cause)}.`);
+        throw new PublicError(`Request failed: ${deadline.aborted ? 'timed out' : safeErrorSummary(cause)}.`, { cause });
       }
       // A stream error before we start reading must reach the reader, not crash the process.
       (response.body as Partial<Readable>).on?.('error', () => {});
@@ -265,7 +265,7 @@ export function fetchAction(config: FetchConfig, workspace: string, transport: T
       saved = await saveBody(config, workspace, name, response.body, deadline);
     } catch (cause) {
       if (signal.aborted) throw cause;
-      throw new PublicError(`Saving the response failed: ${deadline.aborted ? 'timed out' : safeErrorSummary(cause)}.`);
+      throw new PublicError(`Saving the response failed: ${deadline.aborted ? 'timed out' : safeErrorSummary(cause)}.`, { cause });
     } finally {
       // Runs for every failure, including a refused open, so the connection never lingers.
       response.body.destroy();

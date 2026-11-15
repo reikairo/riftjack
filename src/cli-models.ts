@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { Config } from './config.js';
-import { PublicError } from './errors.js';
+import { OwnerDiagnosticError, PublicError } from './errors.js';
 import { inlineCode } from './manager-format.js';
 import { claudeEnvironment, checkClaude } from './claude-backend.js';
 import { piEnvironment, checkPi } from './pi-backend.js';
@@ -9,6 +9,8 @@ import { piEnvironment, checkPi } from './pi-backend.js';
 const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string');
 const list = (values: string[]) => values.map(inlineCode).join(', ') || 'none reported';
+const diagnosticLimit = 8192;
+const boundedDetails = (text: string) => text.length > diagnosticLimit ? text.slice(0, diagnosticLimit) + '\n[truncated]' : text;
 
 // Metadata only: no prompt, resume, tool invocation, settings update or saved session.
 // Resolve only after the child exits; cancellation/failure always reaps it.
@@ -32,8 +34,21 @@ function catalogRpc(config: Config, kind: 'claude' | 'pi', args: string[], signa
     const abort = () => fail(signal.reason);
     signal.addEventListener('abort', abort, { once: true });
     child.once('error', cause => fail(new PublicError(`Could not start ${kind} for model discovery. Check its executable and login on the host.`, { cause })));
-    child.stdin.on('error', () => { if (answer === undefined) fail(new PublicError(`${kind} closed the model catalog connection.`)); });
-    child.stderr.resume(); // Never forward credentials or raw CLI diagnostics.
+    child.stdin.on('error', cause => { if (answer === undefined) fail(new PublicError(`${kind} closed the model catalog connection.`, { cause })); });
+    let stderr = '', stderrTruncated = false;
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      const remaining = diagnosticLimit - stderr.length;
+      stderr += chunk.slice(0, remaining);
+      if (chunk.length > remaining) stderrTruncated = true;
+    });
+    const withStderr = (error: unknown) => {
+      if (!stderr) return error;
+      const diagnostic = new OwnerDiagnosticError(error instanceof PublicError ? error.message : `${kind} model discovery failed.`,
+        stderr + (stderrTruncated ? '\n[truncated]' : ''));
+      diagnostic.cause = error;
+      return diagnostic;
+    };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       if (failure || answer !== undefined) return;
@@ -60,16 +75,16 @@ function catalogRpc(config: Config, kind: 'claude' | 'pi', args: string[], signa
             break;
           }
         } catch (error) {
-          fail(error instanceof PublicError ? error : new PublicError(`${kind} returned an invalid model catalog response.`));
+          fail(error instanceof PublicError ? error : new PublicError(`${kind} returned an invalid model catalog response.`, { cause: error }));
           break;
         }
       }
     });
-    child.once('close', code => {
+    child.once('close', (code, killed) => {
       clearTimeout(killTimer); clearTimeout(closeTimer); signal.removeEventListener('abort', abort);
       if (signal.aborted) reject(signal.reason);
-      else if (failure) reject(failure);
-      else if (answer === undefined || (code !== 0 && !stopping)) reject(new PublicError(`${kind} did not return a complete model catalog. Check its installed version and login.`));
+      else if (failure) reject(withStderr(failure));
+      else if (answer === undefined || (code !== 0 && !stopping)) reject(withStderr(new PublicError(`${kind} did not return a complete model catalog. Check its installed version and login.`, { cause: { code, signal: killed } })));
       else resolve(answer);
     });
     for (const request of requests) child.stdin.write(JSON.stringify(request) + '\n');
@@ -87,7 +102,7 @@ export async function claudeModelOptions(config: Config, signal: AbortSignal): P
   [{type: 'control_request', request_id: id, request: {subtype: 'initialize', hooks: null}}], message => {
     if (message.type !== 'control_response' || message.response?.request_id !== id) return;
     const response = message.response;
-    if (response.subtype !== 'success') throw new PublicError('Claude could not list models. Check its login and control-protocol support.');
+    if (response.subtype !== 'success') throw new OwnerDiagnosticError('Claude could not list models. Check its login and control-protocol support.', boundedDetails(JSON.stringify(response)));
     const models = response.response?.models;
     if (!Array.isArray(models) || models.length > 1000) throw new PublicError('Claude returned an invalid model catalog.');
     if (!models.length) return 'Claude returned no selectable models. Check the account on the host.';
@@ -119,7 +134,7 @@ export async function piModelOptions(config: Config, signal: AbortSignal): Promi
   [...pending].map(([id, type]) => ({id, type})), message => {
     if (message.type !== 'response' || !pending.has(message.id)) return;
     const command = pending.get(message.id)!;
-    if (message.command !== command || message.success !== true) throw new PublicError(`Pi could not read ${command}. Update Pi or check its model configuration.`);
+    if (message.command !== command || message.success !== true) throw new OwnerDiagnosticError(`Pi could not read ${command}. Update Pi or check its model configuration.`, boundedDetails(JSON.stringify(message)));
     pending.delete(message.id); data.set(command, message.data);
     if (pending.size) return;
     const models = data.get('get_available_models')?.models;

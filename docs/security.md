@@ -80,14 +80,18 @@ HTTP 401/403 responses. These are classifications of what the CLI reported,
 not independently verified causes. Unknown, malformed or oversized messages
 report `unclassified`; a generic RPC -32603 does not establish an auth failure.
 
-Raw RPC error text and error data are not retained or forwarded. Claude CLI
-stderr is retained only in a bounded owner-only host journal; see
+Original Codex RPC error messages are retained for the owner journal and sent
+separately to the installation owner’s encrypted two-person chat. Public replies
+and console summaries use the classifications above. Arbitrary RPC error data
+is not retained. See [error diagnostics](operations.md#error-diagnostics) for
+private delivery checks and retention limits. Claude CLI stderr is retained
+only in a bounded owner-only host journal; see
 [local Claude diagnostics](claude.md#local-cli-diagnostics). It may contain
 credentials or private text and is never automatically forwarded to Matrix.
 Categories contain no account identifiers, paths, tokens or response bodies.
 There is no automatic retry, token refresh, logout or conversation reset.
-After recovery, the original cause may remain unknown if the CLI message was
-not recognized. A restart restoring service is not proof of a permanent fix.
+An unclassified summary does not establish the cause; inspect the owner diagnostic
+when available. A restart restoring service is not proof of a permanent fix.
 
 
 With `CLAUDE_PERMISSION_MODE=auto`, writable Claude sessions using `on-request`

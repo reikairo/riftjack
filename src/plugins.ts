@@ -38,7 +38,7 @@ export async function installPlugin(server: AppServer, name: string, signal: Abo
   try { result = await server.request('plugin/install', params, 120_000); }
   catch (error) {
     signal.throwIfAborted();
-    throw new PublicError('Plugin installation was not confirmed. Check the plugin state in the host application before retrying; it may have partially completed.');
+    throw new PublicError('Plugin installation was not confirmed. Check the plugin state in the host application before retrying; it may have partially completed.', { cause: error });
   }
   signal.throwIfAborted();
   return `Plugin ${name} was installed.${authentication(result.appsNeedingAuth)}\nSend your next request after any required authentication.`;

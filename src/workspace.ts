@@ -19,8 +19,8 @@ export function resolveWorkspace(path: string, base: string): string {
     if (!statSync(directory).isDirectory()) throw new Error('not a directory');
     accessSync(directory, constants.R_OK | constants.X_OK);
     return directory;
-  } catch {
-    throw new PublicError('Workspace does not exist, is not a directory, or is inaccessible. Create the folder on the connector host first and use its absolute path.');
+  } catch (cause) {
+    throw new PublicError('Workspace does not exist, is not a directory, or is inaccessible. Create the folder on the connector host first and use its absolute path.', { cause });
   }
 }
 
@@ -29,8 +29,8 @@ export function configForWorkspace(config: Config, workspace?: string): Config {
   if (selected.drawio) drawioOutsideWorkspace(selected.drawio, selected.workspace);
   if (selected.audioTranscription) {
     try { audioOutsideWorkspace(selected.audioTranscription, selected.workspace); }
-    catch {
-      return { ...selected, audioTranscription: undefined,
+    catch (error) {
+      return { ...selected, audioTranscription: undefined, audioTranscriptionError: error,
         audioTranscriptionWarning: 'Audio transcription is disabled: its files must be outside every agent workspace. Original audio attachments remain available. Move the transcription files and restart to enable transcription.' };
     }
   }
@@ -47,7 +47,7 @@ function inspectWorkspace(path: string): { path: string; exists: boolean; identi
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       if (error instanceof PublicError) throw error;
-      throw new PublicError('Could not access the workspace. Check its path and permissions.');
+      throw new PublicError('Could not access the workspace. Check its path and permissions.', { cause: error });
     }
     const parent = dirname(path);
     if (parent === path) throw new PublicError('Could not find a parent directory.');
@@ -77,7 +77,7 @@ export async function creationWorkspace(config: Config, requested: string | unde
     if (before.path !== after.path || before.exists !== after.exists || before.identity !== after.identity) continue;
     if (!after.exists) {
       try { mkdirSync(after.path, { recursive: true, mode: 0o700 }); }
-      catch { throw new PublicError('Could not create the workspace. Check its path and permissions. The bot was not created.'); }
+      catch (cause) { throw new PublicError('Could not create the workspace. Check its path and permissions. The bot was not created.', { cause }); }
     }
     const directory = resolveWorkspace(after.path, config.workspace);
     return requested === undefined ? undefined : directory;

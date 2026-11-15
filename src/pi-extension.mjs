@@ -20,9 +20,12 @@ export default async function (pi) {
         method: 'POST', headers: { ...connection.headers, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
         body: JSON.stringify({ jsonrpc: '2.0', id: ++nextId, method, params }), signal,
       });
-      if (!response.ok) throw new Error('Riftjack tool connection failed.');
+      if (!response.ok) throw Object.assign(new Error(`Riftjack tool connection failed (HTTP ${response.status}).`), { status: response.status });
       const data = await response.json();
-      if (data.error) throw new Error('Riftjack tool request failed.');
+      if (data.error) {
+        const code = Number.isSafeInteger(data.error.code) ? data.error.code : undefined;
+        throw Object.assign(new Error('Riftjack tool request failed' + (code === undefined ? '.' : ` (JSON-RPC ${code}).`)), { code });
+      }
       return data.result;
     };
     const listing = await call('tools/list', {}, AbortSignal.timeout(15000));

@@ -1,3 +1,4 @@
+import { reportDiagnostic } from './diagnostics.js';
 import { safeErrorSummary } from './errors.js';
 import { spawn } from 'node:child_process';
 import { accessSync, constants, realpathSync, statSync } from 'node:fs';
@@ -9,6 +10,7 @@ import { readOutgoing, type IncomingAttachment } from './media.js';
 export type AudioConfig = { model: string; executable: string; ffmpeg: string; maxSeconds: number; timeoutMs: number };
 const MAX_INPUT_BYTES = 32 * 1024 * 1024;
 const MAX_TEXT_BYTES = 32 * 1024;
+const MAX_DIAGNOSTIC_BYTES = 8 * 1024;
 
 export function audioOutsideWorkspace(config: AudioConfig, workspace: string): void {
   if ([config.model, config.executable, config.ffmpeg].some(path => path.startsWith(workspace + sep))) {
@@ -26,8 +28,8 @@ export function loadAudioConfig(env: NodeJS.ProcessEnv, workspace: string): Audi
       if (!statSync(path).isFile()) throw new Error('not a file');
       accessSync(path, executable ? constants.X_OK : constants.R_OK);
       return path;
-    } catch {
-      throw new Error(`${name} must point to an accessible ${executable ? 'executable' : 'readable'} regular file.`);
+    } catch (cause) {
+      throw new Error(`${name} must point to an accessible ${executable ? 'executable' : 'readable'} regular file.`, { cause });
     }
   };
   const number = (name: string, fallback: number, maximum: number) => {
@@ -44,11 +46,11 @@ export function loadAudioConfig(env: NodeJS.ProcessEnv, workspace: string): Audi
 
 // Invalid optional configuration must not prevent the connector from starting.
 export function optionalAudioConfig(env: NodeJS.ProcessEnv, workspace: string): {
-  audioTranscription?: AudioConfig; audioTranscriptionWarning?: string;
+  audioTranscription?: AudioConfig; audioTranscriptionWarning?: string; audioTranscriptionError?: unknown;
 } {
   try { return { audioTranscription: loadAudioConfig(env, workspace) }; }
   catch (error) {
-    return { audioTranscriptionWarning: `Audio transcription is disabled: ${(error as Error).message} Original audio attachments remain available. Fix the audio settings and restart to enable transcription.` };
+    return { audioTranscriptionError: error, audioTranscriptionWarning: `Audio transcription is disabled: ${(error as Error).message} Original audio attachments remain available. Fix the audio settings and restart to enable transcription.` };
   }
 }
 
@@ -72,7 +74,16 @@ async function run(executable: string, args: string[], signal: AbortSignal, inpu
     signal.addEventListener('abort', abort, { once: true });
     child.on('error', error => { failure = error; });
     child.stdin.on('error', error => stop(error));
-    child.stderr.resume(); // Never expose diagnostic output or audio content to logs.
+    // Retain a bounded prefix for the owner diagnostic route. Attachment
+    // metadata and the ordinary console summary never include this text.
+    const stderr: Buffer[] = [];
+    let stderrBytes = 0, stderrTruncated = false;
+    child.stderr.on('data', (chunk: Buffer) => {
+      const keep = Math.min(chunk.length, MAX_DIAGNOSTIC_BYTES - stderrBytes);
+      if (keep) stderr.push(Buffer.from(chunk.subarray(0, keep)));
+      stderrBytes += keep;
+      if (keep < chunk.length) stderrTruncated = true;
+    });
     child.stdout.on('data', (data: Buffer) => {
       if (!limit || failure) return;
       size += data.length;
@@ -83,7 +94,11 @@ async function run(executable: string, args: string[], signal: AbortSignal, inpu
       clearTimeout(killTimer);
       signal.removeEventListener('abort', abort);
       if (failure) reject(failure);
-      else if (code !== 0 || killed) reject(Object.assign(new Error('Audio subprocess failed.'), { code, signal: killed }));
+      else if (code !== 0 || killed) {
+        const detail = Buffer.concat(stderr).toString('utf8');
+        const cause = detail ? new Error('Audio subprocess stderr' + (stderrTruncated ? ' (truncated)' : '') + ':\n' + detail) : undefined;
+        reject(Object.assign(new Error('Audio subprocess failed.', { cause }), { code, signal: killed }));
+      }
       else resolve(Buffer.concat(chunks, size));
     });
     if (signal.aborted) abort();
@@ -134,8 +149,10 @@ export class AudioTranscriber {
       return { ...file, transcription: { status: 'complete', text, automatic: true } };
     } catch (error) {
       signal.throwIfAborted(); // Cancellation stops the task; other failures keep the audio usable.
+      const failure = deadline.aborted ? deadline.reason : error;
+      reportDiagnostic(failure, { operation: 'audio.' + stage });
       return { ...file, transcription: { status: 'unavailable', reason: 'processing-failed',
-        diagnostic: { stage, summary: safeErrorSummary(deadline.aborted ? deadline.reason : error) } } };
+        diagnostic: { stage, summary: safeErrorSummary(failure) } } };
     } finally {
       try { if (directory) await rm(directory, { recursive: true, force: true }); }
       finally { this.busy = false; }

@@ -7,6 +7,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createPiBackend } from '../src/pi-backend.js';
 import { loadConfig } from '../src/config.js';
 import { State } from '../src/state.js';
+import { hostErrorDetails } from '../src/host-diagnostics.js';
+import { errorMessage } from '../src/errors.js';
 
 function setup(t: test.TestContext, scenario: string) {
   const dir = mkdtempSync(join(tmpdir(), 'riftjack-pi-test-'));
@@ -68,4 +70,47 @@ test('Pi cancels SIGTERM-ignoring descendants even when their parent exits first
   await rejected;
   await delay(1000);
   assert.equal(existsSync(join(dir, 'survived')), false);
+});
+
+
+test('Pi confirmation transport failure rejects the task without fabricating a human refusal', async t => {
+  const { run, dir } = setup(t, 'approval');
+  const original = Object.assign(new Error('Private confirmation transport explanation'), { code: 'ECONNRESET' });
+  await assert.rejects(run('pi', 'Task', 'key', AbortSignal.timeout(5000), '@owner:example.com', [],
+    async () => { throw original; }), error => {
+    assert.match(errorMessage(error), /confirmation.*failed/i);
+    assert.match(errorMessage(error), /No user decline was received/);
+    assert.doesNotMatch(errorMessage(error), /Private confirmation transport explanation/);
+    assert.ok(hostErrorDetails(error).nodes.some(node => node.message === original.message && node.stack === original.stack));
+    return true;
+  });
+  assert.equal(existsSync(join(dir, 'decisions')), false);
+});
+
+for (const accept of [true, false]) test(`Pi forwards an explicit ${accept ? 'approval' : 'decline'} exactly once`, async t => {
+  const { run, dir } = setup(t, 'approval');
+  const result = await run('pi', 'Task', 'key', AbortSignal.timeout(5000), '@owner:example.com', [],
+    async request => accept ? request.approve! : request.deny);
+  assert.equal(result, accept ? 'Approved.' : 'Denied.');
+  const decisions = readFileSync(join(dir, 'decisions'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(decisions.length, 1);
+  assert.equal(accept ? decisions[0].confirmed : decisions[0].cancelled, true);
+});
+
+
+test('Pi cancellation during confirmation preserves cancellation and sends no decision', async t => {
+  const { run, dir } = setup(t, 'approval');
+  const controller = new AbortController(), reason = new Error('cancel fixture');
+  let entered!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const task = run('pi', 'Task', 'key', controller.signal, '@owner:example.com', [],
+    async (_request, signal) => {
+      entered();
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    });
+  const rejected = assert.rejects(task, error => error === reason);
+  await ready;
+  controller.abort(reason);
+  await rejected;
+  assert.equal(existsSync(join(dir, 'decisions')), false);
 });

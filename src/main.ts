@@ -122,7 +122,7 @@ async function main() {
   const checkAudio = (candidate: Config) => {
     if (candidate.audioTranscriptionWarning) {
       audio = undefined;
-      audioWarnings.add(candidate.audioTranscriptionWarning);
+      audioWarnings.add(candidate.audioTranscriptionWarning, candidate.audioTranscriptionError);
       console.warn(candidate.audioTranscriptionWarning);
     }
   };
@@ -819,7 +819,12 @@ async function main() {
             await isPrivateRoom(client, room, account.userId, access.owner,
               sender => sender === access.owner && access.has(sender, account.kind === 'manager' ? undefined : account.userId)) &&
             !stopping && !restart.pending,
-          send: (body: string) => client.sendMessage(room, { msgtype: 'm.notice', body, [SERVICE]: true, 'm.mentions': {} }),
+          send: (body: string) => sendOwnerDiagnosticText(body, room, {
+            allowed: target => isPrivateRoom(client, target, account.userId, access.owner,
+              sender => sender === access.owner && access.has(sender, account.kind === 'manager' ? undefined : account.userId)),
+            stopping: () => stopping || restart.pending,
+            send: (target, content) => client.sendMessage(target, content),
+          }),
         }];
       }));
       await restartNotice.deliver({

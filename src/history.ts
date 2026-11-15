@@ -20,7 +20,10 @@ export class CodeHistory {
     const walk = (relative: string) => {
       const path = join(base, relative);
       let stat;
-      try { stat = lstatSync(path); } catch { hash.update('missing\0' + relative + '\0'); return; }
+      try { stat = lstatSync(path); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        hash.update('missing\0' + relative + '\0'); return;
+      }
       // Copying a link does not freeze its target. Do not certify or restore a
       // snapshot whose executable contents can change without changing its hash.
       if (stat.isSymbolicLink()) throw new PublicError('Code snapshots do not support symbolic links. Use regular files and directories in snapshot source paths.');
@@ -91,15 +94,49 @@ export class CodeHistory {
     if (existsSync(join(this.root, 'node_modules')) && lock(this.root) !== lock(good.path)) {
       throw new Error('Rollback requires a different dependency installation. Restore the version and run npm ci before starting.');
     }
+    const staged = join(this.dir, 'restore-' + stamp());
     const failed = join(this.dir, 'failed-' + stamp());
-    mkdirSync(failed, { recursive: true, mode: 0o700 });
-    writeFileSync(join(failed, 'manifest.json'), JSON.stringify({ hash, files: this.files, createdAt: new Date().toISOString(), restored: good.name }));
-    for (const file of this.files) {
-      if (existsSync(join(this.root, file))) renameSync(join(this.root, file), join(failed, file));
+    const moved: string[] = [], installed: string[] = [];
+    mkdirSync(staged, { recursive: true, mode: 0o700 });
+    try {
+      // Finish copying and checking the replacement before moving live files.
+      for (const file of this.files) {
+        if (existsSync(join(good.path, file))) cpSync(join(good.path, file), join(staged, file), { recursive: true });
+      }
+      if (this.hash(staged) !== good.hash || this.hash() !== hash) throw new Error('Code changed while preparing rollback; no files were restored.');
+      mkdirSync(failed, { recursive: true, mode: 0o700 });
+      writeFileSync(join(failed, 'manifest.json'), JSON.stringify({ hash, files: this.files, createdAt: new Date().toISOString(), restored: good.name }));
+      for (const file of this.files) {
+        if (existsSync(join(this.root, file))) {
+          renameSync(join(this.root, file), join(failed, file));
+          moved.push(file);
+        }
+      }
+      for (const file of this.files) {
+        if (existsSync(join(staged, file))) {
+          renameSync(join(staged, file), join(this.root, file));
+          installed.push(file);
+        }
+      }
+    } catch (error) {
+      const recoveryErrors: unknown[] = [], blocked = new Set<string>();
+      for (const file of installed.reverse()) {
+        try { renameSync(join(this.root, file), join(staged, file)); }
+        catch (cause) { recoveryErrors.push(cause); blocked.add(file); }
+      }
+      for (const file of moved.reverse()) {
+        if (blocked.has(file)) continue; // Keep its original backup, never overwrite it.
+        try { renameSync(join(failed, file), join(this.root, file)); }
+        catch (cause) { recoveryErrors.push(cause); }
+      }
+      if (recoveryErrors.length) {
+        throw new AggregateError([error, ...recoveryErrors], `Rollback recovery failed. Preserve ${failed} and ${staged} for manual recovery.`);
+      }
+      try { rmSync(staged, { recursive: true, force: true }); rmSync(failed, { recursive: true, force: true }); }
+      catch (cause) { throw new AggregateError([error, cause], 'Rollback failed; original code was retained but temporary snapshot cleanup failed.'); }
+      throw error;
     }
-    for (const file of this.files) {
-      if (existsSync(join(good.path, file))) cpSync(join(good.path, file), join(this.root, file), { recursive: true });
-    }
+    rmSync(staged, { recursive: true, force: true });
     this.prune('failed-');
     return { snapshot: good.name, failed: failed };
   }
