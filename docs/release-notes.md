@@ -93,6 +93,12 @@ between the previous successful startup and the current one, including rollbacks
   File inactivity timestamps therefore survive a later restart even if the
   watched file has not changed again. Scanning waits for the pending write.
 
+## Model catalog failure details
+
+- Claude and Pi model discovery retain bounded stderr and failed protocol
+  responses for owner diagnostics. Ordinary replies keep actionable summaries;
+  cancellation still returns its original reason and stops the child process.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts

@@ -30,17 +30,18 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
  const q=JSON.parse(line);log(q);
  if(scenario==='wait')return;
  if(scenario==='exit')process.exit(7);
+ if(scenario==='stderr') { process.stderr.write('catalog diagnostic detail '+ 'x'.repeat(20000)+'OMITTED_TAIL'); process.exitCode=7; process.stdin.destroy(); return; }
  if(scenario==='bad-json') {console.log('bad');return;}
  if(scenario==='interactive') {send({type:'control_request',request_id:'permission',request:{subtype:'can_use_tool'}});return;}
  if(q.type==='control_request') {
   const models=scenario==='empty'?[]:scenario==='invalid'?[null]:scenario==='old'?[{value:'old-model'}]:[model];
   send({type:'control_response',response:{request_id:'unrelated',subtype:'success',response:{models:[]}}});
-  send({type:'control_response',response:{request_id:q.request_id,subtype:scenario==='error'?'error':'success',response:{models}}});
+  send({type:'control_response',response:{request_id:q.request_id,subtype:scenario==='error'?'error':'success',error:scenario==='error'?'provider diagnostic detail':undefined,response:{models}}});
  } else {
   const data=q.type==='get_state'?{model:{provider:'test',id:'alpha'},thinkingLevel:'medium'}
    :q.type==='get_available_thinking_levels'?{levels:['off','low','medium','high']}
    :{models:scenario==='empty'?[]:scenario==='invalid'?[null]:[{provider:'test',id:'alpha',reasoning:true},{provider:'other',id:'beta',reasoning:false}]};
-  send({type:'response',id:q.id,command:q.type,success:scenario!=='error',data});
+  send({type:'response',id:q.id,command:q.type,success:scenario!=='error',error:scenario==='error'?'provider diagnostic detail':undefined,data});
  }
 });
 process.stdin.on('end',()=>process.exit(0));
@@ -128,6 +129,20 @@ for (const [kind, read] of [['Claude', claudeModelOptions], ['Pi', piModelOption
   await assert.rejects(read(f.config, AbortSignal.timeout(5000)), error => {
    assert.match(errorMessage(error), /exit 7/);
    assert.ok(hostErrorDetails(error).nodes.some(node => node.code === 7));
+   return true;
+  });
+  assert.equal(f.active(), false);
+ });
+}
+
+for (const [kind, read] of [['Claude', claudeModelOptions], ['Pi', piModelOptions]] as const) {
+ for (const scenario of ['error', 'stderr']) test(`${kind} catalog preserves ${scenario} details for the owner`, async t => {
+  const f = fixture(t, scenario);
+  await assert.rejects(read(f.config, AbortSignal.timeout(5000)), error => {
+   const details = JSON.stringify(hostErrorDetails(error));
+   assert.match(details, scenario === 'error' ? /provider diagnostic detail/ : /catalog diagnostic detail/);
+   assert.doesNotMatch(errorMessage(error), /provider diagnostic detail|catalog diagnostic detail/);
+   if (scenario === 'stderr') { assert.match(details, /truncated/); assert.doesNotMatch(details, /OMITTED_TAIL/); }
    return true;
   });
   assert.equal(f.active(), false);
