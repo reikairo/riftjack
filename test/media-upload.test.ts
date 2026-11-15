@@ -1,3 +1,4 @@
+import { hostErrorDetails } from '../src/host-diagnostics.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, createHash } from 'node:crypto';
@@ -76,4 +77,51 @@ test('invalid server replies cannot leak bodies or produce metadata', async () =
       await consume(init); return new Response(body);
     })), error => { assert.doesNotMatch(String(error), /private secret|private.test/); return true; });
   }
+});
+
+for (const failureAt of ['network', 'source'] as const) {
+  test(`upload retains the original ${failureAt} failure for owner diagnostics without retry`, async () => {
+    const failure = Object.assign(new Error('private upload failure details'), { code: 'ECONNRESET' });
+    let requests = 0;
+    const records: UploadMeasurement[] = [];
+    async function* source() {
+      if (failureAt === 'source') throw failure;
+      yield Buffer.alloc(1);
+    }
+    await assert.rejects(uploadEncrypted(source(), options(async (_url, init) => {
+      requests++;
+      if (failureAt === 'network') throw failure;
+      await consume(init);
+      return Response.json({ content_uri: 'mxc://matrix.test/id' });
+    }, { size: 1, report: (record: UploadMeasurement) => records.push(record) })), error => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.cause, failure);
+      assert.doesNotMatch(error.message, /private upload failure details/);
+      assert.match(JSON.stringify(hostErrorDetails(error)), /private upload failure details/);
+      return true;
+    });
+    assert.equal(requests, 1);
+    assert.deepEqual(records.map(record => record.status), ['started', 'failed']);
+    assert.doesNotMatch(JSON.stringify(records), /private upload failure details/);
+  });
+}
+
+test('malformed upload response retains its parse cause separately from the public summary', async () => {
+  await assert.rejects(uploadEncrypted(chunks(Buffer.alloc(0)), options(async (_url, init) => {
+    await consume(init);
+    return new Response('private invalid response');
+  })), error => {
+    assert.ok(error instanceof Error);
+    assert.ok(error.cause instanceof SyntaxError);
+    assert.doesNotMatch(error.message, /private invalid response/);
+    assert.ok(hostErrorDetails(error).nodes.some(node => node.name === 'SyntaxError'));
+    return true;
+  });
+});
+
+test('upload preserves the exact caller cancellation reason', async () => {
+  const controller = new AbortController(), reason = new Error('caller cancelled');
+  await assert.rejects(uploadEncrypted(chunks(Buffer.alloc(0)), options(async () => {
+    controller.abort(reason); throw reason;
+  }, { signal: controller.signal })), error => error === reason);
 });

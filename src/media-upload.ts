@@ -85,7 +85,10 @@ export async function uploadEncrypted(chunks: AsyncIterable<Buffer>, options: Op
       text = Buffer.concat(buffers).toString('utf8');
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
     let url: unknown;
-    try { url = JSON.parse(text).content_uri; } catch { /* Validate without revealing the server body. */ }
+    try { url = JSON.parse(text).content_uri; }
+    catch (error) {
+      throw new PublicError('Attachment upload returned an invalid media URI.', { cause: error });
+    }
     if (typeof url !== 'string' || !/^mxc:\/\/[^/?#\s]+\/[^/?#\s]+$/.test(url)) {
       throw new PublicError('Attachment upload returned an invalid media URI.');
     }
@@ -99,7 +102,7 @@ export async function uploadEncrypted(chunks: AsyncIterable<Buffer>, options: Op
     const diagnostic = cause instanceof PublicError ? cause.message : safeErrorSummary(cause);
     report('failed', diagnostic);
     o.signal.throwIfAborted();
-    throw cause instanceof PublicError ? cause : new PublicError(`Attachment upload failed: ${diagnostic}.`);
+    throw cause instanceof PublicError ? cause : new PublicError(`Attachment upload failed: ${diagnostic}.`, { cause });
   } finally {
     signal.removeEventListener('abort', abort);
     stop.abort();
