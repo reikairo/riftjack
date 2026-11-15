@@ -240,6 +240,7 @@ does not manage shared resource leases. Read-only bots do not receive the tool.
 
 ## Further reading
 
+- [Agent initialization, memory, and working practices](docs/agents/README.md)
 - [Installation and configuration](docs/setup.md)
 - [Configuration values, defaults and model options](docs/configuration.md)
 - [Bots, workspaces, and access](docs/manager.md)
