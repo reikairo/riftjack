@@ -1,5 +1,12 @@
 # Release notes
 
+These notes describe user-visible changes. Startup notices link to this file at
+the running Git revision, so a later release cannot change an older notice.
+The revision comparison in an update notice shows the exact committed changes
+between the previous successful startup and the current one, including rollbacks.
+
+## Reminder, recovery and diagnostic improvements
+
 - Failed reminder admission writes now leave the occurrence waiting for retry,
   including the final slot of a recurring series. A storage failure before agent
   execution or room sending no longer strands an unsent reminder in progress.
@@ -38,11 +45,6 @@
 - A reminder whose completion could not be saved now retries that write on later
   queue scans without repeating delivery. Persistent storage failures remain
   visible, and storage recovery can persist completion before another restart.
-
-These notes describe user-visible changes. Startup notices link to this file at
-the running Git revision, so a later release cannot change an older notice.
-The revision comparison in an update notice shows the exact committed changes
-between the previous successful startup and the current one, including rollbacks.
 
 ## Codex confirmation failure details
 
