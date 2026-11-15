@@ -5,6 +5,12 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Model catalog failure details
+
+- Claude and Pi model discovery retain bounded stderr and failed protocol
+  responses for owner diagnostics. Ordinary replies keep actionable summaries;
+  cancellation still returns its original reason and stops the child process.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
