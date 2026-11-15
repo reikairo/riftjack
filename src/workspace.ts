@@ -29,8 +29,8 @@ export function configForWorkspace(config: Config, workspace?: string): Config {
   if (selected.drawio) drawioOutsideWorkspace(selected.drawio, selected.workspace);
   if (selected.audioTranscription) {
     try { audioOutsideWorkspace(selected.audioTranscription, selected.workspace); }
-    catch {
-      return { ...selected, audioTranscription: undefined,
+    catch (error) {
+      return { ...selected, audioTranscription: undefined, audioTranscriptionError: error,
         audioTranscriptionWarning: 'Audio transcription is disabled: its files must be outside every agent workspace. Original audio attachments remain available. Move the transcription files and restart to enable transcription.' };
     }
   }

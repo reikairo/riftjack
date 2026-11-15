@@ -1,5 +1,9 @@
 # Release notes
 
+- Optional audio configuration warnings retain their original filesystem causes
+  in the host diagnostic journal and private owner notice. Invalid audio settings
+  still disable only transcription; the connector continues starting normally.
+
 These notes describe user-visible changes. Startup notices link to this file at
 the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
