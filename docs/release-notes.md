@@ -11,6 +11,12 @@ between the previous successful startup and the current one, including rollbacks
   exception and stack. The response to Codex still contains only the public
   summary and does not invent a human refusal.
 
+## Pi confirmation delivery failures
+
+- A failed confirmation request now stops the Pi task with a technical error
+  and preserves its cause for owner diagnostics. It no longer sends Pi a
+  fabricated human refusal. Explicit approvals and declines are unchanged.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts

@@ -140,8 +140,11 @@ export function createPiBackend(configuration: Config | (() => Config), state: S
                   return { type: 'extension_ui_response', id: record.id, value };
                 },
               }),
-            }, requestSignal).then(response => { if (!requestSignal.aborted && !completed) write(response); }, () => { if (!completed) write(denied); })
-              .finally(() => { clearTimeout(timeout); pending.delete(controller); });
+            }, requestSignal).then(response => { if (!requestSignal.aborted && !completed && !failed) write(response); })
+              .catch(cause => {
+                if (!completed && !failed) fail(new PublicError('Pi confirmation failed before a decision could be delivered. '
+                  + 'No user decline was received.', { cause }));
+              }).finally(() => { clearTimeout(timeout); pending.delete(controller); });
           }
           if (initialized && record.type === 'message_end' && record.message?.role === 'assistant') {
             const message = record.message;
