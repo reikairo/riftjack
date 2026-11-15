@@ -1,5 +1,9 @@
 # Release notes
 
+- Supervisor snapshot, rollback and launch errors now retain bounded original
+  exception details in structured host-log records, including recovery paths and
+  nested failures that were previously reduced to a generic summary.
+
 These notes describe user-visible changes. Startup notices link to this file at
 the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
