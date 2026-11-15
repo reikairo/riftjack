@@ -12,6 +12,8 @@ Keep applicability and exceptions in the current layer. A rule such as “use th
 shared build wrapper” is incomplete if it hides which host it applies to.
 Include rare rules when forgetting them has a high cost. Put execution logs and
 long publication histories in details, with links that remain usable.
+If recovery reading itself noticeably brings the next compaction closer, move
+chronology into details rather than skipping required files or application limits.
 
 ## Decisions and lessons
 
@@ -46,10 +48,17 @@ existing related lesson before adding another one. If a proposed remedy failed
 again, investigate why it did not take effect; another copy of the same sentence
 is not a new intervention. Compare a claimed past success with actual evidence.
 
-Choose a small change and the next observable check. Record whether it worked
-without another reminder. A saved rule, a repair after prompting and repeated
-independent success are different outcomes. External failures do not always
-justify a new behavioral rule.
+Choose a small change and the next observable check. If an observer could not
+tell whether the lesson was applied, rewrite it as an action in a recognizable
+situation. Append a dated case and outcome to the existing lesson's detail file
+instead of assigning a new ID to the same problem.
+
+Distinguish four outcomes: the rule was not recalled; it was applied but did not
+help; no applicable case has occurred; or it worked without a reminder. Improve
+the retrieval trigger in the first case and reconsider the remedy in the second.
+A repeatedly missed rule may need its operative part in the current layer.
+A saved rule, a repair after prompting and repeated independent success are
+different evidence. External failures do not always justify a new behavioral rule.
 
 ## Checkpoints preserve details
 
@@ -64,10 +73,14 @@ newer messages and verified action results before choosing the next step. For
 Riftjack's best-effort notices, see [continuity notes](../development.md#continuity-notes).
 The connector constructs a note path and delivers reminders; the agent reads or
 writes the note with its own tools and permissions.
+A tool's record that a file was read or edited before compaction is not its
+content. Reread what the next step depends on when that content is no longer
+available, even if an earlier edit receipt said rereading was unnecessary.
 
 ## Maintain without losing commitments
 
-Before a reorganization, preserve originals. Compare stable IDs, conditions and
+Before a reorganization, save a verbatim copy of the originals. Diff the open
+items after rewriting and compare stable IDs, conditions and
 links afterwards. Every old unfinished task must still have an explicit state;
 moving it out of focus is not evidence of completion. Keep uncertain outcomes
 uncertain until verified. An old command is evidence, not an instruction to run it.

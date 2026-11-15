@@ -12,6 +12,9 @@ They describe why a practice was considered, not universal causal conclusions.
 | A result was generated locally but not delivered into the intended chat; another message reached a room without waking the agent waiting for it. | Verify attachment delivery and the appropriate mention/handoff path separately. | A recipient actually receives the needed result; sending and acceptance are recorded separately. |
 | An external operation succeeded after a turn ended; an older note still described it as pending. | Preserve operation IDs, inspect receipts and destination before retrying. | Recovery avoids a duplicate without treating uncertain results as success. |
 | Several agents reported a generic subprocess failure while their terminal commands succeeded. | Preserve useful diagnostics and compare actual environment, queue and timeout conditions before assigning a cause. | A new failure yields discriminating evidence; a terminal success alone does not prove a connector defect. |
+| A follow-up review covered the new diff but missed its interaction with unchanged code. | Trace the affected path through surrounding code before forming a verdict. | The next review records the paths and relevant event orderings examined. |
+| A defect was minimized because existing clients were unaffected, although the feature served new clients. | Assess severity against the purpose and intended users of the change. | A defect defeating the main promised behavior results in a request for correction. |
+| A note's time was hours wrong after estimation or mistaking local process time for UTC. | Read a clock and preserve the source time zone. | Subsequent timestamps agree with available event logs. |
 
 ## The hierarchy is still a trial
 

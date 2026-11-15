@@ -22,6 +22,7 @@ Choose an instance-owned location outside public project commits, for example:
 ```text
 instance/
   agents/assistant-a/
+    binding.md
     continuity.md
     profile.md
     memory.md
@@ -51,16 +52,37 @@ Place a small routing rule in the instruction file your CLI actually loads:
 > verified, keep working within the current conversation's instructions without
 > importing that private context. A transfer requires the owner's explicit decision.
 
-Record the actual binding during setup. Use a runtime identity the environment
-really exposes, not a copied ID from a transcript. For Codex deployments exposing
-`CODEX_THREAD_ID`, inspect the actual process value; do not set it to pass the
-check. Other backends need their own verified mechanism. Do not invent a common
-environment variable or infer identity from a directory name.
+Record the actual binding during setup in `binding.md`: verification mechanism,
+observed value, date and who confirmed the association. The routing instruction
+must point to this record before loading personal content. Use a runtime identity
+the environment really exposes, not a copied ID from a transcript.
+
+For Codex deployments exposing `CODEX_THREAD_ID`, inspect the actual process
+value. Claude Code documents [`CLAUDE_CODE_SESSION_ID`](https://code.claude.com/docs/en/env-vars)
+in Bash and PowerShell tool subprocesses; check it there in the installed version.
+Do not assume an already running MCP server has a fresh ID: it retains its startup
+value, with additional resume caveats documented by Claude. Never set a variable
+to pass the check or infer identity from a directory name. An unavailable or
+blocked check means unverified, not proof of a different session; neither permits
+automatic loading. Other backends need their own verified mechanism.
+
+Also inspect automatically loaded memory before using a shared workspace.
+Claude Code's [auto memory](https://code.claude.com/docs/en/memory#auto-memory)
+can be shared across sessions and worktrees of a repository under the same
+configuration. Keep private agent notes out of a shared index. Configure separate
+storage or disable auto memory where necessary; the documented project setting
+is `{"autoMemoryEnabled": false}`. Verify the effective behavior in the installed
+version. A routing rule cannot undo private content already loaded automatically.
 
 This is a context-selection rule, not filesystem isolation. Where confidentiality
 requires enforcement, use separate OS users, permissions or suitable isolated
 environments. Separate worktrees help concurrent edits but share repository
 metadata. See [Riftjack security](../security.md).
+
+Linked Riftjack rooms can share one agent session. Having private-chat context
+available in a shared-room turn does not authorize disclosing it there. Keep
+private details in their originating conversation unless the human authorizes
+sharing them with that audience.
 
 ## Write the recovery contract
 
@@ -72,6 +94,7 @@ After identity verification and when context has been replaced:
    lessons, questions and focus files. Read applicable project instructions.
 2. For active work, read its task record. Do not claim an unread or truncated
    file was read; finish missing portions with bounded reads.
+   A receipt of an earlier read or edit is not the file's contents.
 3. Open a decision/lesson detail when unclear, contradicted, failing again,
    being revised, or when asked for its grounds.
 4. Read deferred commitments at agreed quiet windows, when choosing work,
