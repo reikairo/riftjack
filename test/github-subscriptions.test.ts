@@ -706,3 +706,25 @@ test('cancelling a PR poll does not report an operational failure', async t => {
   assert.equal(reports.length, 0);
   assert.equal(f.stored().failures, 0);
 });
+
+test('a pending GitHub event is persisted before every handoff attempt after a write failure', async t => {
+  const f = fixture(t);
+  await f.subscriptions.action(selection, target, signal());
+  f.state.pr.draft = true;
+  mkdirSync(f.path + '.tmp');
+  t.mock.timers.tick(61_000);
+  await assert.rejects(f.subscriptions.pump(() => true, signal()), { code: 'EISDIR' });
+  assert.equal(f.notices().length, 0);
+  assert.equal(f.stored().pending, undefined);
+  t.mock.timers.tick(1_000_000);
+  await assert.rejects(f.subscriptions.pump(() => true, signal()), { code: 'EISDIR' });
+  assert.equal(f.notices().length, 0, 'no handoff while the pending event cannot be saved');
+  rmSync(f.path + '.tmp', { recursive: true });
+  t.mock.timers.tick(1_000_000);
+  await f.subscriptions.pump(() => true, signal());
+  assert.equal(f.notices().length, 1);
+  const manager = new GitHubSubscriptions(f.path, f.policy, f.queue, f.read);
+  t.mock.timers.tick(1_000_000);
+  await manager.pump(() => true, signal());
+  assert.equal(f.notices().length, 1, 'persisted snapshot prevents replay after restart');
+});
