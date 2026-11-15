@@ -74,6 +74,13 @@ between the previous successful startup and the current one, including rollbacks
   treating inaccessible files as absent. Missing optional files remain supported.
   A failed inspection prevents capture or rollback from using an incomplete view.
 
+## GitHub polling diagnostics
+
+- Failed PR polls and notification handoffs retain their original errors in host
+  diagnostics and the configured owner diagnostic channel. Subscription status
+  and agent notifications keep concise summaries. Other PRs continue polling,
+  retries keep their existing backoff, and cancellation is not reported as a fault.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
