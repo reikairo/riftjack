@@ -1,5 +1,9 @@
 # Release notes
 
+- Failed audio decoding or transcription now reports the original error through
+  owner diagnostics, including up to 8 KiB of subprocess stderr on unsuccessful
+  exit. The original audio attachment remains available with a brief failure summary.
+
 These notes describe user-visible changes. Startup notices link to this file at
 the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
