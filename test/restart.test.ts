@@ -419,12 +419,15 @@ test('supervisor without replacement support overrides any inherited capability 
 
 test('supervisor code hash changes only with supervisor modules', t => {
   const dir = directory(t);
-  for (const file of ['supervisor.ts', 'restart.ts', 'restart-notice.ts', 'history.ts', 'errors.ts', 'main.ts']) writeFileSync(join(dir, file), file);
+  for (const file of ['supervisor.ts', 'restart.ts', 'restart-notice.ts', 'history.ts', 'errors.ts', 'host-diagnostics.ts', 'main.ts']) writeFileSync(join(dir, file), file);
   const before = supervisorCodeHash(dir);
   writeFileSync(join(dir, 'main.ts'), 'changed');
   assert.equal(supervisorCodeHash(dir), before);
+  writeFileSync(join(dir, 'host-diagnostics.ts'), 'changed');
+  const diagnosticChange = supervisorCodeHash(dir);
+  assert.notEqual(diagnosticChange, before);
   writeFileSync(join(dir, 'history.ts'), 'changed');
-  assert.notEqual(supervisorCodeHash(dir), before);
+  assert.notEqual(supervisorCodeHash(dir), diagnosticChange);
 });
 
 test('SIGTERM to the supervisor stops its child and overrides a simultaneous restart request', { timeout: 5000 }, async t => {
@@ -541,4 +544,28 @@ test('rollback rejects incomplete snapshots and incompatible installed dependenc
   writeFileSync(join(p.root, 'package-lock.json'), 'lock v2');
   assert.throws(() => p.history.rollback(), /dependency installation/);
   assert.equal(readFileSync(join(p.root, 'src', 'child.cjs'), 'utf8'), 'source v2');
+});
+
+for (const stage of ['capture', 'rollback'] as const) test(`supervisor retains original ${stage} diagnostic on the host`, async t => {
+  const p = project(t, `
+    const fs = require('node:fs');
+    if (${JSON.stringify(stage)} === 'rollback' && !fs.existsSync('crashed')) {
+      fs.writeFileSync('crashed', 'once'); process.exit(1);
+    }
+    process.exit(0);
+  `);
+  const original = Object.assign(new Error('original filesystem failure'), { code: 'EIO' });
+  const failure = new AggregateError([original], 'Preserve /example/recovery/source for manual recovery');
+  t.mock.method(p.history, stage, () => { throw failure; });
+  const lines: string[] = [];
+  const code = await supervise({ cwd: p.root, args: [join(p.root, 'src', 'child.cjs')],
+    history: p.history, stableMs: 20, retryMs: () => 1, log: line => lines.push(line) });
+  assert.equal(code, 0);
+  const records = lines.filter(line => line.startsWith('{')).map(line => JSON.parse(line));
+  const record = records.find(record => record.operation === 'supervisor.' + stage);
+  assert.ok(record);
+  assert.ok(Number.isFinite(Date.parse(record.time)));
+  assert.match(JSON.stringify(record.errorDetails), /original filesystem failure/);
+  assert.match(JSON.stringify(record.errorDetails), /Preserve \/example\/recovery\/source/);
+  assert.ok(record.errorDetails.nodes.some((node: { code?: string }) => node.code === 'EIO'));
 });
