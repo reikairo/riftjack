@@ -29,6 +29,12 @@ between the previous successful startup and the current one, including rollbacks
   exception for owner diagnostics and expose available system or exit codes in
   public summaries. Task cancellation keeps its original reason.
 
+## Snapshot inspection failures
+
+- Code snapshot hashing now reports filesystem inspection errors instead of
+  treating inaccessible files as absent. Missing optional files remain supported.
+  A failed inspection prevents capture or rollback from using an incomplete view.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
