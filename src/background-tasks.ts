@@ -102,6 +102,18 @@ export class BackgroundTasks {
     writeFileSync(this.path + '.tmp', JSON.stringify({ version: 1, watches, notified }), { mode: 0o600 });
     renameSync(this.path + '.tmp', this.path);
   }
+  // Admission callbacks run before execution or sending. If their durable write
+  // fails, restore the same object held by readiness/cancellation callbacks so
+  // this occurrence can be retried without consuming a series slot.
+  private admit(watch: Watch, update: () => void) {
+    const before = structuredClone(watch);
+    try { update(); this.save(); }
+    catch (error) {
+      for (const key of Object.keys(watch)) Reflect.deleteProperty(watch, key);
+      Object.assign(watch, before);
+      throw error;
+    }
+  }
   private statusFile(file: string): { file: string; value: Record<string, unknown>; modified: number } {
     const path = realpathSync(resolve(this.workspace, file));
     const rel = relative(this.workspace, path);
@@ -456,11 +468,12 @@ export class BackgroundTasks {
     };
     try {
       const finished = await options.deliver(watch, message, () => {
-        onAdmit?.();
-        watch.delivery = { ...snapshot, attempts: snapshot.attempts + 1 };
-        watch.state = 'dispatching';
-        if (watch.timer?.lastRun) watch.timer.lastRun.state = 'dispatching';
-        this.save();
+        this.admit(watch, () => {
+          onAdmit?.();
+          watch.delivery = { ...snapshot, attempts: snapshot.attempts + 1 };
+          watch.state = 'dispatching';
+          if (watch.timer?.lastRun) watch.timer.lastRun.state = 'dispatching';
+        });
       }, () => watch.state === 'waiting' && eligible() && options.valid(watch), completed);
       if (finished) completed();
     } catch (error) {
@@ -522,7 +535,7 @@ export class BackgroundTasks {
     if (!options.post) return;
     try {
       const sent = await options.post(timer, message, () => {
-        admitOccurrence(); timer.state = 'dispatching'; this.save();
+        this.admit(timer, () => { admitOccurrence(); timer.state = 'dispatching'; });
       }, () => timer.state === 'waiting' && eligible() && options.valid(timer));
       if (sent) {
         delete timer.last_error; delete timer.last_error_at; delete timer.last_error_stage;
