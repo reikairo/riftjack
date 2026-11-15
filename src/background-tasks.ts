@@ -55,6 +55,7 @@ const timerMessage = (value: unknown): value is string => typeof value === 'stri
 export class BackgroundTasks {
   private watches: Watch[];
   private pumping = false;
+  private completionSavePending = false;
   private inFlight = new Set<string>();
   private notified: string[];
   private nextCheck = new Map<string, number>();
@@ -113,6 +114,13 @@ export class BackgroundTasks {
       Object.assign(watch, before);
       throw error;
     }
+  }
+  // Delivery has already happened. Keep its completed state in memory and
+  // retry only persistence; rolling it back could repeat external work.
+  private saveCompletion() {
+    this.completionSavePending = true;
+    this.save();
+    this.completionSavePending = false;
   }
   private statusFile(file: string): { file: string; value: Record<string, unknown>; modified: number } {
     const path = realpathSync(resolve(this.workspace, file));
@@ -363,6 +371,7 @@ export class BackgroundTasks {
     report: (error: unknown) => void;
   }, now = Date.now()) {
     if (this.pumping) return;
+    if (this.completionSavePending) this.saveCompletion();
     this.pumping = true;
     const deliveries: Promise<void>[] = [];
     const failures: unknown[] = [];
@@ -471,7 +480,7 @@ export class BackgroundTasks {
       if (watch.timer?.lastRun) watch.timer.lastRun.state = cancelled ? 'cancelled' : 'delivered';
       if (!cancelled) this.skipElapsed(watch, Date.now());
       watch.state = cancelled ? 'cancelled' : hasFuture(watch) ? 'waiting' : 'delivered';
-      this.save();
+      this.saveCompletion();
     };
     try {
       const finished = await options.deliver(watch, message, () => {
@@ -549,7 +558,7 @@ export class BackgroundTasks {
         if (timer.timer!.lastRun) timer.timer!.lastRun.state = 'delivered';
         this.skipElapsed(timer, Math.max(now, Date.now()));
         if (timer.state !== 'cancelled') timer.state = hasFuture(timer) ? 'waiting' : 'delivered';
-        this.save();
+        this.saveCompletion();
       }
     } catch (error) {
       timer.last_error = errorMessage(error, 'Background room delivery failed').slice(0, 1200);
