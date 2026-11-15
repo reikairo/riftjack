@@ -1,5 +1,9 @@
 # Release notes
 
+- The local publication-review CLI writes bounded original error details to stderr
+  on failure, including output-file errors and malformed request causes. Stdout
+  remains reserved for successful review metadata; preparation does not publish.
+
 These notes describe user-visible changes. Startup notices link to this file at
 the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
