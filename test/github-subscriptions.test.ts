@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import timers from 'node:timers/promises';
 import { githubReader, GitHubSubscriptions, type GitHubRead } from '../src/github-subscriptions.js';
 import { BackgroundTasks, type BackgroundTarget } from '../src/background-tasks.js';
+import { configureOwnerDiagnostics, diagnosticOperation, type DiagnosticContext } from '../src/diagnostics.js';
 
 test('a rate-limit response also delays requests already queued by another bot', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'github-reader-review-'));
@@ -459,9 +460,14 @@ for (const [status, hint] of [[401, /Authentication was rejected/], [403, /Acces
 
 test('one failing PR retains its baseline while another updates, including across restart', async t => {
   const f = fixture(t); let broken = false, revision = 0;
+  const original = new Error('PR two unavailable', { cause: new Error('Upstream transport details') });
+  const reports: { error: unknown; details: DiagnosticContext }[] = [];
+  configureOwnerDiagnostics((error, details) => reports.push({ error, details }));
+  t.after(() => configureOwnerDiagnostics(undefined));
+  const consoleLog = t.mock.method(console, 'error', () => {});
   const read: GitHubRead = async (endpoint, s) => {
     if (/\/pulls\/2$/.test(endpoint)) {
-      if (broken) throw new Error('PR two unavailable');
+      if (broken) throw original;
       return { ...structuredClone(f.state.pr), head: { sha: String(revision + 1).repeat(40) } };
     }
     return f.read(endpoint, s);
@@ -470,7 +476,15 @@ test('one failing PR retains its baseline while another updates, including acros
   await manager.action({ ...selection, pull_requests: [1, 2], events: ['pull_request'] }, target, signal());
   const second = f.stored().snapshot['2:pr'];
   broken = true; f.state.pr.draft = true;
-  t.mock.timers.tick(61_000); await manager.pump(() => true, signal());
+  t.mock.timers.tick(61_000);
+  await diagnosticOperation({ operation: 'github.pump', bot: '@bot:example.com' }, () => manager.pump(() => true, signal()));
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].error, original);
+  assert.equal(reports[0].details.operation, 'github.poll');
+  assert.equal(reports[0].details.bot, '@bot:example.com');
+  assert.ok(reports[0].details.task?.includes(f.stored().id));
+  assert.doesNotMatch(JSON.stringify(consoleLog.mock.calls), /Upstream transport details|PR two unavailable/);
+  assert.doesNotMatch(JSON.stringify(f.stored()), /Upstream transport details|PR two unavailable/);
   assert.equal(f.notices().length, 1);
   assert.match(f.notices()[0].message, /"pr":1/);
   assert.deepEqual(f.stored().snapshot['2:pr'], second);
@@ -653,4 +667,42 @@ test('reconcile retries inbox cancellation after subscription cancellation was s
   t.mock.method(f.queue, 'cancelNotifications', cancel);
   f.subscriptions.reconcile(() => true);
   assert.equal(f.notices().length, 0);
+});
+
+test('subscription handoff and failure-notice errors retain their original diagnostics', async t => {
+  const f = fixture(t);
+  await f.subscriptions.action(selection, target, signal());
+  const reports: { error: unknown; details: DiagnosticContext }[] = [];
+  configureOwnerDiagnostics((error, details) => reports.push({ error, details }));
+  t.after(() => configureOwnerDiagnostics(undefined));
+  t.mock.method(console, 'error', () => {});
+  const original = Object.assign(new Error('Background storage write failed'), { code: 'EIO' });
+  t.mock.method(f.queue, 'notify', () => { throw original; });
+  f.state.pr.draft = true;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    t.mock.timers.tick(1_000_000);
+    await f.subscriptions.pump(() => true, signal());
+  }
+  assert.deepEqual(reports.map(r => r.details.operation), ['github.poll', 'github.poll', 'github.poll', 'github.notify']);
+  assert.ok(reports.every(r => r.error === original));
+  assert.ok(f.stored().pending, 'failed event handoff remains retryable');
+});
+
+test('cancelling a PR poll does not report an operational failure', async t => {
+  const f = fixture(t);
+  const controller = new AbortController();
+  let cancel = false;
+  const manager = new GitHubSubscriptions(f.path, f.policy, f.queue, async (endpoint, s) => {
+    if (cancel) { controller.abort(); s.throwIfAborted(); }
+    return f.read(endpoint, s);
+  });
+  await manager.action(selection, target, controller.signal);
+  const reports: unknown[] = [];
+  configureOwnerDiagnostics(error => reports.push(error));
+  t.after(() => configureOwnerDiagnostics(undefined));
+  cancel = true;
+  t.mock.timers.tick(61_000);
+  await manager.pump(() => true, controller.signal);
+  assert.equal(reports.length, 0);
+  assert.equal(f.stored().failures, 0);
 });
