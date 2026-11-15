@@ -55,7 +55,7 @@ Use Element X or another Matrix client. Accept your bot’s encrypted chat invit
 >
 > Send me the patch when you’re done.
 
-You can send text, images, documents, and audio files, and receive files back. Codex and Claude can deliver ready files while continuing to work. Images reach the agent as image inputs; documents and audio are provided as local files. Optional [local audio transcription](docs/audio-transcription.md) is disabled by default; without it, transcription depends on the agent's available tools. Optional [draw.io support](docs/diagrams.md) renders editable PNG diagrams into the conversation outbox.
+You can send text, images, documents, and audio files, and receive files back. Codex and Claude can deliver ready files while continuing to work. Images reach the agent as image inputs; documents and audio are provided as local files. Optional [local audio transcription](docs/audio-transcription.md) is disabled by default; without it, transcription depends on the agent's available tools. Optional [draw.io support](docs/diagrams.md) renders editable PNG diagrams into a persistent results directory and returns their absolute paths. The agent can then send a diagram to the conversation.
 
 Messages sent while Codex works can steer its active task. Claude also accepts updates into its running task when its CLI supports message replay; otherwise it queues follow-ups. See [messages during work](docs/chat.md#messages-during-work). When an action needs permission, the bot brings the request into the same conversation. Approve the displayed request with `!approve` or ✅, or decline with `!deny` or ❌.
 
@@ -199,7 +199,7 @@ turn. `approval_status` with `id=operation_id` retrieves the full result; omit t
 ID to list recent operations. Connector restart expires unanswered approvals
 without replaying them. After an approved start, the result is **prepared**, not
 running. The agent invokes the returned
-`launch_argv` once through its normal command tool within five minutes. This keeps
+`launch_argv` once through its normal command tool within 24 hours of approval. This keeps
 the command tool's sandbox and approval checks; the MCP server does not execute
 arbitrary commands on the connector host. The launch may still need the ordinary
 command approval. Inspect `status` before claiming it started or retrying an
@@ -231,8 +231,11 @@ Closed runs remain in retained history. Session reset revokes
 unlaunched commands and suppresses notifications, but does not kill running jobs.
 
 State lives in `.riftjack/runs/<bot-hash>/` inside the workspace. Each bot has a
-limit of two active or uncertain runs and 100 retained runs. An operator must
-archive finished history before that retention limit is reached. This first stage
+limit of two active or uncertain runs and 100 indexed runs. Before admitting a new
+run, Riftjack archives completed, notified runs and explicitly closed runs when
+the index reaches 80 entries, aiming to retain 60. Archived runs remain on disk
+and can be inspected by ID. If unfinished or unreported runs still fill the index,
+inspect them before adding more. This first stage
 does not manage shared resource leases. Read-only bots do not receive the tool.
 
 ## Further reading
