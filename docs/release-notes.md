@@ -5,6 +5,12 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Watch observation persistence
+
+- Background watches retry failed observation writes when storage recovers.
+  File inactivity timestamps therefore survive a later restart even if the
+  watched file has not changed again. Scanning waits for the pending write.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts

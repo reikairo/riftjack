@@ -55,6 +55,7 @@ const timerMessage = (value: unknown): value is string => typeof value === 'stri
 export class BackgroundTasks {
   private watches: Watch[];
   private pumping = false;
+  private observationSavePending = false;
   private inFlight = new Set<string>();
   private notified: string[];
   private nextCheck = new Map<string, number>();
@@ -101,6 +102,11 @@ export class BackgroundTasks {
   private save(watches = this.watches, notified = this.notified) {
     writeFileSync(this.path + '.tmp', JSON.stringify({ version: 1, watches, notified }), { mode: 0o600 });
     renameSync(this.path + '.tmp', this.path);
+  }
+  private saveObservation() {
+    this.observationSavePending = true;
+    this.save();
+    this.observationSavePending = false;
   }
   private statusFile(file: string): { file: string; value: Record<string, unknown>; modified: number } {
     const path = realpathSync(resolve(this.workspace, file));
@@ -352,9 +358,11 @@ export class BackgroundTasks {
       deliveries.push(Promise.resolve().then(run).finally(() => { this.inFlight.delete(watch.id); }));
     };
     try {
+      // Retry even when unchanged observations would otherwise skip their save.
+      if (this.observationSavePending) this.saveObservation();
       for (const watch of this.watches) {
         if (watch.state !== 'waiting' || this.inFlight.has(watch.id)) continue;
-        if (watch.workspace !== this.workspace || !options.valid(watch)) { watch.state = 'cancelled'; delete watch.delivery; this.save(); continue; }
+        if (watch.workspace !== this.workspace || !options.valid(watch)) { watch.state = 'cancelled'; delete watch.delivery; this.saveObservation(); continue; }
         if (watch.delivery) { dispatch(watch, () => this.deliverAgent(watch, options)); continue; }
         if (watch.timer) { if (now >= watch.expires) dispatch(watch, () => this.fire(watch, options, now)); continue; }
         if (watch.conditions) {
@@ -363,10 +371,10 @@ export class BackgroundTasks {
           const before = JSON.stringify(watch.conditions);
           const observation: Observation = now >= watch.expires ? { status: 'watch_expired' }
             : observeConditions(watch.conditions, this.workspace, now, this.processProbe);
-          if (before !== JSON.stringify(watch.conditions)) this.save();
+          if (before !== JSON.stringify(watch.conditions)) this.saveObservation();
           if (observation.error) {
-            if (watch.last_error !== observation.error) { watch.last_error = observation.error; watch.last_error_at = new Date(now).toISOString(); watch.last_error_stage = 'status_read'; this.save(); }
-          } else if (watch.last_error_stage === 'status_read') { delete watch.last_error; delete watch.last_error_at; delete watch.last_error_stage; this.save(); }
+            if (watch.last_error !== observation.error) { watch.last_error = observation.error; watch.last_error_at = new Date(now).toISOString(); watch.last_error_stage = 'status_read'; this.saveObservation(); }
+          } else if (watch.last_error_stage === 'status_read') { delete watch.last_error; delete watch.last_error_at; delete watch.last_error_stage; this.saveObservation(); }
           if (!observation.status) continue;
           const event: MatrixEvent = { type: 'm.room.message', event_id: '$background-' + watch.id, sender: watch.sender, origin_server_ts: now,
             content: { msgtype: 'm.text', [NOTICE]: 'background', body:
@@ -385,18 +393,18 @@ export class BackgroundTasks {
         if (!outcome) {
           try {
             const { value, modified } = this.statusFile(watch.file);
-            if (watch.last_error_stage === 'status_read') { delete watch.last_error; delete watch.last_error_at; delete watch.last_error_stage; this.save(); }
+            if (watch.last_error_stage === 'status_read') { delete watch.last_error; delete watch.last_error_at; delete watch.last_error_stage; this.saveObservation(); }
             // Only a readable, valid status file refreshes liveness. Persist it
             // so missing files and connector restarts cannot reset the clock.
             if (watch.stale && modified <= now) {
               const updated = Math.max(watch.stale.updated, modified);
-              if (updated !== watch.stale.updated) { watch.stale.updated = updated; this.save(); }
+              if (updated !== watch.stale.updated) { watch.stale.updated = updated; this.saveObservation(); }
             }
             const status = Object.hasOwn(value, watch.field) ? value[watch.field] : undefined;
             if (typeof status === 'string' && watch.terminal.includes(status)) outcome = status;
           } catch (error) {
             const diagnostic = errorMessage(error, 'Reading watched status failed').slice(0, 1200);
-            if (watch.last_error !== diagnostic) { watch.last_error = diagnostic; watch.last_error_stage = 'status_read'; watch.last_error_at = new Date().toISOString(); this.save(); }
+            if (watch.last_error !== diagnostic) { watch.last_error = diagnostic; watch.last_error_stage = 'status_read'; watch.last_error_at = new Date().toISOString(); this.saveObservation(); }
             // Retry until stale timeout or expiry; malformed writes are not heartbeats.
           }
           if (!outcome && watch.pid !== undefined && processMissing(watch.pid)) outcome = 'watch_process_missing';
