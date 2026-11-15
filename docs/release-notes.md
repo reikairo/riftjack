@@ -87,6 +87,12 @@ between the previous successful startup and the current one, including rollbacks
   queue, including retries after a storage failure. A failed write keeps the
   event pending instead of delivering it with an unsaved polling baseline.
 
+## Watch observation persistence
+
+- Background watches retry failed observation writes when storage recovers.
+  File inactivity timestamps therefore survive a later restart even if the
+  watched file has not changed again. Scanning waits for the pending write.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
