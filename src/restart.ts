@@ -24,13 +24,20 @@ export class RestartController {
       if (this.options.notice) {
         if (!target) throw new PublicError('Restart notification destination is missing. Restart was not performed.');
         try { this.options.notice.save(target); saved = true; }
-        catch { throw new PublicError('Could not save the restart notification destination. Check data directory permissions and free disk space. Restart was not performed.'); }
+        catch (cause) { throw new PublicError('Could not save the restart notification destination. Check data directory permissions and free disk space. Restart was not performed.', { cause }); }
       }
       await reply((scope === 'supervisor' ? 'Restarting the supervisor, connector and all bots. ' : 'Restarting the connector and all bots. ') +
         'Conversations and files will be preserved. Please wait a few seconds before sending another message.');
     } catch (error) {
       this.requested = false;
-      if (saved) this.options.notice!.clear();
+      if (saved) {
+        try { this.options.notice!.clear(); }
+        catch (cleanup) {
+          // Keep this a diagnostic error: Bridge must not attempt another reply
+          // after acknowledgement delivery has already failed.
+          throw new AggregateError([error, cleanup], 'Restart was not performed; acknowledgement and notification cleanup failed.');
+        }
+      }
       throw error;
     }
     this.options.shutdown(scope === 'supervisor' ? SUPERVISOR_RESTART_EXIT_CODE : RESTART_EXIT_CODE);
