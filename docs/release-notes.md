@@ -30,6 +30,11 @@
   exception details in structured host-log records, including recovery paths and
   nested failures that were previously reduced to a generic summary.
 
+- Remote executors use structured Matrix and lifecycle diagnostics with executor
+  identity and operation context. Original SDK, room-join, inbox, verification and
+  queue failures are retained under `EXECUTOR_DATA_DIR/diagnostics`; console
+  summaries omit request bodies and credentials.
+
 These notes describe user-visible changes. Startup notices link to this file at
 the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
