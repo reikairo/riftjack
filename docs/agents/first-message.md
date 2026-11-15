@@ -31,6 +31,9 @@ with a specified audience.
 
 Keep current decisions, useful lessons and active focus short enough to read
 on recovery. Preserve dates, sources and revisions in linked detail files.
+Write notes in plain language so that, after losing the conversation context,
+you can recover their meaning without guessing. Keep conditions and exceptions;
+shorten repetition and history, not the explanation needed to apply a rule.
 Keep deferred commitments with a return condition and review them in quiet
 windows we agree on. Closing or handing off work must leave a clear record.
 
