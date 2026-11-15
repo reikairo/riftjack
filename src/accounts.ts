@@ -61,8 +61,8 @@ export async function provision(config: Config, kind: Mode, name: string, signal
     const url = new URL(baseUrl);
     const tunnel = isAdmin && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
       ? ` Check the SSH tunnel or local Synapse listener at ${url.host}; keep it running while creating bots.` : '';
-    const fail = (reason: string) => new PublicError(`Bot setup failed at step "${step}". ${endpoint} (${url.origin}): ${reason}` +
-      (accountMayExist ? ' The account may already exist on Synapse. Check server accounts before retrying; this attempt was not saved in the connector.' : ''));
+    const fail = (reason: string, cause?: unknown) => new PublicError(`Bot setup failed at step "${step}". ${endpoint} (${url.origin}): ${reason}` +
+      (accountMayExist ? ' The account may already exist on Synapse. Check server accounts before retrying; this attempt was not saved in the connector.' : ''), { cause });
     const requestSignal = AbortSignal.any([AbortSignal.timeout(30_000), ...(signal ? [signal] : [])]);
     signal?.throwIfAborted();
     if (step === 'create account' || step === 'register account') accountMayExist = true;
@@ -77,7 +77,7 @@ export async function provision(config: Config, kind: Mode, name: string, signal
     } catch (error) {
       signal?.throwIfAborted();
       const details = safeErrorSummary(requestSignal.aborted ? requestSignal.reason : error);
-      throw fail(`${details}. ${connectionHint(details)}${tunnel}`);
+      throw fail(`${details}. ${connectionHint(details)}${tunnel}`, error);
     }
     if (allow404 && response.status === 404) return null;
     if (!response.ok) {
@@ -101,9 +101,9 @@ export async function provision(config: Config, kind: Mode, name: string, signal
       signal?.throwIfAborted();
       if (requestSignal.aborted || !(error instanceof SyntaxError)) {
         const details = safeErrorSummary(requestSignal.aborted ? requestSignal.reason : error);
-        throw fail(`Response could not be read: ${details}. ${connectionHint(details)}${tunnel}`);
+        throw fail(`Response could not be read: ${details}. ${connectionHint(details)}${tunnel}`, error);
       }
-      throw fail('Returned an empty or non-JSON response. Check the reverse proxy routing to Synapse.');
+      throw fail('Returned an empty or non-JSON response. Check the reverse proxy routing to Synapse.', error);
     }
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw fail('Returned an invalid JSON object. Check the reverse proxy routing to Synapse.');
     return data as Record<string, unknown>;
