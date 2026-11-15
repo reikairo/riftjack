@@ -19,6 +19,9 @@
   on failure, including output-file errors and malformed request causes. Stdout
   remains reserved for successful review metadata; preparation does not publish.
 
+- Pi tool connection failures now include the HTTP status or numeric JSON-RPC
+  error code during discovery and execution, without copying response bodies.
+
 These notes describe user-visible changes. Startup notices link to this file at
 the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
