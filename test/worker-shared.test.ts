@@ -8,6 +8,7 @@ import { WorkerQueue } from '../src/worker-queue.js';
 import { prepareWorkerReply } from '../src/worker-replies.js';
 import { WorkerService } from '../src/worker-service.js';
 import { ConversationLinks } from '../src/conversation-links.js';
+import { SharedBacklog } from '../src/shared-backlog.js';
 import { State } from '../src/state.js';
 import { AGENT_TRIGGER, GRANT, sessionKey, type MatrixEvent } from '../src/bridge.js';
 import { DeliveryReceipts } from '../src/delivery-receipts.js';
@@ -65,6 +66,68 @@ function fixture(t: { after(fn: () => void): void }) {
       receipts = new DeliveryReceipts(join(dir, 'receipts.json')); worker = service(); inbox = bridge(); },
   };
 }
+
+test('a worker receives full background batches without a new human message or mention', async t => {
+  const f = fixture(t);
+  await f.inbox.handle(room, event('$observation', 'x'.repeat(30000), peer));
+  const pump = () => new SharedBacklog(f.links, bot, { idle: () => !f.inbox.busy && !f.inbox.pendingTurns,
+    deliver: (...args) => f.inbox.resumeBacklog(...args) });
+  await pump().pump(); await pump().pump();
+  assert.equal(f.queue.list().length, 1);
+  f.restart(); // The queued notice survives restart, including its binding.
+  await pump().pump(); assert.equal(f.queue.list().length, 1);
+  const first = (await f.worker.claim())!;
+  const a = JSON.parse(first.text.split('\n')[1]);
+  assert.equal(a.trigger, 'shared-backlog'); assert.equal(a.author, 'connector');
+  assert.equal(a.unreadSharedMessages[0].offset, 0); assert.equal(a.unreadSharedMessages[0].continues, true);
+  await pump().pump(); assert.equal(f.queue.list().length, 1); // A leased worker is not idle.
+  await f.worker.release(first.id, first.lease!);
+  const retry = (await f.worker.claim())!;
+  assert.equal(retry.text, first.text); // Cached prompt; no cursor skip on re-claim.
+  await f.worker.complete(retry.id, retry.lease!, { text: 'NO_REPLY' });
+  while (f.worker.busy) await new Promise(r => setTimeout(r, 1));
+  await pump().pump();
+  const second = (await f.worker.claim())!;
+  const b = JSON.parse(second.text.split('\n')[1]);
+  assert.equal(b.unreadSharedMessages[0].offset, 11600);
+  assert.equal(f.links.peerCredit(bot), 0); assert.equal(f.sent, 0);
+});
+
+test('queued ordinary worker tasks take priority and cancelled backlog notices do not repeat', async t => {
+  const f = fixture(t);
+  await f.inbox.handle(home, event('$human', 'Continue'));
+  await f.inbox.handle(room, event('$observation', 'x'.repeat(30000), peer));
+  const pump = () => new SharedBacklog(f.links, bot, { idle: () => !f.inbox.busy && !f.inbox.pendingTurns,
+    deliver: (...args) => f.inbox.resumeBacklog(...args) });
+  await pump().pump(); assert.equal(f.queue.list().length, 1);
+  const ordinary = (await f.worker.claim())!;
+  assert.equal(JSON.parse(ordinary.text.split('\n')[1]).trigger, 'human-message');
+  await f.worker.complete(ordinary.id, ordinary.lease!, { text: 'NO_REPLY' });
+  while (f.worker.busy) await new Promise(r => setTimeout(r, 1));
+  await pump().pump();
+  const next = f.queue.list('queued')[0]; assert.ok(next);
+  f.queue.cancel(next.id);
+  f.restart(); await pump().pump();
+  assert.equal(f.queue.list('queued').length, 0);
+  const normal = f.links.prompt(bot, room, event('$new'), 'Continue');
+  assert.equal(JSON.parse(normal.split('\n')[1]).unreadSharedMessages[0].offset, 11600);
+});
+
+test('worker backlog admission rechecks access, session and pending work after awaiting privacy', async t => {
+  const f = fixture(t);
+  await f.inbox.handle(room, event('$observation', 'x'.repeat(12000), peer));
+  const next = f.links.backlog(bot)!;
+  const accept = () => f.links.backlogAdmitted(bot, room, next.event.event_id!);
+  f.deny();
+  assert.equal(await f.inbox.resumeBacklog(room, next.event, next.session, accept, () => true), false);
+  assert.equal(f.queue.list().length, 0); assert.ok(f.links.backlog(bot));
+  const racing = new WorkerBridge({ botId: bot, links: f.links, state: f.state, queue: f.queue, service: f.worker,
+    authorized: () => true, privateRoom: async () => {
+      f.queue.enqueue(home, event('$earlier'), key + '\noriginal-conversation'); return true;
+    }, reply: async () => {} });
+  assert.equal(await racing.resumeBacklog(room, next.event, next.session, accept, () => true), false);
+  assert.equal(f.queue.list().length, 1); assert.ok(f.links.backlog(bot));
+});
 
 test('worker initiative returns to the pinned home and can send to linked rooms without new peer credit', async t => {
   const f = fixture(t);

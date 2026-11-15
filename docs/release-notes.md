@@ -5,6 +5,17 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Shared-room backlog delivery
+
+- A full batch of unread shared-room observations now starts a turn when the
+  linked agent is idle, without waiting for another human message or mention.
+  Existing queued work takes priority. Codex, Claude, Pi and external Grok workers
+  receive a distinct `shared-backlog` notice explaining that the turn primarily
+  delivers background context, grants no new approval and defaults to `NO_REPLY`.
+  Long messages continue from their saved read positions; smaller remainders
+  wait for a normal turn or another full batch. Cancelled or failed automatic
+  attempts do not loop at the same cursor, and their unread text remains available.
+
 ## Reminder, recovery and diagnostic improvements
 
 - Failed reminder admission writes now leave the occurrence waiting for retry,

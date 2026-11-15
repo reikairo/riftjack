@@ -3,7 +3,7 @@ import { Marked, type Token, type Tokens } from 'marked';
 import { markdownText } from './manager-format.js';
 import type { Account } from './accounts.js';
 import { PublicError } from './errors.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { AGENT_TRIGGER, GRANT, NOTICE, REPLY, SERVICE, type MatrixEvent, type Mentions } from './bridge.js';
 import type { State } from './state.js';
 import { isPrivateRoomState } from './private-room.js';
@@ -25,7 +25,7 @@ type ExecutorRequest = { sender: string; executor: string; id: string; action: s
 // so a reply can name the event it answers and reach its author.
 type History = Record<string, { members: string; messages: Entry[]; next: number; seen: string[]; readers: Record<string, Cursor>;
   senders?: [string, string][];
-  executorRequests?: Record<string, ExecutorRequest>; mentioned?: Record<string, string[]>; quoted?: Record<string, string[]>; notes?: Record<string, string[]> }>;
+  executorRequests?: Record<string, ExecutorRequest>; mentioned?: Record<string, string[]>; quoted?: Record<string, string[]>; notes?: Record<string, string[]>; backlog?: Record<string, string> }>;
 // A local agent's reserve for starting its peer, and when the human message
 // it derives from arrived. A grant is one paid mention, reserved when the
 // message is prepared and consumed once by its recipient. Saved with the
@@ -52,6 +52,7 @@ const CREDIT_TTL_MS = 24 * 3_600_000;
 const validCreditTime = (since: number, now: number) => Number.isSafeInteger(since) && since <= now + 60_000 && now - since < CREDIT_TTL_MS;
 // Longest quoted peer reply included with the turn it starts.
 const QUOTE_LIMIT = 8000;
+const OBSERVATION_BUDGET = 12_000, OBSERVATION_OVERHEAD = 400, MIN_OBSERVATION_BUDGET = 512;
 
 // Checked on top-level tokens only: examples nested in another fence, a quote
 // or a list are text, not mention requests.
@@ -484,6 +485,65 @@ export class ConversationLinks {
     const mentions = event.content?.['m.mentions']?.user_ids;
     return !Array.isArray(mentions) || mentions.length === 0 || mentions.includes(bot);
   }
+  // The readiness check and prompt use the same packing rules and exclusions.
+  private observations(bot: string, room: string, event: MatrixEvent, budget: number) {
+    const log = this.log(room)!;
+    const trigger = event.content?.[AGENT_TRIGGER];
+    const unread: (Entry & { room: string; offset: number; continues: boolean })[] = [];
+    let cursor = { ...(log.readers[bot] ?? { seq: 1, offset: 0 }) };
+    for (const entry of log.messages.filter(m => m.seq >= cursor.seq)) {
+      // The agent's own messages are already part of its session; a mention's
+      // reply is quoted in its notice.
+      if (entry.id === event.event_id || entry.sender === bot || trigger?.events?.includes(entry.id) || log.quoted?.[bot]?.includes(entry.id)) {
+        cursor = { seq: entry.seq + 1, offset: 0 }; continue;
+      }
+      const start = entry.seq === cursor.seq ? cursor.offset : 0;
+      if (budget < MIN_OBSERVATION_BUDGET) break;
+      const part = entry.body.slice(start, start + budget - OBSERVATION_OVERHEAD);
+      const continues = start + part.length < entry.body.length;
+      // The reply ID is internal grouping, not conversation content.
+      const { reply: _reply, ...visible } = entry;
+      unread.push({ ...visible, room, body: part, offset: start, continues });
+      budget -= part.length + OBSERVATION_OVERHEAD;
+      cursor = continues ? { seq: entry.seq, offset: start + part.length } : { seq: entry.seq + 1, offset: 0 };
+      if (continues) break;
+    }
+    const remaining = log.messages.filter(m => m.seq >= cursor.seq && m.sender !== bot && m.id !== event.event_id &&
+      !trigger?.events?.includes(m.id) && !log.quoted?.[bot]?.includes(m.id)).length;
+    return { unread, cursor, budget, remaining };
+  }
+  // A full batch can start an observation turn without another human message or
+  // paid mention. A failed/cancelled attempt leaves observations unread, but does
+  // not repeatedly invoke the model at the same cursor, including after restart.
+  backlog(bot: string, skip: ReadonlySet<string> = new Set()): { room: string; event: MatrixEvent; session: string } | undefined {
+    const agent = this.agent(bot);
+    if (!agent) return;
+    this.assertSession(agent);
+    for (const room of this.sharedRooms(bot)) {
+      if (skip.has(room)) continue;
+      const log = this.log(room);
+      if (!log) continue;
+      const batch = this.observations(bot, room, {}, OBSERVATION_BUDGET);
+      if (!batch.unread.length || (!batch.remaining && batch.budget >= MIN_OBSERVATION_BUDGET)) continue;
+      const first = batch.unread[0];
+      const id = 'shared-backlog:' + createHash('sha256').update(JSON.stringify(
+        [bot, agent.session, room, log.members, first.id, first.seq, first.offset])).digest('hex');
+      if (log.backlog?.[bot] === id) continue;
+      return { room, session: agent.session, event: { type: 'm.room.message', event_id: id, sender: agent.owner,
+        origin_server_ts: Date.now(), content: { msgtype: 'm.text', [NOTICE]: 'shared-backlog',
+          body: 'This turn was started primarily to deliver accumulated background messages from this shared room: '
+            + 'the unread observations have filled a delivery batch. Read them and update relevant context. '
+            + 'This connector notice is not a new human request or approval. Continue only work already authorized. '
+            + 'Default to exactly NO_REPLY: no read receipts, acknowledgements, or replies to every observation. '
+            + 'Reply only to a question addressed to you or a concrete matter that requires your participation.' } } };
+    }
+  }
+  backlogAdmitted(bot: string, room: string, id: string): void {
+    const log = this.log(room);
+    if (!log) throw new PublicError('Shared room changed before backlog admission.');
+    (log.backlog ??= {})[bot] = id;
+    this.saveHistory();
+  }
   prompt(bot: string, room: string, event: MatrixEvent, prompt: string, steering = false): string {
     const trigger = event.content?.[AGENT_TRIGGER], notice = event.content?.[NOTICE];
     const shared = this.room(bot, room);
@@ -491,35 +551,20 @@ export class ConversationLinks {
     const rooms = steering ? [] : shared ? [shared] : this.config.rooms.filter(r => r.bots.includes(bot));
     const unread: (Entry & { room: string; offset: number; continues: boolean })[] = [];
     const delivery: Delivery = {}, connectorNotes: string[] = [];
-    let budget = 12_000, remainingMessages = 0;
+    let budget = OBSERVATION_BUDGET, remainingMessages = 0;
     for (const r of rooms) {
       const members = membershipKey(r);
       const log = this.history[r.room];
       if (log?.members !== members) continue;
-      let cursor = { ...(log.readers[bot] ?? { seq: 1, offset: 0 }) };
-      for (const entry of log.messages.filter(m => m.seq >= cursor.seq)) {
-        // The agent's own messages are already part of its session; a mention's
-        // reply is quoted in its notice.
-        if (entry.id === event.event_id || entry.sender === bot || trigger?.events?.includes(entry.id) || log.quoted?.[bot]?.includes(entry.id)) {
-          cursor = { seq: entry.seq + 1, offset: 0 }; continue;
-        }
-        const start = entry.seq === cursor.seq ? cursor.offset : 0;
-        if (budget < 512) break;
-        const part = entry.body.slice(start, start + budget - 400);
-        const continues = start + part.length < entry.body.length;
-        // The reply ID is internal grouping, not conversation content.
-        const { reply: _reply, ...visible } = entry;
-        unread.push({ ...visible, room: r.room, body: part, offset: start, continues });
-        budget -= part.length + 400;
-        cursor = continues ? { seq: entry.seq, offset: start + part.length } : { seq: entry.seq + 1, offset: 0 };
-        if (continues) break;
-      }
+      const batch = this.observations(bot, r.room, event, budget);
+      const cursor = batch.cursor;
+      unread.push(...batch.unread);
+      budget = batch.budget;
       const notes = log.notes?.[bot] ?? [];
       connectorNotes.push(...notes);
       // Quoted parts beyond this turn's observation budget must not arrive again later.
       delivery[r.room] = { members, cursor, notes: notes.length, quoted: r.room === room ? trigger?.events ?? [] : [] };
-      remainingMessages += log.messages.filter(m => m.seq >= cursor.seq && m.sender !== bot &&
-        !trigger?.events?.includes(m.id) && !log.quoted?.[bot]?.includes(m.id)).length;
+      remainingMessages += batch.remaining;
     }
     if (!steering) this.deliveries.set(bot, delivery);
     return 'Matrix message context:\n'

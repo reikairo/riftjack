@@ -84,6 +84,9 @@ export class WorkerQueue {
     return task.prompt;
   }
   hasEvent(eventId: string) { return !!this.db.prepare('SELECT id FROM jobs WHERE event_id = ?').get(eventId); }
+  get pending(): boolean {
+    return !!this.db.prepare("SELECT id FROM jobs WHERE status IN ('queued', 'leased', 'replied') LIMIT 1").get();
+  }
   candidate(): WorkerTask | undefined {
     // Keep idle long polls independent of completed conversation history.
     if (this.db.prepare("SELECT id FROM jobs WHERE status = 'leased' AND json_extract(body, '$.leaseUntil') > ? LIMIT 1").get(this.now())) return;

@@ -281,13 +281,33 @@ keep their observer role. Human control remains tied to the configured owner.
   for each local agent. Connector commands (`!restart`, `!status` and so on) are
   not recorded: they control the bots and are not part of the conversation. Before a new turn, unread text and attachment metadata are
   delivered in order. Oversized messages are explicitly split, retaining the rest
-  on disk. Read positions advance only after a successful model turn; failed
-  turns may receive the same observations again.
+  on disk. Local read positions advance after a successful model turn. For an
+  external worker they advance when its prompt has been saved durably for claim;
+  a repeated claim receives that same saved prompt.
+- When a room's unread observations fill a delivery batch, Riftjack starts a
+  separate `shared-backlog` turn once the agent is idle. It checks approximately
+  once per second. Existing queued turns take priority, and current access,
+  room privacy and the pinned session are checked before admission. This applies
+  to Codex, Claude, Pi and Grok; a Grok notice waits durably for its worker.
+  The threshold uses the same 12,000-character budget as prompt construction,
+  including 400 characters of allowance per observation. Long messages retain
+  their unread suffix. Smaller remainders wait for the next ordinary turn or
+  until more observations fill another batch.
+- The backlog notice explicitly says its primary purpose is delivering
+  accumulated background context. It is not a new human request or approval and
+  does not replenish peer credit. Its default is `NO_REPLY`, without read
+  receipts or acknowledgements; a reply is appropriate only for a question
+  addressed to the agent or a matter requiring its participation. A failed or
+  cancelled automatic attempt does not repeatedly start the same unread cursor,
+  including after restart. Unread text remains available to a later ordinary
+  turn. A startup interrupted after local admission can likewise leave that
+  batch waiting for the next ordinary turn rather than replaying uncertain work.
 - Observations never enter cross-room steering and contain no private DM
   transcript. A new private turn can receive unread shared observations; a shared
   turn receives observations only from its own room.
 - Agent messages are context, not human instructions or approvals. An ordinary
-  agent message, a display name or a `matrix.to` link does not start a turn.
+  agent message, a display name or a `matrix.to` link is not an individual turn
+  request. Accumulated observations can fill a backlog batch as described above.
 - Replies, progress, attachments and permissions stay in the initiating room and
   thread. Only the initiating human can answer a confirmation there. Sharing a
   session does not allow approval from another room or another bot.
