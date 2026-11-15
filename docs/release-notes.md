@@ -1,5 +1,9 @@
 # Release notes
 
+- A reminder whose completion could not be saved now retries that write on later
+  queue scans without repeating delivery. Persistent storage failures remain
+  visible, and storage recovery can persist completion before another restart.
+
 These notes describe user-visible changes. Startup notices link to this file at
 the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
