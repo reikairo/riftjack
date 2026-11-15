@@ -14,6 +14,7 @@ import { codexUsage } from '../src/codex-usage.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
 import { codexModelOptions } from '../src/codex-models.js';
 import { OwnerDiagnosticError } from '../src/errors.js';
+import { hostErrorDetails } from '../src/host-diagnostics.js';
 
 function setup(t: { after(fn: () => void): void }, accountType = 'chatgpt') {
   const dir = mkdtempSync(join(tmpdir(), 'matrix-app-server-'));
@@ -665,9 +666,8 @@ function confirming(t: { after(fn: () => void): void }, afterDelivery?: () => Pr
 }
 
 test('confirmation delivery failure reports a safe technical cause, never a user decline', async t => {
-  const f = confirming(t, async () => {
-    throw Object.assign(new Error('Bearer secret-token private request body'), { statusCode: 503, code: 'ECONNRESET' });
-  });
+  const original = Object.assign(new Error('Bearer secret-token private request body'), { statusCode: 503, code: 'ECONNRESET' });
+  const f = confirming(t, async () => { throw original; });
   await f.bridge.handle('!dm:test', f.event('[confirm]'));
   const response = f.calls().find(c => c.id === 'approval-A');
   assert.equal(response.result, undefined);
@@ -679,6 +679,9 @@ test('confirmation delivery failure reports a safe technical cause, never a user
   assert.ok(f.replies.some(text => text.includes('No user decline was received') && text.includes('HTTP 503')));
   assert.equal(f.bridge.busy, false);
   assert.equal(f.calls().filter(c => c.method === 'turn/start').length, 1);
+  assert.ok(f.errors.some(error => hostErrorDetails(error).nodes.some(node =>
+    node.message === original.message && node.stack === original.stack)),
+  'Owner diagnostics must retain the original confirmation delivery exception');
 });
 
 test('a checkmark accepted during delivery stays accepted if later delivery work fails', async t => {
