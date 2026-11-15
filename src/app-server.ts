@@ -88,7 +88,7 @@ export class AppServer {
               }
             } catch (error) {
               failure = new PublicError('Codex confirmation failed before a decision could be delivered. '
-                + 'No user decline was received. ' + errorMessage(error, 'Confirmation handling failed'));
+                + 'No user decline was received. ' + errorMessage(error, 'Confirmation handling failed'), { cause: error });
             }
             if (entry.controller.signal.aborted || this.closing || this.failure) return;
             this.incoming.delete(message.id);

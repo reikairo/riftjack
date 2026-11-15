@@ -5,6 +5,12 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Codex confirmation failure details
+
+- When confirmation handling fails, owner diagnostics retain the original
+  exception and stack. The response to Codex still contains only the public
+  summary and does not invent a human refusal.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
