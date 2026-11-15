@@ -1,4 +1,4 @@
-import { configureOwnerDiagnostics, diagnosticOperation } from '../src/diagnostics.js';
+import { configureHostDiagnostics, configureOwnerDiagnostics, diagnosticOperation } from '../src/diagnostics.js';
 import { hostErrorDetails } from '../src/host-diagnostics.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -196,4 +196,39 @@ test('audio subprocess diagnostics are bounded and cancellation is not reported 
   controller.abort(new Error('requested cancellation'));
   await assert.rejects(f.transcriber.transcribe(f.file, controller.signal), error => error === controller.signal.reason);
   assert.deepEqual(records, []);
+});
+
+test('missing optional audio model retains the filesystem cause while configuration stays usable', t => {
+  const f = fixture(t), missing = join(f.root, 'missing-model');
+  const config = loadConfig({ MATRIX_HOMESERVER: 'https://matrix.test', MATRIX_OWNER_ID: '@alice:test',
+    RIFTJACK_WORKSPACE: process.cwd(), AUDIO_TRANSCRIBE_MODEL: missing });
+  assert.equal(config.audioTranscription, undefined);
+  const error = config.audioTranscriptionError;
+  const details = hostErrorDetails(error);
+  assert.ok(details.nodes.some(node => node.code === 'ENOENT'));
+  assert.ok(JSON.stringify(details).includes(missing));
+  assert.ok(!config.audioTranscriptionWarning!.includes(missing));
+});
+
+test('audio configuration cause reaches the host journal and owner warning once', async t => {
+  const f = fixture(t), directory = join(f.root, 'diagnostics');
+  configureHostDiagnostics(directory);
+  let genericNotices = 0;
+  configureOwnerDiagnostics(() => { genericNotices++; });
+  t.after(() => { configureHostDiagnostics(undefined); configureOwnerDiagnostics(undefined); });
+  const original = Object.assign(new Error('synthetic configuration failure'), { code: 'ENOENT' });
+  const warnings = new AudioConfigurationWarnings(), sent: string[] = [];
+  warnings.add('Audio is disabled', original);
+  warnings.add('Audio is disabled', original);
+  await warnings.deliver([{ allowed: async () => false, send: async text => { sent.push(text); } }]);
+  assert.equal(sent.length, 0);
+  await warnings.deliver([{ allowed: async () => true, send: async text => { sent.push(text); } }]);
+  await warnings.deliver([{ allowed: async () => true, send: async text => { sent.push(text); } }]);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /synthetic configuration failure/);
+  assert.equal(genericNotices, 0);
+  const records = readFileSync(join(directory, 'errors.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(records.length, 1);
+  assert.equal(records[0].operation, 'audio.configuration');
+  assert.match(JSON.stringify(records[0].errorDetails), /synthetic configuration failure/);
 });
