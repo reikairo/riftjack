@@ -5,6 +5,12 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Workspace failure diagnostics
+
+- Workspace lookup, access and creation failures retain filesystem error codes
+  in public summaries and the original exception in owner diagnostics. This
+  distinguishes missing folders, permissions and symbolic-link loops.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
