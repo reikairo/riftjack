@@ -5,6 +5,12 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Pi startup diagnostics
+
+- Pi version checks, process startup and input-pipe failures preserve the original
+  exception for owner diagnostics and expose available system or exit codes in
+  public summaries. Task cancellation keeps its original reason.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
