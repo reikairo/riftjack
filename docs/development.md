@@ -112,12 +112,20 @@ connector never reads or writes note content, grants filesystem access, or
 asserts that a note was actually saved. Read-only agents must respect their
 write restriction. Notes can refer to existing personal memory, but are not
 new instructions or authorization and should stay out of project commits.
+Preserve details that would be costly to lose: constraints, reasons for
+decisions, unresolved questions, evidence and operation IDs, and memory
+references. A note is not a snapshot to resume from: it may be saved well
+before compaction, become stale, or never be saved. Keep current task records
+up to date as work progresses, independently of these reminders.
 Separate backend/session identifiers give separate paths; resetting a session
 does not adopt the previous session's note. Files remain until the agent or
 human removes them. A shared workspace is not filesystem privacy isolation.
 
-After compaction, the adapter asks the agent to read its note if present,
-check freshness, and resume the existing task. Claude uses a synchronous
+After compaction, the adapter asks the agent to read its note if present within
+its memory access boundaries, reconcile it with current task records, newer
+messages and verified action results, and then choose the next step. A note
+alone is not a reason to repeat an action. If it is absent, the agent uses the
+available conversation and current records. Claude uses a synchronous
 `SessionStart` hook matching `compact`: its `additionalContext` reaches the
 first model request after compaction. The hook only constructs the note path;
 it does not read memory files or grant permissions. Memory references belong
