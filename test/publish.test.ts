@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, existsSync } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -183,7 +183,15 @@ test('report-only CLI emits structured metadata, never pushes and refuses overwr
   assert.equal(metadata.head, f.head); assert.equal(metadata.published, false);
   assert.equal(metadata.output, output); assert.match(metadata.sha256, /^[a-f0-9]{64}$/);
   assert.match(readFileSync(output, 'utf8'), /Publication review/);
-  assert.throws(() => execFileSync(process.execPath, args, { stdio: 'pipe' }));
+  const before = readFileSync(output, 'utf8');
+  const failed = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  assert.equal(failed.status, 1);
+  assert.equal(failed.stdout, '');
+  const diagnostic = JSON.parse(failed.stderr.trim().split('\n').at(-1)!);
+  assert.equal(diagnostic.operation, 'publish.prepare');
+  assert.ok(diagnostic.errorDetails.nodes.some((node: { code?: string }) => node.code === 'EEXIST'));
+  assert.ok(failed.stderr.includes(output));
+  assert.equal(readFileSync(output, 'utf8'), before);
   assert.equal(f.remoteHead(), f.base);
 });
 
@@ -433,4 +441,14 @@ test('explicit review base ignores a changing destination default branch', async
   f.git('push', 'origin', f.head + ':refs/heads/main');
   await pushReviewed(r, signal());
   assert.equal(f.tip(), f.rebased);
+});
+
+test('report-only CLI retains the malformed request parser cause on stderr', () => {
+  const failed = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/prepare-publish.mts',
+    '--workspace', process.cwd(), '--request', 'invalid-request-json', '--output', 'unused-review.html'], { encoding: 'utf8' });
+  assert.equal(failed.status, 1);
+  assert.equal(failed.stdout, '');
+  assert.match(failed.stderr, /--request must contain a JSON object/);
+  const diagnostic = JSON.parse(failed.stderr.trim().split('\n').at(-1)!);
+  assert.ok(diagnostic.errorDetails.nodes.some((node: { name?: string }) => node.name === 'SyntaxError'));
 });
