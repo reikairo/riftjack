@@ -22,6 +22,10 @@
 - Pi tool connection failures now include the HTTP status or numeric JSON-RPC
   error code during discovery and execution, without copying response bodies.
 
+- Rollback prepares and verifies replacement code before moving live files. If a
+  filesystem operation fails during replacement, already moved files are restored.
+  If recovery also fails, both errors and recovery directories are retained.
+
 These notes describe user-visible changes. Startup notices link to this file at
 the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
