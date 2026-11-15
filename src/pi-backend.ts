@@ -29,9 +29,9 @@ export async function checkPi(config: Config, signal: AbortSignal): Promise<void
       cwd: config.workspace, env: piEnvironment(), signal, timeout: 15000, maxBuffer: 4096,
     });
     output = result.stdout.trim();
-  } catch {
+  } catch (cause) {
     signal.throwIfAborted();
-    throw new PublicError('Could not start Pi. Install @earendil-works/pi-coding-agent 1.4.x and set PI_PATH if needed.');
+    throw new PublicError('Could not start Pi. Install @earendil-works/pi-coding-agent 1.4.x and set PI_PATH if needed.', { cause });
   }
   const version = /^(?:pi\s+)?(\d+)\.(\d+)\.(\d+)$/.exec(output);
   if (!version || Number(version[1]) !== 1 || Number(version[2]) < 4) {
@@ -104,8 +104,8 @@ export function createPiBackend(configuration: Config | (() => Config), state: S
         signal.addEventListener('abort', abort, { once: true });
         const write = (record: object) => { if (!child.stdin.destroyed) child.stdin.write(JSON.stringify(record) + '\n'); };
         const startup = setTimeout(() => fail(new PublicError('Pi RPC initialization timed out. Install a compatible Pi version.')), 30000);
-        child.once('error', () => fail(new PublicError('Could not start Pi. Install Pi and set PI_PATH if needed; run /login on the host.')));
-        child.stdin.on('error', () => { if (!completed) fail(new PublicError('Pi closed its input unexpectedly.')); });
+        child.once('error', cause => fail(new PublicError('Could not start Pi. Install Pi and set PI_PATH if needed; run /login on the host.', { cause })));
+        child.stdin.on('error', cause => { if (!completed) fail(new PublicError('Pi closed its input unexpectedly.', { cause })); });
         child.stderr.resume(); // Do not forward credentials or prompts from CLI diagnostics.
         const consume = (record: any) => {
           if (completed || failed) return;

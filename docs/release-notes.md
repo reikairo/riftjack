@@ -23,6 +23,12 @@ between the previous successful startup and the current one, including rollbacks
   in public summaries and the original exception in owner diagnostics. This
   distinguishes missing folders, permissions and symbolic-link loops.
 
+## Pi startup diagnostics
+
+- Pi version checks, process startup and input-pipe failures preserve the original
+  exception for owner diagnostics and expose available system or exit codes in
+  public summaries. Task cancellation keeps its original reason.
+
 ## Separate diagram tools and persistent results
 
 - `render_diagram` accepts `xml` and an optional `page`; `extract_diagram` accepts
