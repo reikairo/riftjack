@@ -46,6 +46,7 @@ import { inlineCode, markdownText, managerBotList } from './manager-format.js';
 import { createMatrixUser, parseUserCreation } from './matrix-users.js';
 import { isPrivateRoom } from './private-room.js';
 import { PeerDiscovery } from './peer-discovery.js';
+import { SharedBacklog } from './shared-backlog.js';
 import { ConversationLinks, mentionText } from './conversation-links.js';
 import { sendConfirmation } from './confirmation-message.js';
 import { createBackend } from './backends.js';
@@ -172,6 +173,9 @@ async function main() {
   const githubLifetime = new AbortController();
   const githubTimer = setInterval(() => { for (const [bot, pump] of githubPumps) void diagnosticOperation({ operation: 'github.pump', bot }, pump).catch(error => diagnostics(error, 'github.pump', bot)); }, 2000);
   githubTimer.unref();
+  const backlogPumps = new Map<string, SharedBacklog>();
+  const backlogTimer = setInterval(() => { for (const [bot, pump] of backlogPumps) void diagnosticOperation({ operation: 'shared.backlog', bot }, () => pump.pump()).catch(error => diagnostics(error, 'shared.backlog', bot)); }, 1000);
+  backlogTimer.unref();
   const backgroundPumps = new Map<string, () => Promise<void>>();
   const backgroundTimer = setInterval(() => { for (const [bot, pump] of backgroundPumps) void diagnosticOperation({ operation: 'background.pump', bot }, pump).catch(error => diagnostics(error, 'background.pump', bot)); }, 1000);
   backgroundTimer.unref();
@@ -215,7 +219,7 @@ async function main() {
     clearInterval(diagnosticTimer);
     configureOwnerDiagnostics(undefined);
     clearInterval(workerTimer); clearInterval(discoveryTimer);
-    clearInterval(backgroundTimer); clearInterval(githubTimer); githubLifetime.abort();
+    clearInterval(backlogTimer); clearInterval(backgroundTimer); clearInterval(githubTimer); githubLifetime.abort();
     let failed = false;
     const stop = async (component: string, action: () => unknown) => {
       try { await action(); }
@@ -694,6 +698,13 @@ async function main() {
     client.on('room.failed_decryption', () => console.warn(account.name + ': message could not be decrypted. Check device trust and key sharing in Element.'));
     let online = false;
     clients.set(account.userId, { client, bridge, privateRoom });
+    if (linkedAgent) backlogPumps.set(account.userId, new SharedBacklog(links, account.userId, {
+      idle: () => online && !starting && !stopping && !restart.pending && clients.has(account.userId) &&
+        !bridge.busy && !bridge.pendingTurns,
+      deliver: (room, event, session, admitted, ready) => bridge instanceof Bridge
+        ? bridge.resumeBackground(room, event, session, admitted, ready)
+        : bridge.resumeBacklog(room, event, session, admitted, ready),
+    }));
     if (background && bridge instanceof Bridge) {
       const codingBridge = bridge;
       if (github) githubPumps.set(account.userId, async () => {
@@ -778,7 +789,7 @@ async function main() {
     } catch (error) {
       const worker = workers.get(account.userId);
       clients.delete(account.userId); discoveries.delete(account.userId);
-      githubPumps.delete(account.userId); backgroundPumps.delete(account.userId);
+      githubPumps.delete(account.userId); backgroundPumps.delete(account.userId); backlogPumps.delete(account.userId);
       workers.delete(account.userId); workerServer.remove(account.userId);
       const cleanup = (component: string, stop: () => void) => {
         try { stop(); }

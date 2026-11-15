@@ -14,6 +14,17 @@ export class WorkerBridge {
     reactionTarget?: ReactionReader; links?: ConversationLinks; since?: number;
     service: WorkerService; state: State; reply: (room: string, event: MatrixEvent, text: string) => Promise<void> }) {}
   get busy() { return this.options.service.busy; }
+  get pendingTurns() { return this.options.queue.pending; }
+  async resumeBacklog(room: string, event: MatrixEvent, session: string, admitted: () => void, ready: () => boolean): Promise<boolean> {
+    const o = this.options;
+    const valid = () => !this.stopped && !this.busy && !this.pendingTurns && !!o.links &&
+      event.content?.[NOTICE] === 'shared-backlog' && o.authorized(event.sender!) &&
+      o.state.session(o.links.key(o.botId, room, event)).grok === session && ready();
+    if (!valid() || !(await o.privateRoom(room, event.sender!)) || !valid()) return false;
+    this.enqueue(room, event);
+    admitted();
+    return true;
+  }
   stop() { this.stopped = true; this.options.service.stop(); }
   revoke(sender: string) { this.options.queue.cancelWhere(task => task.event.sender === sender); }
   // Connector-owned notice, not a synthetic human request. Queueing is durable;

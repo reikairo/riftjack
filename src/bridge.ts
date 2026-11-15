@@ -32,7 +32,7 @@ import { splitToolConversation, type ToolConversation, type ToolContext } from '
 // timer or reaction feedback), so it is not presented as the human's words.
 export const AGENT_TRIGGER = 'riftjack.trigger', SERVICE = 'riftjack.service', REPLY = 'riftjack.reply', GRANT = 'riftjack.grant',
   NOTICE = 'riftjack.notice';
-export type Notice = 'background' | 'timer' | 'reaction' | 'restart';
+export type Notice = 'background' | 'timer' | 'reaction' | 'restart' | 'shared-backlog';
 export const RESTART_PROMPT = 'Riftjack restarted. Check current work and background tasks; continue if there is work to do.';
 export type MatrixEvent = {
   type?: string; event_id?: string; sender?: string; origin_server_ts?: number; room_id?: string;
@@ -703,7 +703,7 @@ export class Bridge {
         // answer: the text is dropped, attachments are still sent. Commands
         // always report their result.
         const peerTurn = !!responseEvent.content?.[AGENT_TRIGGER];
-        const quietNotice = ['restart', 'timer', 'background'].includes(responseEvent.content?.[NOTICE] as string);
+        const quietNotice = ['restart', 'timer', 'background', 'shared-backlog'].includes(responseEvent.content?.[NOTICE] as string);
         const quiet = (quietNotice || peerTurn || (!command && !!o.shared?.(room))) && (text.trim() === 'NO_REPLY' || (peerTurn && !text.trim()));
         if (!quiet || files.length) {
           // A mention wakes the peer, so it goes out only after everything else.
