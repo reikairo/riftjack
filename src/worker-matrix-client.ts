@@ -1,3 +1,4 @@
+import { EncryptedRoomEvent } from '@vector-im/matrix-bot-sdk';
 import { RateLimitedMatrixClient } from './rate-limited-matrix-client.js';
 
 type FailedDecryption = { room: string; event: string };
@@ -44,17 +45,29 @@ export class WorkerMatrixClient extends RateLimitedMatrixClient {
 
   private async retryFailedDecryptions(emit: (type: string, ...args: any[]) => Promise<any>) {
     const failures = await this.failedDecryptions();
-    const batch = failures.slice(0, RETRY_BATCH_SIZE), pending: FailedDecryption[] = [];
-    for (const item of batch) {
+    const pending: FailedDecryption[] = [];
+    let attempted = 0;
+    for (const item of failures.slice(0, RETRY_BATCH_SIZE)) {
+      let encrypted: any;
+      attempted++;
+      try {
+        encrypted = await this.getRawEvent(item.room, item.event);
+        if (!this.crypto || !await this.crypto.isRoomEncrypted(item.room)) { pending.push(item); continue; }
+      } catch {
+        // A transport cooldown applies to the batch, not fifty independent
+        // requests. Preserve unattempted entries and retry on a later sync.
+        pending.push(item); break;
+      }
+      if (encrypted?.type !== 'm.room.encrypted' || encrypted.event_id !== item.event) { pending.push(item); continue; }
       let event: any;
       try {
-        const found = await this.getEvent(item.room, item.event);
-        event = found?.raw ?? found;
+        // Never treat a server-provided plaintext fallback as verified E2EE.
+        // The executor relies on decrypted_event as proof of real decryption.
+        event = (await this.crypto.decryptRoomEvent(new EncryptedRoomEvent(encrypted), item.room)).raw;
       } catch {
-        // Missing keys and temporary fetch failures remain durable for retry.
+        // Missing keys remain durable for retry after a later key delivery.
         pending.push(item); continue;
       }
-      if (!event || event.type === 'm.room.encrypted') { pending.push(item); continue; }
       // Use the ordinary admission path, including peer discovery before inbox.
       // Admission failures must escape, retaining the journal and sync token.
       await emit('room.decrypted_event', item.room, event);
@@ -62,8 +75,8 @@ export class WorkerMatrixClient extends RateLimitedMatrixClient {
       await emit('room.event', item.room, event);
     }
     // Rotate unavailable entries so one missing key cannot starve later events.
-    if (pending.length !== batch.length || failures.length > batch.length) {
-      await this.saveFailedDecryptions([...failures.slice(batch.length), ...pending]);
+    if (pending.length !== attempted || failures.length > attempted) {
+      await this.saveFailedDecryptions([...failures.slice(attempted), ...pending]);
     }
   }
 

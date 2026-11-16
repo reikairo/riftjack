@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SimpleFsStorageProvider } from '@vector-im/matrix-bot-sdk';
-import { WorkerMatrixClient } from '../src/worker-matrix-client.js';
+import { MessageMatrixClient } from '../src/message-matrix-client.js';
+import { bindExecutorInbox } from '../src/executor-main.js';
 
 const JOURNAL = 'riftjack.worker.failed_decryptions.v1';
 const room = '!room:test';
@@ -22,18 +23,19 @@ function storage(t: { after(fn: () => void): void }) {
   return Object.assign(new SimpleFsStorageProvider(join(dir, 'matrix.json')), { filePath: join(dir, 'matrix.json') });
 }
 
-class Client extends WorkerMatrixClient {
+class Client extends MessageMatrixClient {
   events = new Map<string, any>();
   fetched: string[] = [];
   raw: any = { next_batch: 'next' };
-  failDecrypt = true;
+  rawEvents = new Map<string, any>();
+  fetchFailure?: Error;
   constructor(store: SimpleFsStorageProvider) {
     super('https://matrix.test', 'synthetic-token', store);
     Object.defineProperty(this, 'crypto', { value: {
       updateSyncData: async () => {},
       isRoomEncrypted: async () => true,
       decryptRoomEvent: async (event: { raw: { event_id: string } }) => {
-        if (this.failDecrypt) throw new Error('room key unavailable');
+        if (!this.events.has(event.raw.event_id)) throw new Error('room key unavailable');
         return { raw: this.events.get(event.raw.event_id) };
       },
     } });
@@ -47,10 +49,10 @@ class Client extends WorkerMatrixClient {
   protected override async processSync(raw: any, emit: any) {
     try { await super.processSync(raw, emit); } finally { this.stop(); }
   }
-  override async getEvent(_room: string, id: string): Promise<any> {
+  override async getRawEvent(_room: string, id: string): Promise<any> {
     this.fetched.push(id);
-    if (!this.events.has(id)) throw new Error('room key unavailable');
-    return { raw: this.events.get(id) };
+    if (this.fetchFailure) throw this.fetchFailure;
+    return this.rawEvents.get(id) ?? encrypted(id);
   }
 }
 
@@ -176,4 +178,35 @@ test('a corrupt decryption journal fails closed instead of silently resetting pe
   store.storeValue(JOURNAL, JSON.stringify([{ room, event: 'invalid' }]));
   const client = new Client(store);
   await assert.rejects(client.batch({}), /Invalid failed-decryption journal/);
+});
+
+test('plaintext returned for a pending encrypted event never acquires verified-decryption authority', async t => {
+  const store = storage(t);
+  store.storeValue(JOURNAL, JSON.stringify([reference()]));
+  const client = new Client(store), observed: string[] = [];
+  client.rawEvents.set('$late', message());
+  client.events.set('$late', message());
+  client.on('room.decrypted_event', () => observed.push('decrypted'));
+  client.protocol = async () => { observed.push('protocol'); };
+  bindExecutorInbox(client, { receive: async () => { observed.push('executor'); } }, async () => true);
+  await client.run();
+  assert.deepEqual(observed, []);
+  assert.deepEqual(JSON.parse(store.readValue(JOURNAL)!), [reference()]);
+});
+
+test('a transport failure ends the retry batch and retains unattempted events', async t => {
+  const store = storage(t), references = [reference('$one'), reference('$two')];
+  store.storeValue(JOURNAL, JSON.stringify(references));
+  const client = new Client(store);
+  client.fetchFailure = new Error('homeserver rate-limit retry budget exhausted');
+  await client.batch({});
+  assert.deepEqual(client.fetched, ['$one']);
+  assert.deepEqual(JSON.parse(store.readValue(JOURNAL)!), [references[1], references[0]]);
+  client.fetchFailure = undefined;
+  client.events.set('$two', message('$two'));
+  const recovered: string[] = [];
+  client.on('room.message', (_room, event) => recovered.push(event.event_id));
+  await client.batch({});
+  assert.deepEqual(recovered, ['$two']);
+  assert.deepEqual(JSON.parse(store.readValue(JOURNAL)!), [references[0]]);
 });
