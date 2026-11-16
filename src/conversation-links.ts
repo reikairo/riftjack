@@ -11,7 +11,7 @@ import { PEER_CREDIT, MENTION_REPLY_LIMIT, peerMentionReminder } from './routing
 export { PEER_CREDIT, MENTION_REPLY_LIMIT } from './routing-instructions.js';
 
 type Agent = { bot: string; owner: string; home: string; session: string; thread?: string };
-type Room = { room: string; owner: string; bots: string[]; observers?: string[]; executors?: string[] };
+type Room = { room: string; owner: string; bots: string[]; observers?: string[]; executors?: string[]; addresses?: Record<string, string[]> };
 type Configuration = { version: 1; agents: Agent[]; rooms: Room[] };
 type Entry = { seq: number; id: string; sender: string; role: 'human' | 'agent' | 'participant'; body: string; type: string; reply?: string };
 type Cursor = { seq: number; offset: number };
@@ -82,6 +82,7 @@ export class ConversationLinks {
   private committed: string;
   private joined = new Map<string, Map<string, { id: string; at: number }>>();
   private deliveries = new Map<string, Delivery>();
+  private addresses = new Map<string, { bot: string; pattern: RegExp }[]>();
   constructor(file: string, private historyFile: string, private accounts: Account[], private state: State, owner: string) {
     this.config = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { version: 1, agents: [], rooms: [] };
     const c = this.config;
@@ -106,6 +107,23 @@ export class ConversationLinks {
           !room.bots.every(matrixUser) || (room.observers !== undefined && (!Array.isArray(room.observers) || !room.observers.every(matrixUser))) || !unique(roomMembers(room)) || c.agents.some(a => a.home === room.room) ||
           !room.bots.some(bot => c.agents.some(a => a.bot === bot))) throw new PublicError('A shared room requires the owner and distinct agents, including a linked local agent.');
       if (room.executors !== undefined && (!Array.isArray(room.executors) || !room.executors.every(id => matrixUser(id) && room.observers?.includes(id)) || !unique(room.executors))) throw new PublicError('Executors must be distinct configured observers.');
+      if (room.addresses !== undefined) {
+        if (!room.addresses || typeof room.addresses !== 'object' || Array.isArray(room.addresses) ||
+            Object.keys(room.addresses).length !== room.bots.length ||
+            !room.bots.every(bot => Object.hasOwn(room.addresses!, bot) && Array.isArray(room.addresses![bot]) && room.addresses![bot].length > 0)) {
+          throw new PublicError('Shared-room text addresses must give every configured bot distinct non-empty aliases.');
+        }
+        const aliases: { bot: string; value: string; pattern: RegExp }[] = [];
+        for (const [bot, values] of Object.entries(room.addresses)) for (const value of values) {
+          if (typeof value !== 'string' || value.trim() !== value || !value || value.length > 64 || /[\x00-\x1f\x7f]/u.test(value) ||
+              aliases.some(alias => alias.pattern.exec(value)?.[0].length === value.length)) {
+            throw new PublicError('Shared-room text addresses must give every configured bot distinct non-empty aliases.');
+          }
+          const literal = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          aliases.push({ bot, value, pattern: new RegExp('^' + literal + '(?=$|[\\s,:;.!?—-])', 'iu') });
+        }
+        this.addresses.set(room.room, aliases.sort((a, b) => b.value.length - a.value.length));
+      }
       for (const bot of room.bots) {
         if (accounts.some(a => a.userId === bot) && !c.agents.some(a => a.bot === bot)) throw new PublicError('Every local participant in a shared room must have an explicit session link.');
       }
@@ -483,7 +501,23 @@ export class ConversationLinks {
   addressed(bot: string, room: string, event: MatrixEvent): boolean {
     if (!this.room(bot, room) || event.type !== 'm.room.message') return true;
     const mentions = event.content?.['m.mentions']?.user_ids;
-    return !Array.isArray(mentions) || mentions.length === 0 || mentions.includes(bot);
+    if (Array.isArray(mentions) && mentions.length > 0) return mentions.includes(bot);
+    const aliases = this.addresses.get(room), shared = this.room(bot, room)!;
+    if (!aliases || event.sender !== shared.owner || event.content?.msgtype !== 'm.text' || typeof event.content.body !== 'string') return true;
+    const raw = event.content.body;
+    let rest = (event.content['m.relates_to']?.['m.in_reply_to']
+      ? raw.replace(/^>[^\n]*(?:\r?\n>[^\n]*)*\r?\n\r?\n/, '') : raw).trimStart();
+    const recipients = new Set<string>();
+    while (rest) {
+      const alias = aliases.find(alias => alias.pattern.test(rest));
+      if (!alias) break;
+      recipients.add(alias.bot);
+      rest = rest.slice(alias.pattern.exec(rest)![0].length).trimStart();
+      const separator = /^(?:,|&|and(?=\s)|и(?=\s))/iu.exec(rest)?.[0];
+      if (!separator) break;
+      rest = rest.slice(separator.length).trimStart();
+    }
+    return recipients.size === 0 || recipients.has(bot);
   }
   // The readiness check and prompt use the same packing rules and exclusions.
   private observations(bot: string, room: string, event: MatrixEvent, budget: number) {
