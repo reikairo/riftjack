@@ -70,3 +70,11 @@ export function connectionHint(details: string): string {
   if (/EPERM|EACCES/.test(details)) return 'Access was denied locally. Check connector network permissions and firewall rules.';
   return 'Check server connectivity and proxy settings.';
 }
+
+// Chat summaries stay bounded; full public messages and causes remain in the
+// diagnostic attachment and host journal.
+export function compactErrorMessage(error: unknown): string {
+  const text = errorMessage(error).replace(/ Local Claude diagnostic ID:[\s\S]*$/, '').replace(/\s+/g, ' ').trim();
+  const points = Array.from(text);
+  return points.length > 350 ? points.slice(0, 349).join('') + '…' : text;
+}

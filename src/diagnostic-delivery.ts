@@ -1,10 +1,11 @@
 import { diagnosticRecord, reportDiagnostic, withoutOwnerDiagnostics, type DiagnosticContext } from './diagnostics.js';
 import { hostErrorDetails } from './host-diagnostics.js';
+import { ownerReport, type OwnerReport } from './owner-diagnostics.js';
 
-type Group = { count: number; first: string; last: string; text: string; next: number };
+type Group = { count: number; first: string; last: string; text: string; summary: string; key: string; next: number };
 
 // Bounded in-memory delivery. The host journal remains the fallback across
-// process exits and uncertain Matrix sends; we never replay a multipart send.
+// process exits and uncertain Matrix sends; we never replay an uncertain send.
 export class DiagnosticDelivery {
   private groups = new Map<string, Group>();
   private busy = false;
@@ -14,13 +15,14 @@ export class DiagnosticDelivery {
 
   record(error: unknown, context: DiagnosticContext): void {
     const summary = diagnosticRecord(error, context);
-    const key = JSON.stringify([summary.operation, summary.bot, summary.endpoint, summary.error, summary.locations[0]]);
+    const report = ownerReport(error, context);
+    const key = report.key;
     const now = this.now();
     for (const [key, group] of this.groups) if (group !== this.inFlight && !group.count && group.next <= now) this.groups.delete(key);
     let group = this.groups.get(key);
     if (!group) {
       if (this.groups.size >= this.capacity) { this.dropped++; return; }
-      group = { count: 0, first: summary.time, last: summary.time, text: '', next: now };
+      group = { count: 0, first: summary.time, last: summary.time, text: '', summary: '', key, next: now };
       this.groups.set(key, group);
     }
     if (!group.count) group.first = summary.time;
@@ -30,9 +32,10 @@ export class DiagnosticDelivery {
     if (Buffer.byteLength(text) > 256 * 1024) text = JSON.stringify({ ...summary, ownerContext: context,
       errorDetails: { truncated: true, reason: 'record-size-limit' } }, null, 2);
     group.text = text;
+    group.summary = `${summary.operation}: ${report.summary}`;
   }
 
-  async flush(send: (body: string) => Promise<boolean>): Promise<void> {
+  async flush(send: (report: OwnerReport) => Promise<boolean>): Promise<void> {
     if (this.busy) return;
     const group = [...this.groups.values()].find(g => g.count && g.next <= this.now());
     if (!group) return;
@@ -47,7 +50,8 @@ export class DiagnosticDelivery {
     try {
       await withoutOwnerDiagnostics(async () => {
         try {
-          if (await send(text)) this.dropped -= dropped;
+          if (await send({ key: group.key, summary: group.summary
+            + (dropped ? ` Additional events omitted: ${dropped}; see the host journal.` : ''), details: text, count })) this.dropped -= dropped;
           else { group.count += count; group.first = first; } // No target yet; no send was attempted.
         } catch (error) {
           reportDiagnostic(error, { operation: 'diagnostics.deliver' });

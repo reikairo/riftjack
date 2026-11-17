@@ -385,3 +385,30 @@ for (const status of [403, 404, 429, 503]) {
 test('attachment download distinguishes an empty successful response from an HTTP error', async () => {
   await assert.rejects(readLimited(new Response(null), 100, signal()), /response has no body/);
 });
+
+test('diagnostic text uploads encrypted UTF-8 without plaintext outbox files', async t => {
+  const f = setup(t, 1024 * 1024);
+  const text = 'Diagnostic: Ошибка🙂\n' + 'private stack\n'.repeat(1000);
+  let checks = 0;
+  const content = await f.media.prepareText(text, 'diagnostic.txt', async () => { checks++; });
+  assert.equal(checks, 2); assert.equal(content.msgtype, 'm.file');
+  assert.deepEqual(content.info, { mimetype: 'text/plain', size: Buffer.byteLength(text) });
+  assert.equal(f.uploads.length, 1); assert.ok(!f.uploads[0].includes(Buffer.from('private stack')));
+  const file = content.file as EncryptedFile;
+  const encrypted = new EncryptedAttachment(f.uploads[0], JSON.stringify(file));
+  assert.equal(Buffer.from(Attachment.decrypt(encrypted)).toString('utf8'), text);
+  assert.deepEqual(readdirSync(f.dir), []);
+});
+
+test('diagnostic upload respects size and access limits before exposing a file', async t => {
+  const f = setup(t, 100);
+  await assert.rejects(f.media.prepareText('x'.repeat(101), 'diagnostic.txt', async () => {}), /size limit/);
+  assert.equal(f.fetches(), 0);
+  await assert.rejects(f.media.prepareText('details', 'diagnostic.txt', async () => { throw new Error('revoked'); }), /revoked/);
+  assert.equal(f.fetches(), 0);
+  let checks = 0;
+  await assert.rejects(f.media.prepareText('details', 'diagnostic.txt', async () => {
+    if (++checks === 2) throw new Error('revoked after upload');
+  }), /revoked after upload/);
+  assert.equal(f.uploads.length, 1); assert.equal(f.messages.length, 0);
+});

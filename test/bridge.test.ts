@@ -11,7 +11,7 @@ import { RestartController, RESTART_EXIT_CODE } from '../src/restart.js';
 import { Accounts, provision } from '../src/accounts.js';
 import { parseProfileRequest, resolveProfileTarget } from '../src/bot-profile.js';
 import { loadConfig } from '../src/config.js';
-import { errorMessage, OwnerDiagnosticError } from '../src/errors.js';
+import { errorMessage, OwnerDiagnosticError, PublicError } from '../src/errors.js';
 
 function event(body = 'hello', id = '$1'): MatrixEvent {
   return { event_id: id, sender: '@owner:test', type: 'm.room.message', origin_server_ts: 2000, content: { body, msgtype: 'm.text' } };
@@ -271,7 +271,7 @@ test('task diagnostics use a separate owner route and never replace the public f
     ownerDiagnostic: async (e, context) => { deliveries.push({ e, context }); throw new Error('delivery failed'); },
   });
   await f.bridge.handle('!shared:test', event());
-  assert.deepEqual(deliveries, [{ e: error, context: { room: '!shared:test', sender: '@owner:test' } }]);
+  assert.deepEqual(deliveries, [{ e: error, context: { room: '!shared:test', sender: '@owner:test', summary: 'Public failure' } }]);
   assert.equal(f.replies.at(-1), 'Public failure');
   assert.ok(f.replies.every(text => !text.includes('owner-only')));
   await f.bridge.handle('!guest:test', { ...event('hello', '$2'), sender: '@guest:test' });
@@ -1411,4 +1411,15 @@ test('owner cancellation does not send an additional error diagnostic', async t 
   const task = f.bridge.handle('!dm:test', event()); await ready.promise;
   await f.bridge.handle('!dm:test', event('!cancel', '$cancel')); await task;
   assert.equal(diagnostics, 0);
+});
+
+
+test('delivered owner report replaces the duplicate failure reply', async t => {
+  const summaries: string[] = [];
+  const f = fixture(t, 'claude', async () => { throw new PublicError('Failed. ' + 'detail '.repeat(200)); }, true, {
+    ownerDiagnostic: async (_error, context) => { summaries.push(context.summary); return true; },
+  });
+  await f.bridge.handle('!dm:test', event());
+  assert.equal(summaries.length, 1); assert.match(summaries[0], /^Failed\./); assert.ok(summaries[0].length <= 350);
+  assert.equal(f.replies.length, 0);
 });

@@ -239,6 +239,20 @@ export class MatrixMedia {
     return { path, name, size: data.length, mimetype, image: !!detectedImage };
   }
 
+  async prepareText(text: string, name: string, authorize: () => Promise<void>): Promise<Record<string, unknown>> {
+    await authorize();
+    const data = Buffer.from(text, 'utf8');
+    if (data.length > this.options.maxBytes) throw new PublicError('Diagnostic attachment exceeds the media size limit.');
+    const file = await uploadEncrypted((async function* () { yield data; })(), {
+      homeserver: this.options.homeserver, accessToken: this.options.accessToken, size: data.length,
+      timeoutMs: Math.min(this.options.uploadTimeoutMs ?? 60_000, 60_000),
+      signal: AbortSignal.timeout(60_000), fetcher: this.fetcher, report: this.options.reportUpload,
+    });
+    await authorize();
+    return { msgtype: 'm.file', body: safeName(name), filename: safeName(name),
+      info: { mimetype: 'text/plain', size: data.length }, file };
+  }
+
   async prepareAttachment(file: OutgoingAttachment, signal: AbortSignal, authorize: () => Promise<void>): Promise<Record<string, unknown>> {
     signal.throwIfAborted();
     await authorize();

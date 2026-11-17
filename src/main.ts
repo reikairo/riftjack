@@ -16,7 +16,7 @@ import { GitHubSubscriptions, githubReader, loadGitHubPolicies } from './github-
 import { linkedRoomMessages, roomMessageDelivery } from './room-messages.js';
 import { sendCompactionNotice } from './compaction-notices.js';
 import { DiagnosticDelivery } from './diagnostic-delivery.js';
-import { sendOwnerDiagnostic, sendOwnerDiagnosticText } from './owner-diagnostics.js';
+import { OwnerDiagnosticDelivery } from './owner-diagnostics.js';
 import { withEngineSettings } from './engine-settings.js';
 import { parseBotSettingsRequest, manageBotSettings, showBotOptions } from './bot-settings.js';
 import { BackgroundTasks } from './background-tasks.js';
@@ -162,7 +162,7 @@ async function main() {
   const state = new State(join(config.dataDir, 'sessions.json'));
   const links = new ConversationLinks(join(config.dataDir, 'conversation-links.json'),
     join(config.dataDir, 'shared-room-history.json'), accounts.list(), state, access.owner);
-  const clients = new Map<string, { client: MatrixClient; bridge: Bridge | WorkerBridge; privateRoom: (room: string, sender: string) => Promise<boolean> }>();
+  const clients = new Map<string, { client: MatrixClient; bridge: Bridge | WorkerBridge; ownerDiagnostics: OwnerDiagnosticDelivery; privateRoom: (room: string, sender: string) => Promise<boolean> }>();
   const workerServer = new WorkerServer(undefined, () => startupVersion.releaseNotes);
   const workers = new Map<string, WorkerService>();
   const discoveries = new Map<string, PeerDiscovery>();
@@ -192,7 +192,7 @@ async function main() {
   configureOwnerDiagnostics((error, context) => diagnosticDelivery.record(error, context));
   const diagnosticTimer = setInterval(() => {
     if (stopping || starting) return;
-    void diagnosticDelivery.flush(async body => {
+    void diagnosticDelivery.flush(async report => {
       const targets = accounts.list().sort((a, b) => Number(b.kind === 'manager') - Number(a.kind === 'manager'));
       for (const account of targets) {
         const started = clients.get(account.userId);
@@ -202,10 +202,7 @@ async function main() {
           sender => sender === access.owner && access.has(sender, account.kind === 'manager' ? undefined : account.userId));
         try { if (!await allowed(room)) continue; }
         catch (error) { diagnostics(error, 'diagnostics.access', account.userId); continue; }
-        await sendOwnerDiagnosticText(body, room, {
-          allowed, stopping: () => stopping,
-          send: (target, content) => started.client.sendMessage(target, content),
-        });
+        await started.ownerDiagnostics.send(report, room);
         return true;
       }
       return false;
@@ -289,6 +286,17 @@ async function main() {
     if (me.user_id !== account.userId || !me.device_id) throw new PublicError('Bot ' + account.userId + ' needs its own device-bound Matrix access token.');
     const authorized = (sender: string) => access.has(sender, account.kind === 'manager' ? undefined : account.userId);
     const linkedAgent = links.agent(account.userId);
+    const ownerDiagnostics = new OwnerDiagnosticDelivery({
+      allowed: target => isPrivateRoom(client, target, account.userId, access.owner,
+        sender => sender === access.owner && authorized(sender)),
+      stopping: () => stopping || restart.pending,
+      prepare: (text, name, authorize) => media.prepareText(text, name, authorize),
+      send: (target, content) => client.sendMessage(target, content),
+      react: (target, eventId, key) => client.sendRawEvent(target, 'm.reaction', {
+        'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key }, 'm.mentions': {}, [SERVICE]: true,
+      }),
+      remove: (target, eventId) => client.redactEvent(target, eventId),
+    });
     const since = recoverMessages || account.kind === 'grok' ? state.messageSince(account.userId, Date.now()) : Date.now();
     if (client instanceof MessageMatrixClient) client.history = { since,
       heads: () => state.roomHeads(account.userId), save: heads => state.saveRoomHeads(account.userId, heads) };
@@ -444,12 +452,12 @@ async function main() {
       botId: me.user_id, isAuthorized: authorized, kind: account.kind, isPrivateRoom: privateRoom, reactionTarget,
       owner: access.owner, isStopping: () => stopping || restart.pending, restart: (reply, target, scope) => restart.request(reply, target, scope),
       steer: backend.steer,
-      ownerDiagnostic: (error, { room, sender }) => sendOwnerDiagnostic(error, sender, access.owner,
-        linkedAgent?.home ?? room, {
-          allowed: target => isPrivateRoom(client, target, account.userId, access.owner, authorized),
-          stopping: () => stopping,
-          send: (target, content) => client.sendMessage(target, content),
-        }, { operation: 'task.failure', bot: account.userId }),
+      ownerDiagnostic: async (error, { room, sender, summary }) => {
+        const target = linkedAgent?.home ?? room;
+        const delivered = await ownerDiagnostics.task(error, sender, access.owner, target,
+          { operation: 'task.failure', bot: account.userId }, summary);
+        return delivered && target === room;
+      },
       compactionRoom: linkedAgent?.home,
       compaction: (phase, { room, sender }) => sendCompactionNotice(phase, room, {
           // Use the strict two-person check here, not privateRoom which also
@@ -697,7 +705,7 @@ async function main() {
     });
     client.on('room.failed_decryption', () => console.warn(account.name + ': message could not be decrypted. Check device trust and key sharing in Element.'));
     let online = false;
-    clients.set(account.userId, { client, bridge, privateRoom });
+    clients.set(account.userId, { client, bridge, privateRoom, ownerDiagnostics });
     if (linkedAgent) backlogPumps.set(account.userId, new SharedBacklog(links, account.userId, {
       idle: () => online && !starting && !stopping && !restart.pending && clients.has(account.userId) &&
         !bridge.busy && !bridge.pendingTurns,
@@ -830,12 +838,7 @@ async function main() {
             await isPrivateRoom(client, room, account.userId, access.owner,
               sender => sender === access.owner && access.has(sender, account.kind === 'manager' ? undefined : account.userId)) &&
             !stopping && !restart.pending,
-          send: (body: string) => sendOwnerDiagnosticText(body, room, {
-            allowed: target => isPrivateRoom(client, target, account.userId, access.owner,
-              sender => sender === access.owner && access.has(sender, account.kind === 'manager' ? undefined : account.userId)),
-            stopping: () => stopping || restart.pending,
-            send: (target, content) => client.sendMessage(target, content),
-          }),
+          send: (body: string) => started.ownerDiagnostics.text(body, room),
         }];
       }));
       await restartNotice.deliver({

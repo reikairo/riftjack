@@ -2,13 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DiagnosticDelivery } from '../src/diagnostic-delivery.js';
 import { configureOwnerDiagnostics, diagnosticOperation, reportDiagnostic } from '../src/diagnostics.js';
-import { sendOwnerDiagnosticText } from '../src/owner-diagnostics.js';
+import { OwnerDiagnosticDelivery, type OwnerReport } from '../src/owner-diagnostics.js';
 
 test('background reports retain original details, group repeats and send the latest event after cooldown', async () => {
   let now = 0;
   const queue = new DiagnosticDelivery(() => now, 100);
   const sent: string[] = [];
-  const send = async (body: string) => { sent.push(body); return true; };
+  const send = async (report: OwnerReport) => { sent.push(report.details); return true; };
   const error = { message: 'first timeout', code: 'ETIMEDOUT', stack: 'dependency stack' };
   queue.record(error, { operation: 'matrix.request', bot: '@bot:example.com' });
   await queue.flush(send);
@@ -35,7 +35,7 @@ test('delivery serializes flushes, retains unavailable targets and reports queue
   now = 100;
   queue.record(new Error('still overflow'), { operation: 'other' });
   release(false); await flush;
-  await queue.flush(async body => {
+  await queue.flush(async ({ details: body }) => {
     assert.match(body, /Occurrences: 1/); assert.match(body, /omitted from the delivery queue: 2/);
     assert.match(body, /first/); return true;
   });
@@ -71,9 +71,29 @@ test('direct task delivery suppresses recursive reports while preserving observe
   reportDiagnostic(failure, { operation: 'worker.http' });
   assert.equal(events[0].context.bot, '@bot:example.com');
   assert.equal(events[0].context.task, 'task-42');
-  await assert.rejects(sendOwnerDiagnosticText('diagnostic', 'home', {
+  await assert.rejects(new OwnerDiagnosticDelivery({
     allowed: async () => true, stopping: () => false,
+    prepare: async () => ({}), react: async () => '', remove: async () => {},
     send: async () => { reportDiagnostic(new Error('HTTP failure'), { operation: 'matrix.request' }); throw new Error('failed'); },
-  }));
+  }).text('diagnostic', 'home'));
   assert.equal(events.length, 1);
+});
+
+test('background batches update the existing report counter without more attachments', async () => {
+  let now = 0;
+  const queue = new DiagnosticDelivery(() => now, 100);
+  const events: any[] = [], reactions: string[] = [];
+  const delivery = new OwnerDiagnosticDelivery({
+    allowed: async () => true, stopping: () => false, prepare: async () => ({ msgtype: 'm.file' }),
+    send: async (_room, content) => { events.push(content); return '$report'; },
+    react: async (_room, event, key) => { assert.equal(event, '$report'); reactions.push(key); return '$reaction'; },
+    remove: async () => {},
+  }, () => now);
+  const send = async (report: OwnerReport) => { await delivery.send(report, 'home'); return true; };
+  queue.record({ code: 'ETIMEDOUT' }, { operation: 'sync' });
+  await queue.flush(send);
+  for (let i = 0; i < 10; i++) queue.record({ code: 'ETIMEDOUT' }, { operation: 'sync' });
+  await queue.flush(send); assert.equal(events.length, 1); assert.equal(reactions.length, 0);
+  now = 100; await queue.flush(send);
+  assert.equal(events.length, 1); assert.deepEqual(reactions, ['+10']);
 });

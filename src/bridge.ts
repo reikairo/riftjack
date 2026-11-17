@@ -13,7 +13,7 @@ import { roomMessageDelivery, type MessageRequest, type RoomMessageTool } from '
 import { attachmentDelivery, type SendAttachments } from './attachment-delivery.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
-import { errorMessage } from './errors.js';
+import { compactErrorMessage, errorMessage } from './errors.js';
 import type { RestartTarget } from './restart-notice.js';
 import type { RestartScope } from './restart.js';
 import { MANAGER_HELP } from './manager-help.js';
@@ -57,7 +57,7 @@ type Options = {
   releaseNotes?: () => string;
   queuedUpdateMessage?: string;
   owner?: string;
-  ownerDiagnostic?: (error: unknown, context: { room: string; sender: string }) => Promise<void>;
+  ownerDiagnostic?: (error: unknown, context: { room: string; sender: string; summary: string }) => Promise<boolean | void>;
   isStopping?: () => boolean;
   restart?: (reply: (text: string) => Promise<void>, target: RestartTarget, scope: RestartScope) => Promise<void>;
   reply: (room: string, event: MatrixEvent, text: string, markdown?: boolean, msgtype?: 'm.text' | 'm.notice', mentions?: string[], sent?: (eventId: string) => void, replyTo?: string) => Promise<void>;
@@ -747,15 +747,17 @@ export class Bridge {
       while (current.buffered) await current.steering;
       if (current.cancelled || current.sender === o.owner) withoutOwnerDiagnostics(() => o.report(error));
       else o.report(error);
-      if (!current.cancelled && current.sender === o.owner && o.isAuthorized(current.sender)) {
-        try { await o.ownerDiagnostic?.(error, { room, sender: current.sender }); }
-        catch (deliveryError) { withoutOwnerDiagnostics(() => o.report(deliveryError)); }
-      }
-      await reply(o.recoverMessages && !current.cancelled && current.inputIds.some(id => o.state.recoverable(o.botId).some(m => m.event.event_id === id))
-        ? errorMessage(error) + ' Your unfinished messages are saved. Restart Riftjack to resume them; actions already performed may need checking.'
+      const summary = o.recoverMessages && !current.cancelled && current.inputIds.some(id => o.state.recoverable(o.botId).some(m => m.event.event_id === id))
+        ? compactErrorMessage(error) + ' Your unfinished messages are saved. Restart Riftjack to resume them; actions already performed may need checking.'
         : controller.signal.aborted
         ? `Task ${timedOut ? 'timed out' : 'cancelled'}. Pending follow-ups were discarded. Changes already made are retained.`
-        : errorMessage(error) + (current.followups.length ? ' Pending follow-ups were not run; please resend them.' : ''));
+        : compactErrorMessage(error) + (current.followups.length ? ' Pending follow-ups were not run; please resend them.' : '');
+      let delivered = false;
+      if (!current.cancelled && current.sender === o.owner && o.isAuthorized(current.sender)) {
+        try { delivered = await o.ownerDiagnostic?.(error, { room, sender: current.sender, summary }) === true; }
+        catch (deliveryError) { withoutOwnerDiagnostics(() => o.report(deliveryError)); }
+      }
+      if (!delivered) await reply(summary);
     } finally {
       try {
         if (current.cancelled || !o.isAuthorized(current.sender)) {

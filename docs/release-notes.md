@@ -5,6 +5,15 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Compact error reports
+
+- Error details now arrive as encrypted text attachments with short captions,
+  instead of filling the chat with stack traces and JSON.
+- Repeated matching failures update a single `+N` reaction on the last report.
+  Every occurrence remains in the host journal.
+- Private task reports replace the duplicate failure reply. If an attachment
+  cannot be uploaded, a short notice points to the local journal.
+
 ## Shared-room backlog delivery
 
 - A full batch of unread shared-room observations now starts a turn when the

@@ -42,26 +42,38 @@ backup each retain at most 5 MiB. Records are bounded to 16 exception nodes,
 marked explicitly. A journal write failure leaves the console summary available
 and produces one `diagnostics.write` notice until storage recovers.
 
-For a failed task requested by the installation owner, Riftjack sends original
-error text, stacks and causes to the owner's encrypted two-person chat. The
-operation context accompanies ordinary errors. Shared replies and guest task
-replies retain the concise summary. Expected owner cancellations do not send
-an additional diagnostic. These service messages do not trigger agent turns.
-The local journal retains evidence when Matrix delivery fails; journal contents
-are not automatically exported to a room.
+For a failed task requested by the installation owner, Riftjack sends one encrypted
+text attachment with a short caption. The file contains the original error text,
+stacks, causes and operation context. Shared replies and guest task replies keep
+only the short summary. When the report is delivered in the requesting private
+chat, Riftjack omits the duplicate task-failure reply. Expected owner cancellations
+do not send a diagnostic. Service reports do not trigger agent turns.
 
-Background errors also reach the owner's encrypted two-person chat, preferring
+Consecutive failures of the same kind update one reaction under the last report:
+`+1`, `+2`, and so on count additional occurrences after that report. Each update
+removes the previous counter reaction. Different failures start a new report.
+Counters are scoped to the sending bot and private room, kept in memory for up
+to 100 rooms per bot, and expire after an hour without a matching report or on
+restart. Every occurrence still goes to the host journal; the attached file
+remains the diagnostic for the initial report, not a continuously updated log.
+
+Background errors use the same attachment and reaction delivery, preferring
 Bot Manager and otherwise an available bot home chat. The first report is sent
-on the next five-second delivery tick; matching operation/bot/endpoint/error
-summary/source-location groups send at most once every five minutes, with an
-occurrence count, first/last times and the latest diagnostic. Up to 50 groups are
-kept in memory; overflow is counted in the next report. Every event still goes
-to the local journal. Delivery checks room privacy again before every part.
-Delivery failures are logged locally and never recursively sent to Matrix.
-An uncertain multipart send is not automatically retried. A missing private
-room leaves the group pending for a later tick after its cooldown. Pending
-reports do not survive process exit: startup/fatal failures before a usable
-Matrix client and reports interrupted by shutdown remain in the host journal.
+on the next five-second tick. Matching operation/bot/endpoint/error/source groups
+are collected for five minutes between updates, with an occurrence count and
+first/last times. A batch adds its occurrence count to the reaction. Up to 50
+groups are kept in memory; overflow is counted in the next report. Reports from
+different bots or error categories are kept separate.
+
+Room privacy and owner access are checked before upload, message delivery,
+reaction creation and reaction removal. Diagnostic text is encrypted before
+upload and is not written to the agent outbox. If the upload fails or exceeds
+the media size limit, only a short notice directs the owner to the host journal;
+full diagnostics are never pasted into the chat as a fallback. Failed reactions
+are logged locally without another chat report. Uncertain sends are not retried
+automatically, and delivery failures are never recursively queued. Missing private
+rooms leave background groups pending until a later tick. Pending reports and
+reaction counters do not survive process exit.
 
 ### Codex task failures
 
@@ -74,8 +86,8 @@ console summaries. For tasks requested by the installation owner, Riftjack also 
 the full original Codex turn error (`message` and `additionalDetails`) or RPC
 error message to the owner's encrypted two-person chat. Linked agents use their
 configured home chat; other bots use the requesting chat only if it passes the
-same privacy check. Diagnostics are plain service messages, split without
-truncation, with access checked before each part. They do not trigger an agent
+same privacy check. Original diagnostics are sent as encrypted text attachments with short service captions,
+with access checked before upload and delivery. They do not trigger an agent
 turn. If private delivery fails, Riftjack keeps the short task failure and does
 not retry the diagnostic automatically or fall back to the shared room.
 
