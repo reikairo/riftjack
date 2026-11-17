@@ -5,6 +5,13 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Expected missing direct-chat data
+
+- Startup no longer sends error reports when a bot has no optional `m.direct`
+  account data. The SDK handles that response as an empty direct-chat list.
+  Other Matrix failures, including missing room data and failed writes, remain
+  visible.
+
 ## Compact error reports
 
 - Error details now arrive as encrypted text attachments with short captions,

@@ -1,10 +1,67 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ConsoleLogger, LogService, getRequestFn, setRequestFn } from '@vector-im/matrix-bot-sdk';
+import { ConsoleLogger, LogService, MatrixError, getRequestFn, setRequestFn } from '@vector-im/matrix-bot-sdk';
 import { diagnosticOperation, diagnosticRecord } from '../src/diagnostics.js';
 import { matrixSdkLogger } from '../src/matrix-sdk-logger.js';
 import { installMatrixTransport } from '../src/matrix-transport.js';
 import { RateLimitedMatrixClient } from '../src/rate-limited-matrix-client.js';
+
+test('missing optional m.direct remains a rejection but SDK DM loading completes without diagnostics', async t => {
+  const original = getRequestFn();
+  const records: ReturnType<typeof diagnosticRecord>[] = [];
+  const report = (error: unknown, details: Parameters<typeof diagnosticRecord>[1]) => { records.push(diagnosticRecord(error, details)); };
+  let calls = 0;
+  setRequestFn(async () => {
+    calls++;
+    return { statusCode: 404, headers: {}, body: {
+      bytes: async () => Buffer.from(JSON.stringify({ errcode: 'M_NOT_FOUND', error: 'Account data not found' })),
+    } } as any;
+  });
+  LogService.setLogger(matrixSdkLogger(report));
+  const transport = installMatrixTransport('auto', ['https://matrix.example'], undefined, report);
+  t.after(async () => { await transport.destroy(); setRequestFn(original); LogService.setLogger(new ConsoleLogger()); });
+  const client = new RateLimitedMatrixClient('https://matrix.example', 'private-token');
+  client.getUserId = async () => '@bot:example.com';
+  client.diagnosticReport = report;
+  await assert.rejects(client.getAccountData('m.direct'), error =>
+    error instanceof MatrixError && error.statusCode === 404 && error.errcode === 'M_NOT_FOUND');
+  assert.equal(calls, 1, 'absence does not trigger retries');
+  await client.dms.update();
+  assert.equal(calls, 2);
+  assert.equal(client.dms.isDm('!room:example.com'), false);
+  assert.deepEqual(records, [], 'transport, SDK logger and request reporter all stay quiet');
+});
+
+test('other Matrix failures still produce one diagnostic and reject the request', async t => {
+  const original = getRequestFn();
+  const records: ReturnType<typeof diagnosticRecord>[] = [];
+  const report = (error: unknown, details: Parameters<typeof diagnosticRecord>[1]) => { records.push(diagnosticRecord(error, details)); };
+  let status = 404, errcode = 'M_NOT_FOUND';
+  setRequestFn(async () => ({ statusCode: status, headers: {}, body: {
+    bytes: async () => Buffer.from(JSON.stringify({ errcode, error: 'fixture' })),
+  } }) as any);
+  LogService.setLogger(matrixSdkLogger(report));
+  const transport = installMatrixTransport('auto', ['https://matrix.example'], undefined, report);
+  t.after(async () => { await transport.destroy(); setRequestFn(original); LogService.setLogger(new ConsoleLogger()); });
+  const client = new RateLimitedMatrixClient('https://matrix.example', 'private-token');
+  client.diagnosticReport = report;
+  const direct = '/_matrix/client/v3/user/%40bot%3Aexample.com/account_data/m.direct';
+  for (const [method, endpoint, code, http] of [
+    ['PUT', direct, 'M_NOT_FOUND', 404],
+    ['GET', direct + '.other', 'M_NOT_FOUND', 404],
+    ['GET', '/_matrix/client/v3/user/bot/rooms/room/account_data/m.direct', 'M_NOT_FOUND', 404],
+    ['GET', '/_matrix/client/v3/rooms/room/state', 'M_NOT_FOUND', 404],
+    ['GET', direct, 'M_UNRECOGNIZED', 404],
+    ['GET', direct, 'M_FORBIDDEN', 403],
+    ['GET', direct, 'M_NOT_FOUND', 500],
+  ] as const) {
+    status = http; errcode = code; records.length = 0;
+    await assert.rejects(client.doRequest(method, endpoint), error =>
+      error instanceof MatrixError && error.statusCode === http && error.errcode === code);
+    assert.equal(records.length, 1, `${method} ${endpoint}: ${code}/${http}`);
+    assert.equal(records[0].operation, 'matrix.request');
+  }
+});
 
 for (const stage of ['headers', 'body', 'status'] as const) {
   test(`SDK ${stage} failure has one request diagnostic and later attempts remain visible`, async t => {

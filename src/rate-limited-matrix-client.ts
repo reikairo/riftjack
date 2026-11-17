@@ -1,4 +1,4 @@
-import { MatrixClient } from '@vector-im/matrix-bot-sdk';
+import { MatrixClient, MatrixError } from '@vector-im/matrix-bot-sdk';
 import { setTimeout as delay } from 'node:timers/promises';
 import { diagnosticOperation, matrixEndpoint, type reportDiagnostic } from './diagnostics.js';
 
@@ -37,7 +37,15 @@ export class RateLimitedMatrixClient extends MatrixClient {
         reportsMatrixErrors: !!this.diagnosticReport,
         method: args[0], endpoint: matrixEndpoint(args[1]), destination: 'homeserver', attempt }, () => this.requestOnce(...args));
     } catch (error) {
-      try { this.diagnosticReport?.(error, { operation: 'matrix.request' }); } catch { /* Keep the request failure. */ }
+      // The SDK reads optional m.direct data at startup and handles its absence
+      // as an empty DM map. Let that caller handle the original rejection without
+      // first reporting a failed task. Other account data and errors stay visible.
+      const missingDirect = args[0] === 'GET'
+        && /^\/_matrix\/client\/v3\/user\/[^/]+\/account_data\/m\.direct$/.test(args[1])
+        && error instanceof MatrixError && error.statusCode === 404 && error.errcode === 'M_NOT_FOUND';
+      if (!missingDirect) {
+        try { this.diagnosticReport?.(error, { operation: 'matrix.request' }); } catch { /* Keep the request failure. */ }
+      }
       throw error;
     }
   }

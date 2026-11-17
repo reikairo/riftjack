@@ -47,7 +47,9 @@ text attachment with a short caption. The file contains the original error text,
 stacks, causes and operation context. Shared replies and guest task replies keep
 only the short summary. When the report is delivered in the requesting private
 chat, Riftjack omits the duplicate task-failure reply. Expected owner cancellations
-do not send a diagnostic. Service reports do not trigger agent turns.
+do not send a diagnostic. A `404 M_NOT_FOUND` when reading optional `m.direct`
+account data also stays quiet: the SDK treats it as an empty direct-chat list.
+Other Matrix errors remain reportable. Service reports do not trigger agent turns.
 
 Consecutive failures of the same kind update one reaction under the last report:
 `+1`, `+2`, and so on count additional occurrences after that report. Each update
