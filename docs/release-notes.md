@@ -5,6 +5,12 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Typing indicator timeouts
+
+- A single typing update timeout is recorded in the host journal. The owner
+  receives a report if the next update in the same task also times out.
+  Message delivery failures are reported as before.
+
 ## GitHub polling and reminder counts
 
 - GitHub polling warnings survive restarts and temporary failures saving the

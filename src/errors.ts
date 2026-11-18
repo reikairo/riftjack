@@ -2,6 +2,13 @@
 // Owner diagnostics separately retain original exceptions and provider details.
 export class PublicError extends Error {}
 
+// Only the typing indicator's own deadline uses this reason.
+export class TypingUpdateTimeout extends DOMException {
+  constructor(readonly repeated: boolean) {
+    super('Typing update timed out', 'TimeoutError');
+  }
+}
+
 // Provider text stays separate from the public message used in rooms and console summaries.
 export class OwnerDiagnosticError extends PublicError {
   readonly #details: string;

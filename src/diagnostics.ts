@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { readdirSync } from 'node:fs';
-import { errorMessage, PublicError, safeErrorSummary } from './errors.js';
+import { errorMessage, PublicError, safeErrorSummary, TypingUpdateTimeout } from './errors.js';
 
 // Call sites supply operation names, never exception text, URLs or request data.
 export type DiagnosticContext = {
@@ -153,7 +153,12 @@ export function reportDiagnostic(error: unknown, details: DiagnosticContext): vo
       catch { /* Both host sinks unavailable. Never recurse into the journal. */ }
     }
   }
-  if (!ownerSuppressed.getStore()) try { ownerSink?.(error, ownerDiagnosticContext(error, details)); }
+  // The transport and the bot can both observe the same typing deadline.
+  // The bot reports consecutive timeouts once per attempt; the journal retains both observations.
+  if (!ownerSuppressed.getStore()) try {
+    if (error instanceof TypingUpdateTimeout && (!error.repeated || details.operation === 'matrix.http')) return;
+    ownerSink?.(error, ownerDiagnosticContext(error, details));
+  }
   catch { /* Diagnostic delivery cannot replace the reported failure. */ }
 }
 

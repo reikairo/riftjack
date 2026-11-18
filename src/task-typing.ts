@@ -1,4 +1,4 @@
-import { safeErrorSummary } from './errors.js';
+import { safeErrorSummary, TypingUpdateTimeout } from './errors.js';
 
 export type TypingMeasurement = {
   event: 'typing-update'; typing: boolean; status: 'success' | 'skipped' | 'failed' | 'timeout';
@@ -24,9 +24,10 @@ export function taskTyping(send: (typing: boolean, timeout: number, signal: Abor
   let deliveries = 0, resumeTimer: ReturnType<typeof setTimeout> | undefined;
   const active = () => !closed && !signal.aborted;
   let lastSuccess: number | undefined;
+  let previousTimedOut = false;
   const update = async (typing: boolean) => {
     const started = performance.now(), deadline = new AbortController();
-    const timeout = setTimeout(() => deadline.abort(new DOMException('Typing update timed out', 'TimeoutError')), REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => deadline.abort(new TypingUpdateTimeout(previousTimedOut)), REQUEST_TIMEOUT_MS);
     timeout.unref();
     let phase: TypingMeasurement['phase'] = 'authorize';
     const measurement = (status: TypingMeasurement['status'], error?: unknown) => {
@@ -44,9 +45,11 @@ export function taskTyping(send: (typing: boolean, timeout: number, signal: Abor
       // Abort the actual HTTP request; do not detach it with Promise.race.
       await send(typing, 30_000, deadline.signal);
       deadline.signal.throwIfAborted();
+      previousTimedOut = false;
       measurement('success'); lastSuccess = performance.now();
     } catch (error) {
-      measurement(deadline.signal.aborted ? 'timeout' : 'failed', error);
+      previousTimedOut = deadline.signal.aborted && error === deadline.signal.reason;
+      measurement(previousTimedOut ? 'timeout' : 'failed', error);
       report(error);
     } finally { clearTimeout(timeout); }
   };

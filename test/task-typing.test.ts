@@ -2,6 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { taskTyping, type TypingMeasurement } from '../src/task-typing.js';
 
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { configureHostDiagnostics, configureOwnerDiagnostics, reportDiagnostic } from '../src/diagnostics.js';
+import { installMatrixTransport } from '../src/matrix-transport.js';
+import { matrixTyping } from '../src/matrix-typing.js';
+
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 
 test('typing renews with expiry, clears once and stops its timer', async t => {
@@ -213,4 +220,53 @@ test('diagnostics omit untrusted error text and broken logging does not prevent 
   assert.equal(measurements[0].diagnostic, 'Error, HTTP 503');
   assert.equal(measurements[1].status, 'success');
   assert.equal(JSON.stringify(measurements).includes('secret'), false);
+});
+
+test('isolated typing deadlines stay in the journal and consecutive deadlines notify once per update', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  t.mock.method(console, 'error', () => {});
+  const directory = mkdtempSync(join(tmpdir(), 'typing-journal-'));
+  const owner: unknown[] = [];
+  configureHostDiagnostics(directory);
+  configureOwnerDiagnostics(error => owner.push(error));
+  t.after(() => {
+    configureHostDiagnostics(undefined);
+    configureOwnerDiagnostics(undefined);
+    rmSync(directory, { recursive: true, force: true });
+  });
+  let stalled = true;
+  const deliveryError = new DOMException('Message timed out', 'TimeoutError');
+  t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    if (url.includes('/send/')) throw deliveryError;
+    if (stalled) await new Promise<void>((_, reject) => {
+      init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+    });
+    return new Response();
+  });
+  const homeserver = 'https://matrix.example';
+  const transport = installMatrixTransport('auto', [homeserver], undefined, reportDiagnostic);
+  t.after(() => transport.destroy());
+  const send = matrixTyping({ homeserver, userId: '@bot:example', accessToken: 'test' }, transport.fetch);
+  const typing = taskTyping((value, timeout, signal) => send('!room:example', value, timeout, signal),
+    async () => true, error => reportDiagnostic(error, { operation: 'bot.operation' }), new AbortController().signal);
+  const tick = async (ms: number) => { t.mock.timers.tick(ms); await flush(); };
+  await flush();
+  await tick(8_000);
+  assert.equal(owner.length, 0);
+  const journal = readFileSync(join(directory, 'errors.jsonl'), 'utf8');
+  assert.match(journal, /Typing update timed out/);
+  assert.match(journal, /"endpoint":"typing"/);
+  await tick(2_000); await tick(8_000);
+  assert.equal(owner.length, 1);
+  stalled = false;
+  await tick(2_000); // successful renewal resets the streak
+  stalled = true;
+  await tick(10_000); await tick(8_000);
+  assert.equal(owner.length, 1);
+  stalled = false;
+  await assert.rejects(typing.message(() => transport.fetch(homeserver + '/_matrix/client/v3/rooms/r/send/m.room.message/1')),
+    error => error === deliveryError);
+  assert.equal(owner.length, 2);
+  assert.equal(owner[1], deliveryError);
+  await typing.close();
 });
