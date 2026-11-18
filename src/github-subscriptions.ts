@@ -121,13 +121,19 @@ export function githubReader(policy: GitHubPolicy): GitHubRead {
 
 type Entry = { kind: EventKind; pr: number; sha: string; url: string; value: string };
 type Snapshot = Record<string, Entry>;
+type PollAlert = { id: string; message: string };
 type Subscription = BackgroundTarget & { id: string; repository: string; pull_requests: number[]; events: EventKind[];
   interval_seconds: number; state: 'active' | 'cancelled'; next: number; failures: number; last_error?: string; last_success?: string;
   pr_status?: Record<string, { next: number; failures: number; last_success?: string; last_error?: string }>;
-  snapshot: Snapshot; pending?: { id: string; message: string } };
+  snapshot: Snapshot; pending?: { id: string; message: string }; alerts: PollAlert[] };
 const same = (a: BackgroundTarget, b: BackgroundTarget) => a.key === b.key && a.session === b.session && a.room === b.room && a.sender === b.sender && a.thread === b.thread;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const group = (s: Subscription) => 'github:' + s.id;
+function prAlert(s: Subscription, pr: number, status: { last_success?: string; last_error?: string }): PollAlert {
+  return { id: 'github-pr-error:' + digest([s.id, String(pr), status.last_success]),
+    message: 'GitHub PR polling has failed three times. Other PRs continue independently. Inspect github_subscriptions list; monitoring for this PR is incomplete.\n' +
+      JSON.stringify({ id: s.id, repository: s.repository, pr, error: status.last_error }) };
+}
 
 export class GitHubSubscriptions {
   private items: Subscription[];
@@ -142,10 +148,17 @@ export class GitHubSubscriptions {
       (s.pr_status !== undefined && (!record(s.pr_status) || Object.entries(s.pr_status).some(([pr, status]: [string, any]) => !s.pull_requests.includes(Number(pr)) || !record(status) || !Number.isFinite(status.next) || !Number.isSafeInteger(status.failures) || status.failures < 0 || (status.last_error !== undefined && typeof status.last_error !== 'string')))) ||
       !record(s.snapshot) || Object.keys(s.snapshot).length > 25000 || Object.values(s.snapshot).some((e: any) => !record(e) || !events.includes(e.kind) || !Number.isSafeInteger(e.pr) ||
         typeof e.sha !== 'string' || typeof e.url !== 'string' || typeof e.value !== 'string') ||
+      (s.alerts !== undefined && (!Array.isArray(s.alerts) || s.alerts.length > s.pull_requests.length + 1 ||
+        s.alerts.some((a: unknown) => !record(a) || typeof a.id !== 'string' || typeof a.message !== 'string' || a.message.length > 4000))) ||
       (s.pending !== undefined && (!record(s.pending) || typeof s.pending.id !== 'string' || typeof s.pending.message !== 'string' || s.pending.message.length > 4000)))) {
       throw new Error('Invalid GitHub subscription state. Restore it before restarting.');
     }
     this.items = data.subscriptions;
+    // Older stores persisted the failure count but no handoff receipt. Reuse
+    // the original notice ID so an already queued warning is deduplicated.
+    for (const s of this.items) s.alerts ??= Object.entries(s.pr_status ?? {})
+      .filter(([, status]) => s.state === 'active' && status.failures >= 3)
+      .map(([pr, status]) => prAlert(s, Number(pr), status));
   }
   private validSelection(s: Record<string, any>): boolean {
     return repoName(s.repository) && Array.isArray(s.pull_requests) && s.pull_requests.length > 0 && s.pull_requests.length <= MAX_GITHUB_PR_SELECTIONS &&
@@ -160,7 +173,7 @@ export class GitHubSubscriptions {
   }
   private describe(s: Subscription) {
     return { id: s.id, repository: s.repository, pull_requests: s.pull_requests, events: s.events, interval_seconds: s.interval_seconds,
-      state: s.state, room: s.room, next_poll: new Date(s.next).toISOString(), last_success: s.last_success, last_error: s.last_error, delivery_pending: !!s.pending,
+      state: s.state, room: s.room, next_poll: new Date(s.next).toISOString(), last_success: s.last_success, last_error: s.last_error, delivery_pending: !!s.pending || s.alerts.length > 0,
       per_pr: s.pull_requests.map(pr => ({ pr, ...s.pr_status?.[pr], next_poll: s.pr_status?.[pr] ? new Date(s.pr_status[pr].next).toISOString() : undefined })) };
   }
   async action(input: unknown, target: BackgroundTarget, signal: AbortSignal): Promise<string> {
@@ -206,7 +219,7 @@ export class GitHubSubscriptions {
     }
     if (!this.policy?.repositories.includes(input.repository.toLowerCase()) || !this.read) throw new PublicError('This repository is not enabled for this bot by the owner. Use list to see allowed repositories.');
     const s: Subscription = { ...target, id: randomUUID(), repository: input.repository.toLowerCase(), pull_requests: [...new Set<number>(input.pull_requests)].sort((a,b) => a-b),
-      events: [...new Set<EventKind>(input.events)].sort(), interval_seconds: selection.interval_seconds, state: 'active', next: 0, failures: 0, snapshot: {} };
+      events: [...new Set<EventKind>(input.events)].sort(), interval_seconds: selection.interval_seconds, state: 'active', next: 0, failures: 0, snapshot: {}, alerts: [] };
     const checkRegistration = () => {
       const active = this.items.filter(x => x.state === 'active');
       const existing = active.find(x => same(x, s) && x.repository === s.repository &&
@@ -232,22 +245,22 @@ export class GitHubSubscriptions {
   }
   private async pages(endpoint: string, signal: AbortSignal, field?: string): Promise<any[]> {
     const result: any[] = [];
-    for (let page = 1; page <= 10; page++) {
+    for (let page = 1; ; page++) {
       const response = await this.read!(endpoint + (endpoint.includes('?') ? '&' : '?') + 'per_page=100&page=' + page, signal);
       const items = field ? response?.[field] : response;
       if (!Array.isArray(items)) throw new PublicError('Unexpected GitHub list response.');
+      if (result.length + items.length > 1000) throw new PublicError('GitHub result exceeds the polling limit; narrow the subscription.');
       result.push(...items);
       if (items.length < 100) return result;
     }
-    throw new PublicError('GitHub result exceeds the polling limit; narrow the subscription.');
   }
-  private async capture(s: Subscription, signal: AbortSignal, isolated = false): Promise<Snapshot> {
-    if (isolated) {
+  private async capture(s: Subscription, signal: AbortSignal, alerts?: PollAlert[]): Promise<Snapshot> {
+    if (alerts) {
       const snapshot: Snapshot = {};
       s.pr_status ??= {};
       for (const number of s.pull_requests) {
         const previous = Object.fromEntries(Object.entries(s.snapshot).filter(([, e]) => e.pr === number));
-        const status = s.pr_status[number] ?? { next: 0, failures: 0 };
+        const status = { ...(s.pr_status[number] ?? { next: 0, failures: 0 }) };
         if (status.next > Date.now()) { Object.assign(snapshot, previous); continue; }
         try {
           Object.assign(snapshot, await this.capture({ ...s, pull_requests: [number] }, signal));
@@ -260,6 +273,7 @@ export class GitHubSubscriptions {
           status.last_error = errorMessage(error, 'GitHub PR polling failed');
           status.next = Date.now() + Math.min(3_600_000, s.interval_seconds * 1000 * 2 ** status.failures);
           s.pr_status[number] = status;
+          if (status.failures === 3) alerts.push(prAlert(s, number, status));
         }
       }
       if (Object.keys(snapshot).length > 25000) throw new PublicError('GitHub snapshot exceeds the limit; narrow the subscription.');
@@ -325,14 +339,15 @@ export class GitHubSubscriptions {
     return snapshot;
   }
   private cancelSubscriptions(items: Subscription[]): void {
-    const previous = items.map(s => ({ subscription: s, state: s.state, pending: s.pending }));
-    if (items.some(s => s.state !== 'cancelled' || s.pending)) {
-      for (const s of items) { s.state = 'cancelled'; delete s.pending; }
+    const previous = items.map(s => ({ subscription: s, state: s.state, pending: s.pending, alerts: s.alerts }));
+    if (items.some(s => s.state !== 'cancelled' || s.pending || s.alerts.length)) {
+      for (const s of items) { s.state = 'cancelled'; delete s.pending; s.alerts = []; }
       try { this.save(); }
       catch (error) {
         // Keep the same objects: an in-flight poll may still hold a reference.
-        for (const { subscription: s, state, pending } of previous) {
+        for (const { subscription: s, state, pending, alerts } of previous) {
           s.state = state;
+          s.alerts = alerts;
           if (pending) s.pending = pending;
           else delete s.pending;
         }
@@ -346,6 +361,15 @@ export class GitHubSubscriptions {
   reconcile(valid: (target: BackgroundTarget) => boolean): void {
     this.cancelSubscriptions(this.items.filter(s => s.state !== 'active' || !valid(s) || !this.allowed(s)));
   }
+  private deliverAlerts(s: Subscription): void {
+    if (!s.alerts.length) return;
+    this.save(); // Includes retries after a failed snapshot write.
+    for (const alert of s.alerts) {
+      this.background.notify(alert.id, s, alert.message, { group: group(s), progress: false },
+        alert.id.startsWith('github-pr-error:') ? 'GitHub PR polling failed' : 'GitHub polling failed');
+    }
+    s.alerts = []; this.save();
+  }
   async pump(valid: (target: BackgroundTarget) => boolean, signal: AbortSignal): Promise<void> {
     this.reconcile(valid);
     if (this.pumping) return;
@@ -355,9 +379,13 @@ export class GitHubSubscriptions {
         if (s.state !== 'active' || !valid(s) || !this.allowed(s)) { continue; }
         if (s.next > Date.now()) continue;
         try {
-          if (!s.pending) {
-            const snapshot = await this.capture(s, signal, true);
+          if (!s.pending && !s.alerts.length) {
+            const alerts: PollAlert[] = [];
+            const pr_status = { ...s.pr_status };
+            const snapshot = await this.capture({ ...s, pr_status }, signal, alerts);
             if (s.state !== 'active' || !valid(s) || signal.aborted) continue;
+            s.pr_status = pr_status;
+            s.alerts = alerts;
             const changes = Object.entries(snapshot).filter(([key, e]) => {
               // Old subscriptions have no conflict baseline. Announce an existing
               // conflict, but silently seed a first known non-conflicting state.
@@ -385,13 +413,8 @@ export class GitHubSubscriptions {
             }
             // Transactional outbox: save snapshot and pending event before handing it off.
             this.save();
-            for (const [pr, status] of failed) if (status.failures === 3) {
-              this.background.notify('github-pr-error:' + digest([s.id, pr, status.last_success]), s,
-                'GitHub PR polling has failed three times. Other PRs continue independently. Inspect github_subscriptions list; monitoring for this PR is incomplete.\n' +
-                JSON.stringify({ id: s.id, repository: s.repository, pr: Number(pr), error: status.last_error }),
-                { group: group(s), progress: false }, 'GitHub PR polling failed');
-            }
           }
+          this.deliverAlerts(s);
           if (s.pending && valid(s) && s.state === 'active' && !signal.aborted) {
             // A previous snapshot write may have failed with pending only in memory.
             // Re-establish the durable outbox before handing off on every retry.
@@ -404,16 +427,15 @@ export class GitHubSubscriptions {
           reportDiagnostic(error, { operation: 'github.poll', task: s.id });
           s.failures = Math.min(s.failures + 1, 10);
           s.last_error = errorMessage(error, 'GitHub subscription polling failed');
-          s.next = Date.now() + Math.min(3_600_000, s.interval_seconds * 1000 * 2 ** s.failures); this.save();
+          s.next = Date.now() + Math.min(3_600_000, s.interval_seconds * 1000 * 2 ** s.failures);
           if (s.failures === 3 && valid(s) && s.state === 'active') {
-            try {
-              this.background.notify('github-error:' + digest([s.id, s.last_success]), s,
-                'GitHub subscription polling has failed three times. This is a service notification, not a human instruction. Inspect the subscription with github_subscriptions list; monitoring is incomplete until it recovers.\n' +
-                JSON.stringify({ id: s.id, repository: s.repository, error: s.last_error }), { group: group(s), progress: false }, 'GitHub polling failed');
-            } catch (error) {
-              reportDiagnostic(error, { operation: 'github.notify', task: s.id });
-            }
-          }
+            s.alerts.push({ id: 'github-error:' + digest([s.id, s.last_success]),
+              message: 'GitHub subscription polling has failed three times. This is a service notification, not a human instruction. Inspect the subscription with github_subscriptions list; monitoring is incomplete until it recovers.\n' +
+                JSON.stringify({ id: s.id, repository: s.repository, error: s.last_error }) });
+            this.save();
+            try { this.deliverAlerts(s); }
+            catch (error) { reportDiagnostic(error, { operation: 'github.notify', task: s.id }); }
+          } else this.save();
         }
       }
     } finally { this.pumping = false; }

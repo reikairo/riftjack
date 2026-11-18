@@ -40,6 +40,20 @@ function wallClock(timezone: string) {
 const dayStart = (stamp: number) => Math.floor(stamp / 86_400_000) * 86_400_000;
 const endMinute = (s: CalendarSchedule) => s.end_time ? minutes(s.end_time) : Math.min(1440, minutes(s.time) + s.count! * s.interval_minutes!);
 
+function* calendarOccurrences(schedule: CalendarSchedule, date: number, wall: (stamp: number) => number) {
+  const start = minutes(schedule.time), step = schedule.interval_minutes ?? 1440;
+  const end = schedule.interval_minutes ? endMinute(schedule) : start + 1;
+  const probeTime = date + start * 60_000;
+  const offsets = [...new Set([-1, 0, 1].map(d => { const probe = probeTime + d * 86_400_000; return wall(probe) - probe; }))].sort((a, b) => b - a);
+  for (let minute = start; minute < end; minute += step) {
+    const wanted = date + minute * 60_000;
+    for (const offset of offsets) {
+      const stamp = wanted - offset;
+      if (offsets.length === 1 || wall(stamp) === wanted) { yield stamp; break; }
+    }
+  }
+}
+
 // Interval series use a persisted UTC anchor. Calendar series use wall time:
 // gaps are skipped, ambiguous times use only their first occurrence.
 export function nextReminder(schedule: CalendarSchedule, after: number): number;
@@ -52,18 +66,10 @@ export function nextReminder(schedule: ReminderSchedule, after: number): number 
     return schedule.count !== undefined && index >= schedule.count ? null : start + index * step;
   }
   const wall = wallClock(schedule.timezone), midnight = dayStart(wall(after));
-  const start = minutes(schedule.time), step = schedule.interval_minutes ?? 1440;
-  const end = schedule.interval_minutes ? endMinute(schedule) : start + 1;
   for (let day = 0; day < 15; day++) {
     const date = midnight + day * 86_400_000, weekday = new Date(date).getUTCDay() || 7;
     if (schedule.frequency === 'weekly' ? weekday !== schedule.weekday : schedule.weekdays && !schedule.weekdays.includes(weekday)) continue;
-    const probeTime = date + start * 60_000;
-    const offsets = new Set([-1, 0, 1].map(d => { const probe = probeTime + d * 86_400_000; return wall(probe) - probe; }));
-    for (let minute = start; minute < end; minute += step) {
-      const wanted = date + minute * 60_000;
-      const candidates = [...offsets].map(offset => wanted - offset).filter(stamp => wall(stamp) === wanted).sort((a, b) => a - b);
-      if (candidates.length && candidates[0] > after) return candidates[0];
-    }
+    for (const stamp of calendarOccurrences(schedule, date, wall)) if (stamp > after) return stamp;
   }
   throw new Error('Could not find the next reminder occurrence.');
 }
@@ -79,8 +85,10 @@ export function remainingOccurrences(schedule: ReminderSchedule, due: number, ex
   if (schedule.frequency === 'interval') return schedule.count === undefined ? undefined : exhausted ? 0 :
     Math.max(0, schedule.count - Math.round((due - Date.parse(schedule.start_at!)) / intervalMilliseconds(schedule)));
   if (!schedule.interval_minutes) return undefined;
-  const current = wallClock(schedule.timezone)(due);
-  return Math.max(0, Math.ceil((endMinute(schedule) - (current - dayStart(current)) / 60_000) / schedule.interval_minutes));
+  const wall = wallClock(schedule.timezone);
+  let remaining = 0;
+  for (const stamp of calendarOccurrences(schedule, dayStart(wall(due)), wall)) if (stamp >= due) remaining++;
+  return remaining;
 }
 export function scheduleDescription(s: ReminderSchedule): string {
   if (s.frequency === 'interval') return `every ${s.interval_seconds !== undefined ? `${s.interval_seconds} seconds` : `${s.interval_minutes} minutes`}, from ${s.start_at}${s.count ? `, ${s.count} scheduled occurrences` : ''}`;

@@ -52,6 +52,15 @@ test('calendar interval slots skip DST gaps without extending count and do not r
   assert.equal(next(s, '2026-10-25T00:30:00Z'), '2026-10-25T02:00:00.000Z');
 });
 
+test('remaining slots count only real occurrences in the local day', () => {
+  const spring: CalendarSchedule = { frequency: 'daily', time: '01:30', timezone: 'America/New_York', interval_minutes: 60, count: 3 };
+  assert.equal(remainingOccurrences(spring, Date.parse('2026-03-08T06:30Z')), 2); // 01:30 and 03:30
+  assert.equal(remainingOccurrences(spring, Date.parse('2026-03-08T07:30Z')), 1);
+  const fall: CalendarSchedule = { frequency: 'daily', time: '00:30', timezone: spring.timezone, interval_minutes: 60, end_time: '03:00' };
+  assert.equal(remainingOccurrences(fall, Date.parse('2026-11-01T04:30Z')), 3); // 01:30 counts once
+  assert.equal(remainingOccurrences(fall, Date.parse('2026-11-01T05:30Z')), 2);
+});
+
 test('series validation rejects ambiguous rules and unbounded daily windows', () => {
   const interval = { frequency: 'interval', interval_minutes: 10 };
   const calendar = { frequency: 'daily', time: '10:00', timezone: 'UTC', interval_minutes: 10, count: 6 };

@@ -251,6 +251,59 @@ test('partial pagination and a changing head leave the previous snapshot intact'
   assert.equal(f.stored().failures, 1);
 });
 
+for (const total of [999, 1000, 1001]) test(`polling a PR with ${total} reviews respects the 1000-item limit`, async t => {
+  const f = fixture(t);
+  const sub = new GitHubSubscriptions(f.path, f.policy, f.queue, async (endpoint, s) => {
+    if (!endpoint.includes('/reviews?')) return f.read(endpoint, s);
+    const page = Number(new URLSearchParams(endpoint.split('?')[1]).get('page'));
+    const offset = (page - 1) * 100;
+    return Array.from({ length: Math.min(100, total - offset) }, (_, i) => ({ id: offset + i, state: 'COMMENTED' }));
+  });
+  const registration = sub.action({ ...selection, events: ['reviews'] }, target, signal());
+  if (total > 1000) await assert.rejects(registration, /exceeds the polling limit/);
+  else {
+    await registration;
+    assert.equal(Object.keys(f.stored().snapshot).length, total);
+  }
+});
+
+test('a third-failure alert survives an unavailable inbox and both sides of a restart', async t => {
+  const f = fixture(t);
+  await f.subscriptions.action(selection, target, signal());
+  t.mock.method(console, 'error', () => {});
+  const offline = async () => { throw new Error('offline'); };
+  const sub = new GitHubSubscriptions(f.path, f.policy, f.queue, offline);
+  t.mock.method(f.queue, 'notify', () => { throw new Error('inbox unavailable'); }, { times: 1 });
+  for (let i = 0; i < 3; i++) {
+    t.mock.timers.tick(4_000_000); await sub.pump(() => true, signal());
+  }
+  assert.equal(f.stored().pr_status['1'].failures, 3);
+  assert.equal(f.notices().length, 0);
+  const beforeHandoff = readFileSync(f.path);
+  const resume = () => new GitHubSubscriptions(f.path, f.policy, new BackgroundTasks(f.inbox, f.root), f.read).pump(() => true, signal());
+  t.mock.timers.tick(4_000_000); await resume();
+  const alerts = () => f.notices(new BackgroundTasks(f.inbox, f.root));
+  assert.equal(alerts().length, 1); assert.match(alerts()[0].message, /failed three times/);
+  // The inbox accepted the notice, but the subscription still has the old outbox on disk.
+  writeFileSync(f.path, beforeHandoff);
+  await resume();
+  await resume(); // the recovered PR can now be polled successfully
+  assert.equal(alerts().length, 1); assert.equal(f.stored().pr_status['1'].failures, 0);
+
+  // An older connector could advance past three before recording the warning.
+  // Its existing inbox ID must still deduplicate a handoff after upgrading.
+  const legacy = JSON.parse(beforeHandoff.toString());
+  delete legacy.subscriptions[0].alerts;
+  legacy.subscriptions[0].pr_status['1'].failures = 5;
+  writeFileSync(f.path, JSON.stringify(legacy));
+  await resume();
+  assert.equal(alerts().length, 1);
+  rmSync(f.inbox); // same legacy subscription, but no warning reached the inbox
+  writeFileSync(f.path, JSON.stringify(legacy));
+  await resume();
+  assert.equal(alerts().length, 1); assert.match(alerts()[0].message, /failed three times/);
+});
+
 test('an outbox survives a full inbox and restart without losing or duplicating its notification', async t => {
   const f = fixture(t);
   await f.subscriptions.action(selection, target, signal());

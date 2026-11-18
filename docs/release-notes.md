@@ -5,6 +5,13 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## GitHub polling and reminder counts
+
+- GitHub polling warnings survive restarts and temporary failures saving the
+  notification. A subscription can read exactly 1,000 entries in a list.
+- Calendar reminder counts skip nonexistent local times during a clock change
+  and count a repeated local time once.
+
 ## Expected missing direct-chat data
 
 - Startup no longer sends error reports when a bot has no optional `m.direct`
