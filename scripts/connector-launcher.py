@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from errno import ENAMETOOLONG
 from dataclasses import dataclass
 
 
@@ -41,6 +42,17 @@ def role(process, node, root):
         return None
     if not args or os.path.basename(args[0]) != os.path.basename(node):
         return None
+    try:
+        return entry_role(args, root)
+    except OSError as error:
+        if error.errno != ENAMETOOLONG:
+            raise
+        # ps can flatten unrelated scripts and their long arguments into paths
+        # that the filesystem cannot possibly contain.
+        return None
+
+
+def entry_role(args, root):
     # Recognize the Node invocation, not a filename passed to an unrelated script
     # or embedded in -e/-p code. Only these startup options precede our entry point.
     options = ('--import', '--require', '-r', '--env-file', '--env-file-if-exists')
@@ -61,10 +73,10 @@ def role(process, node, root):
         else:
             break
     entry = ' '.join(args[index:])
-    if not entry or entry.startswith('-') or not (Path(root) / entry).is_file():
+    if not entry or entry.startswith('-'):
         return None
     for name in ('supervisor', 'main'):
-        if entry == f'src/{name}.ts' or entry.endswith(f'/src/{name}.ts'):
+        if (entry == f'src/{name}.ts' or entry.endswith(f'/src/{name}.ts')) and (Path(root) / entry).is_file():
             return name
     return None
 
