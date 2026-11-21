@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from errno import EACCES, ENAMETOOLONG
 from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('connector_launcher', Path(__file__).parents[1] / 'scripts/connector-launcher.py')
@@ -155,6 +156,24 @@ console.log('ready');
         for command in [f'node unrelated.js {entry}', 'node -e /code/src/main.ts', 'node --eval=/code/src/main.ts',
                         'node /code/src/main.ts --check-config', 'node /code/src/main.ts --bootstrap-codex']:
             self.assertIsNone(launcher.role(launcher.Process(123, 'now', command), 'node', self.root))
+
+    def test_unrelated_node_arguments_do_not_become_a_path(self):
+        process = launcher.Process(123, 'now', 'node unrelated.js ' + 'x' * 4096)
+        with patch.object(Path, 'is_file') as probe:
+            self.assertIsNone(launcher.role(process, 'node', self.root))
+        probe.assert_not_called()
+
+    def test_path_length_error_does_not_abort_process_inspection(self):
+        for command in ('node /long/src/main.ts', 'node --import /long src/main.ts'):
+            process = launcher.Process(123, 'now', command)
+            with self.subTest(command=command), patch.object(Path, 'is_file', side_effect=OSError(ENAMETOOLONG, 'long')):
+                self.assertIsNone(launcher.role(process, 'node', self.root))
+
+    def test_other_filesystem_errors_remain_fatal(self):
+        process = launcher.Process(123, 'now', 'node src/main.ts')
+        with patch.object(Path, 'is_file', side_effect=PermissionError(EACCES, 'denied')):
+            with self.assertRaises(PermissionError):
+                launcher.role(process, 'node', self.root)
 
     def test_foreground_releases_lock_before_wait_and_forwards_signal(self):
         child = Mock()
