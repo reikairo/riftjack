@@ -41,6 +41,7 @@ export function loadGitHubPolicies(path?: string, workspace?: string): GitHubPol
 export type GitHubRead = (endpoint: string, signal: AbortSignal) => Promise<any>;
 type RequestBudget = { tail: Promise<void>; notBefore: number; secondaryFailures: number };
 const GITHUB_REQUEST_TIMEOUT_SECONDS = 30;
+const githubTransportTimeout = /^(?:gh: )?Get "https:\/\/api\.github\.com\/[^"\r\n]*": (dial tcp \S+: (?:connect: (?:operation|connection) timed out|i\/o timeout)|net\/http: TLS handshake timeout)$/i;
 const requestBudgets = new Map<string, RequestBudget>();
 
 // Cancellation must not release a queued request's place before its predecessor
@@ -76,7 +77,7 @@ export function githubReader(policy: GitHubPolicy): GitHubRead {
         for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_HOST', 'GH_REPO']) delete env[key as keyof typeof env];
         const deadline = AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_SECONDS * 1000);
         execFile('gh', ['api', '--include', '--hostname', 'github.com', '--method', 'GET', '-H', 'Accept: application/vnd.github+json', endpoint],
-          { cwd: policy.ghConfigDir, env, signal: AbortSignal.any([signal, deadline]), maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+          { cwd: policy.ghConfigDir, env, signal: AbortSignal.any([signal, deadline]), maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
             const split = stdout.search(/\r?\n\r?\n/);
             const headers = split >= 0 ? stdout.slice(0, split) : '';
             const body = split >= 0 ? stdout.slice(split).trimStart() : stdout;
@@ -110,8 +111,21 @@ export function githubReader(policy: GitHubPolicy): GitHubRead {
                 reject(new PublicError(`GitHub request timed out after ${GITHUB_REQUEST_TIMEOUT_SECONDS} seconds while waiting for gh.`, { cause: error }));
                 return;
               }
+              // gh uses exit 1 for both network errors and HTTP rejections.
+              const transportTimeout = !status && error.code === 1 && githubTransportTimeout.exec(stderr.trim());
+              if (transportTimeout) {
+                const message = transportTimeout[1].startsWith('net/http:')
+                  ? 'The TLS handshake with the GitHub API timed out.'
+                  : 'The connection to the GitHub API timed out.';
+                reject(new PublicError(message, { cause: error }));
+                return;
+              }
               // Keep provider details in the owner diagnostic cause, not the public reply.
-              reject(new PublicError(secondary || exhausted || retry > 0
+              if (retry > 0 && !secondary && !exhausted) {
+                reject(new PublicError(`GitHub request failed (HTTP ${status || 'unknown'}). GitHub requested a retry delay. Requests sharing these credentials are paused until ${new Date(shared.notBefore).toISOString()}.`, { cause: error }));
+                return;
+              }
+              reject(new PublicError(secondary || exhausted
                 ? `GitHub request failed (HTTP ${status || 'unknown'} rate limit). Requests sharing these credentials are paused until ${new Date(shared.notBefore).toISOString()}.`
                 : `GitHub request failed (${safeErrorSummary(Object.assign(new Error(), { cause: error, status }))}). ${status === 401 ? 'Authentication was rejected; check the configured gh account.' : status === 403 ? 'Access was denied; check repository permissions and organization policy.' : status === 404 ? 'Repository or resource was not found, or the account cannot access it.' : status >= 500 ? 'GitHub returned a server error; retry later.' : 'Check gh availability, authentication and connectivity.'}`, { cause: error }));
               return;

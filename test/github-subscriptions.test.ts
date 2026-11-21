@@ -134,6 +134,21 @@ for (const scenario of [
   });
 }
 
+test('503 with Retry-After pauses polling and reports a server-requested delay', async t => {
+  const f = rateFixture(t, [{ status: 503, headers: 'retry-after: 2\n' }]);
+  await assert.rejects(f.read(), error => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /HTTP 503.*retry delay/i);
+    assert.doesNotMatch(error.message, /rate limit/i);
+    return true;
+  });
+  const queued = f.read();
+  await f.tick(0);
+  assert.equal(f.delays[0], 2000);
+  await f.tick(2000);
+  await queued;
+});
+
 test('repeated secondary limits increase shared backoff and success resets it', async t => {
   const limited = { status: 429, headers: 'x-ratelimit-remaining: 4000\n' };
   const f = rateFixture(t, [limited, limited, { status: 200 }, limited]);

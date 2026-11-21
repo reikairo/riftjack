@@ -67,3 +67,26 @@ else process.kill(process.pid, 'SIGTERM');
     return true;
   });
 });
+
+for (const reason of ['dial tcp 192.0.2.1:443: connect: operation timed out', 'dial tcp 192.0.2.1:443: i/o timeout',
+  'dial tcp 192.0.2.1:443: connect: connection refused', 'net/http: TLS handshake timeout']) {
+  test(`GitHub transport diagnostic: ${reason}`, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'github-dial-'));
+    const oldPath = process.env.PATH;
+    t.after(() => { process.env.PATH = oldPath; rmSync(dir, { recursive: true, force: true }); });
+    const diagnostic = `Get "https://api.github.com/repos/example/private-project/pulls/1/reviews?per_page=100&page=1": ${reason}`;
+    writeFileSync(join(dir, 'gh'), `#!${process.execPath}\nconsole.error(${JSON.stringify(diagnostic)}); process.exitCode = 1;`, { mode: 0o700 });
+    process.env.PATH = dir + ':' + oldPath;
+    const read = githubReader({ ghConfigDir: dir, repositories: ['example/project'] });
+    await assert.rejects(read('repos/example/private-project/pulls/1/reviews?per_page=100&page=1', AbortSignal.timeout(5000)), error => {
+      assert.ok(error instanceof PublicError);
+      const message = errorMessage(error);
+      if (reason.endsWith('refused')) assert.doesNotMatch(message, /timed out/);
+      else if (reason.includes('TLS handshake')) assert.match(message, /TLS handshake with the GitHub API timed out/i);
+      else assert.match(message, /connection to the GitHub API timed out/i);
+      assert.doesNotMatch(message, /192\.0\.2\.1|private-project|30 seconds/);
+      assert.ok(error.cause instanceof Error && error.cause.message.includes(diagnostic));
+      return true;
+    });
+  });
+}
