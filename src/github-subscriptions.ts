@@ -40,6 +40,7 @@ export function loadGitHubPolicies(path?: string, workspace?: string): GitHubPol
 
 export type GitHubRead = (endpoint: string, signal: AbortSignal) => Promise<any>;
 type RequestBudget = { tail: Promise<void>; notBefore: number; secondaryFailures: number };
+const GITHUB_REQUEST_TIMEOUT_SECONDS = 30;
 const requestBudgets = new Map<string, RequestBudget>();
 
 // Cancellation must not release a queued request's place before its predecessor
@@ -73,8 +74,9 @@ export function githubReader(policy: GitHubPolicy): GitHubRead {
         // Never inherit an agent's repository, host, token override or shell configuration.
         const env = { ...process.env, GH_CONFIG_DIR: policy.ghConfigDir, GH_PROMPT_DISABLED: '1' };
         for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_HOST', 'GH_REPO']) delete env[key as keyof typeof env];
+        const deadline = AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_SECONDS * 1000);
         execFile('gh', ['api', '--include', '--hostname', 'github.com', '--method', 'GET', '-H', 'Accept: application/vnd.github+json', endpoint],
-          { cwd: policy.ghConfigDir, env, signal, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+          { cwd: policy.ghConfigDir, env, signal: AbortSignal.any([signal, deadline]), maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
             const split = stdout.search(/\r?\n\r?\n/);
             const headers = split >= 0 ? stdout.slice(0, split) : '';
             const body = split >= 0 ? stdout.slice(split).trimStart() : stdout;
@@ -104,6 +106,10 @@ export function githubReader(policy: GitHubPolicy): GitHubRead {
               shared.notBefore = Math.max(shared.notBefore, resume);
             }
             if (error) {
+              if (deadline.aborted && error.cause === deadline.reason) {
+                reject(new PublicError(`GitHub request timed out after ${GITHUB_REQUEST_TIMEOUT_SECONDS} seconds while waiting for gh.`, { cause: error }));
+                return;
+              }
               // Keep provider details in the owner diagnostic cause, not the public reply.
               reject(new PublicError(secondary || exhausted || retry > 0
                 ? `GitHub request failed (HTTP ${status || 'unknown'} rate limit). Requests sharing these credentials are paused until ${new Date(shared.notBefore).toISOString()}.`
