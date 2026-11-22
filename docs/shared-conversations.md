@@ -213,6 +213,28 @@ Link each bot and configure its shared room on its own Riftjack instance. Remote
 peers supporting discovery do not need entries in the other instances' `bots`
 lists. Explicit remote IDs remain supported for peers without discovery.
 
+An optional room `addresses` object enables leading text names for owner
+messages, for example:
+
+```json
+"addresses": {
+  "@builder:example.com": ["Builder"],
+  "@reviewer:example.com": ["Reviewer"],
+  "@tester:example.com": ["Tester", "QA"]
+}
+```
+
+When enabled, give every configured bot at least one alias. Aliases must be
+unique across the room under Unicode case-insensitive matching, trimmed,
+non-empty, at most 64 UTF-16 code units, and contain no ASCII control characters.
+`Reviewer, check this` selects only the reviewer; `Builder and Tester, check
+this` selects both. A comma, `&`, `and`, or `и` can join leading aliases. Longer
+aliases match first, names inside the message do not select agents, and explicit
+Matrix mentions take precedence. Text without a leading alias still addresses
+all configured agents. This setting does not infer aliases for discovered peers
+or change their permissions; configure the same aliases on every participating
+installation when text routing is wanted across installations.
+
 The initial connector owner controls these links. Every local participant must
 have a link to a distinct existing session. A missing or different session causes
 an error instead of a fresh start. `!reset` is disabled for linked agents;
@@ -265,8 +287,10 @@ keep their observer role. Human control remains tied to the configured owner.
 
 ## Messages and turns
 
-- A Matrix **@mention** addresses one agent. An unaddressed human message in the
-  shared room addresses all configured agents. Plain text spelling a display name is not a mention.
+- A Matrix **@mention** addresses one agent. Optional room `addresses` also let
+  the owner select agents by leading text aliases. An otherwise unaddressed human
+  message in the shared room addresses all configured agents. Other plain text
+  names do not route messages.
 - In the shared room an agent may answer a human message with exactly
   `NO_REPLY`, for example when it addresses the other agent; nothing is sent
   then. Command results are always sent. Ordinary turns in both shared and

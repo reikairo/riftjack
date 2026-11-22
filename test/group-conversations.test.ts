@@ -13,14 +13,14 @@ const room = '!group:test';
 const message = (sender = owner, id = '$human'): MatrixEvent => ({ type: 'm.room.message', sender,
   event_id: id, origin_server_ts: 1000, content: { msgtype: 'm.text', body: 'Hello' } });
 const home = (bot: string) => '!home-' + bots.indexOf(bot) + ':test';
-function fixture(t: { after(fn: () => void): void }, local = bots) {
+function fixture(t: { after(fn: () => void): void }, local = bots, addresses?: Record<string, string[]>) {
   const dir = mkdtempSync(join(tmpdir(), 'group-conversations-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const state = new State(join(dir, 'sessions.json'));
   const accounts = local.map(userId => ({ userId, kind: 'claude' as const, name: userId, accessToken: 'test' }));
   const agents = local.map(bot => ({ bot, owner, home: home(bot), session: 'session-' + bots.indexOf(bot) }));
   for (const agent of agents) state.update(sessionKey(agent.home, message()), { claude: agent.session });
-  const config = { version: 1, agents, rooms: [{ room, owner, bots }] };
+  const config = { version: 1, agents, rooms: [{ room, owner, bots, ...(addresses && { addresses }) }] };
   const path = join(dir, 'links.json'), history = join(dir, 'history.json');
   writeFileSync(path, JSON.stringify(config));
   const load = () => new ConversationLinks(path, history, accounts, state, owner);
@@ -75,6 +75,79 @@ test('three agents retain separate sessions and routing permissions when another
   }
   writeFileSync(f.path, JSON.stringify({ ...f.config, agents: f.config.agents.slice(0, 2) }));
   assert.throws(f.load, /explicit session link/);
+});
+
+const textAddresses = { [bots[0]]: ['Builder', 'Build Bot'], [bots[1]]: ['Reviewer', 'Ревьюер'], [bots[2]]: ['Tester', 'B(ot)+'] };
+
+test('optional leading aliases select owner recipients with explicit mention precedence', t => {
+  const f = fixture(t, bots, textAddresses);
+  const addressed = (body: string, content = {}, sender = owner) => {
+    const event = { ...message(sender), content: { msgtype: 'm.text', body, ...content } };
+    return bots.filter(bot => f.links.addressed(bot, room, event));
+  };
+  for (const body of ['Reviewer', 'Reviewer, check this', '  REVIEWER: check this', 'ревьюер — check this']) {
+    assert.deepEqual(addressed(body), [bots[1]]);
+  }
+  assert.deepEqual(addressed('Builder and Tester, check this'), [bots[0], bots[2]]);
+  assert.deepEqual(addressed('Builder, Reviewer & Tester: check this'), bots);
+  assert.deepEqual(addressed('Builder и Reviewer, check this'), bots.slice(0, 2));
+  assert.deepEqual(addressed('Build Bot, review this'), [bots[0]]);
+  assert.deepEqual(addressed('B(ot)+, check this'), [bots[2]]);
+  for (const body of ['Reviewers, check this', 'Please ask Reviewer', 'Someone, Reviewer, check this', 'Boooooot, check this']) {
+    assert.deepEqual(addressed(body), bots);
+  }
+  assert.deepEqual(addressed('Reviewer, check this', { 'm.mentions': { user_ids: [bots[2]] } }), [bots[2]]);
+  assert.deepEqual(addressed('Reviewer, check this', { 'm.mentions': { user_ids: [] } }), [bots[1]]);
+  assert.deepEqual(addressed('Reviewer, check this', {}, bots[0]), bots);
+  assert.deepEqual(addressed('Reviewer, check this', { msgtype: 'm.file' }), bots);
+  assert.deepEqual(addressed('Reviewer, check this', { body: 42 }), bots);
+  assert.deepEqual(addressed('Reviewer, check this', { body: null }), bots);
+  const plain = fixture(t);
+  assert.ok(bots.every(bot => plain.links.addressed(bot, room, {
+    ...message(), content: { msgtype: 'm.text', body: 'Reviewer, check this' },
+  })));
+});
+
+test('text routing skips a Matrix reply fallback only for an actual reply', t => {
+  const f = fixture(t, bots, textAddresses);
+  const body = '> <@alice:test> Builder, previous task\n> More quoted text\n\nReviewer, check this';
+  for (const reply of [false, true]) {
+    const event = { ...message(), content: { msgtype: 'm.text', body,
+      ...(reply && { 'm.relates_to': { 'm.in_reply_to': { event_id: '$previous' } } }) } };
+    assert.deepEqual(bots.filter(bot => f.links.addressed(bot, room, event)), reply ? [bots[1]] : bots);
+  }
+});
+
+test('Unicode aliases consume the matched prefix without shifting later names', t => {
+  const f = fixture(t, bots, { [bots[0]]: ['İnce'], [bots[1]]: ['Σ'], [bots[2]]: ['𝒜'] });
+  const event = { ...message(), content: { msgtype: 'm.text', body: 'İnce and ς & 𝒜, check this' } };
+  assert.deepEqual(bots.filter(bot => f.links.addressed(bot, room, event)), bots);
+});
+
+test('a longer alias takes precedence over its shorter prefix', t => {
+  const f = fixture(t, bots, { [bots[0]]: ['Build'], [bots[1]]: ['Build Bot'], [bots[2]]: ['Tester'] });
+  const event = { ...message(), content: { msgtype: 'm.text', body: 'Build Bot, check this' } };
+  assert.deepEqual(bots.filter(bot => f.links.addressed(bot, room, event)), [bots[1]]);
+});
+
+test('invalid or ambiguous text address configurations are rejected', t => {
+  const f = fixture(t);
+  const invalid: unknown[] = [null, [], {}, { [bots[0]]: ['Builder'] },
+    { ...textAddresses, '@outside:test': ['Outside'] },
+    { ...textAddresses, [bots[1]]: 'Reviewer' },
+    { ...textAddresses, [bots[1]]: [] },
+    { ...textAddresses, [bots[1]]: ['builder'] },
+    { ...textAddresses, [bots[1]]: [' Reviewer'] },
+    { ...textAddresses, [bots[1]]: [''] },
+    { ...textAddresses, [bots[1]]: ['x'.repeat(65)] },
+    { ...textAddresses, [bots[1]]: ['Review\ner'] },
+    { ...textAddresses, [bots[1]]: [42] },
+    { [bots[0]]: ['S'], [bots[1]]: ['ſ'], [bots[2]]: ['Tester'] },
+  ];
+  for (const addresses of invalid) {
+    writeFileSync(f.path, JSON.stringify({ ...f.config, rooms: [{ room, owner, bots, addresses }] }));
+    assert.throws(f.load, /text addresses/);
+  }
 });
 
 test('shared observations remain available until the third agent has read them', t => {
