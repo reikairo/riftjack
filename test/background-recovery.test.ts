@@ -263,11 +263,11 @@ test('Astra skips only the stopped fragment and resumes the same pass across res
   await restored.pump(f.options, Date.parse(live.due));
   const payload = (i: number) => JSON.parse(f.prompts[i]!.split('\n').at(-1)!);
   assert.equal(payload(1).label, label);
-  assert.match(payload(1).message, /Заведи про это заметку и продолжи без глубокого анализа этой проблемы\./);
-  assert.ok(payload(1).message.endsWith(JSON.stringify(units[1])));
+  // The assignment for each unit is independent of the preceding outcome.
+  const unitPrompt = payload(0).message.replace(JSON.stringify(units[0]), '');
+  assert.equal(payload(1).message, unitPrompt + JSON.stringify(units[1]));
   await restored.pump(f.options, f.saved().expires);
-  assert.ok(payload(2).message.endsWith(JSON.stringify(units[2])));
-  assert.doesNotMatch(payload(2).message, /Заведи/);
+  assert.equal(payload(2).message, unitPrompt + JSON.stringify(units[2]));
   await new BackgroundTasks(f.file, f.root).pump(f.options, f.saved().expires + 10000);
   assert.equal(f.prompts.length, 3);
   const [done] = JSON.parse(restored.action({ action: 'history' }, target, signal)).items;

@@ -122,7 +122,8 @@ The timer uses the conversation's configured agent and a one-second interval.
 A busy agent keeps its place in the queue. A successful turn advances one unit.
 A structured Codex `cyberPolicy` stop closes that unit and records the pass,
 file, supplied lines and reason. The next tick delivers the next independent
-unit of the same pass with a reminder about the saved note. The final unit ends
+unit of the same pass in the same agent session. Its assignment contains only
+the current location. The saved notes remain available in the timer record. The final unit ends
 the series, including when it was skipped. Inspect notes with `list` during the
 pass or `history` while the finished registration is retained. A different
 failure or an uncertain in-flight outcome at restart leaves the series

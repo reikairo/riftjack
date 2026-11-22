@@ -42,8 +42,6 @@ export function reviewStatus(review: AstraReview, pass: string) {
 }
 
 export function reviewMessage(review: AstraReview) {
-  const previousSkipped = review.skipped.at(-1) === review.cursor - 1;
-  return (previousSkipped ? 'The previous unit was skipped by policy. Riftjack saved its location: ' + JSON.stringify(review.units[review.cursor - 1]) +
-    '. Заведи про это заметку и продолжи без глубокого анализа этой проблемы. Leave the skipped problem closed.\n' : '') +
-    'Review only this independent unit in the current pass: ' + JSON.stringify(review.units[review.cursor]);
+  return 'Review this independent unit in the current pass. Leave previously skipped problems closed, including ones that also appear here. Unit: ' +
+    JSON.stringify(review.units[review.cursor]);
 }
