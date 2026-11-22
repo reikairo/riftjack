@@ -1,4 +1,10 @@
+import { EncryptedRoomEvent } from '@vector-im/matrix-bot-sdk';
 import { RateLimitedMatrixClient } from './rate-limited-matrix-client.js';
+
+type FailedDecryption = { room: string; event: string };
+const FAILED_DECRYPTIONS = 'riftjack.worker.failed_decryptions.v1';
+const MAX_FAILED_DECRYPTIONS = 1000;
+const RETRY_BATCH_SIZE = 50;
 
 // Unlike model tasks, durable inbox writes must finish before saving /sync's
 // next_batch. Failures keep the previous checkpoint on disk for restart replay.
@@ -6,7 +12,88 @@ export class WorkerMatrixClient extends RateLimitedMatrixClient {
   inbox?: (room: string, event: any) => Promise<void>;
   protocol?: (room: string, event: any) => Promise<void>;
   private decrypted = new WeakSet<object>();
+  private failures?: FailedDecryption[];
   private inboxFailureReported = false;
+
+  private async failedDecryptions() {
+    if (this.failures) return this.failures;
+    const saved = await Promise.resolve(this.storageProvider.readValue(FAILED_DECRYPTIONS));
+    const parsed: unknown = saved ? JSON.parse(saved) : [];
+    if (!Array.isArray(parsed) || parsed.length > MAX_FAILED_DECRYPTIONS ||
+        parsed.some(item => !item || typeof item !== 'object' ||
+          typeof item.room !== 'string' || !item.room.startsWith('!') ||
+          typeof item.event !== 'string' || !item.event.startsWith('$'))) {
+      throw new Error('Invalid failed-decryption journal; restore Matrix storage instead of discarding it.');
+    }
+    return this.failures = parsed as FailedDecryption[];
+  }
+
+  private async saveFailedDecryptions(failures: FailedDecryption[]) {
+    await Promise.resolve(this.storageProvider.storeValue(FAILED_DECRYPTIONS, JSON.stringify(failures)));
+    this.failures = failures;
+  }
+
+  private async rememberFailedDecryption(room: string, event: any) {
+    if (!room.startsWith('!') || typeof event?.event_id !== 'string' || !event.event_id.startsWith('$')) return;
+    const failures = await this.failedDecryptions();
+    if (failures.some(item => item.room === room && item.event === event.event_id)) return;
+    if (failures.length === MAX_FAILED_DECRYPTIONS) {
+      throw new Error('Failed-decryption journal is full; restore room keys before resuming sync.');
+    }
+    await this.saveFailedDecryptions([...failures, { room, event: event.event_id }]);
+  }
+
+  private async retryFailedDecryptions(emit: (type: string, ...args: any[]) => Promise<any>) {
+    const failures = await this.failedDecryptions();
+    const pending: FailedDecryption[] = [];
+    let attempted = 0;
+    for (const item of failures.slice(0, RETRY_BATCH_SIZE)) {
+      let encrypted: any;
+      attempted++;
+      try {
+        encrypted = await this.getRawEvent(item.room, item.event);
+        if (!this.crypto || !await this.crypto.isRoomEncrypted(item.room)) { pending.push(item); continue; }
+      } catch {
+        // A transport cooldown applies to the batch, not fifty independent
+        // requests. Preserve unattempted entries and retry on a later sync.
+        pending.push(item); break;
+      }
+      if (encrypted?.type !== 'm.room.encrypted' || encrypted.event_id !== item.event) { pending.push(item); continue; }
+      let event: any;
+      try {
+        // Never treat a server-provided plaintext fallback as verified E2EE.
+        // The executor relies on decrypted_event as proof of real decryption.
+        event = (await this.crypto.decryptRoomEvent(new EncryptedRoomEvent(encrypted), item.room)).raw;
+      } catch {
+        // Missing keys remain durable for retry after a later key delivery.
+        pending.push(item); continue;
+      }
+      // Use the ordinary admission path, including peer discovery before inbox.
+      // Admission failures must escape, retaining the journal and sync token.
+      await emit('room.decrypted_event', item.room, event);
+      if (event.type === 'm.room.message') await emit('room.message', item.room, event);
+      await emit('room.event', item.room, event);
+    }
+    // Rotate unavailable entries so one missing key cannot starve later events.
+    if (pending.length !== attempted || failures.length > attempted) {
+      await this.saveFailedDecryptions([...failures.slice(attempted), ...pending]);
+    }
+  }
+
+  protected override async processSync(raw: any, emitFn?: (type: string, ...args: any[]) => Promise<any>) {
+    const emit = emitFn ?? (async (type: string, ...args: any[]) => { this.emit(type, ...args); });
+    try {
+      const pendingBefore = (await this.failedDecryptions()).length;
+      await super.processSync(raw, async (type, ...args) => {
+        if (type === 'room.failed_decryption') await this.rememberFailedDecryption(args[0], args[1]);
+        await emit(type, ...args);
+      });
+      // The SDK processes to-device room keys before room timelines. Also retry
+      // on the first sync after restart, when the key may already be stored.
+      if (pendingBefore || raw?.to_device?.events?.length) await this.retryFailedDecryptions(emit);
+    } catch (error) { this.stopForInboxFailure(error); throw error; }
+  }
+
   protected stopForInboxFailure(error: unknown): void {
     // Nested sync processing can catch the same failure again. One stopped
     // client must request shutdown only once, with its original failure.
