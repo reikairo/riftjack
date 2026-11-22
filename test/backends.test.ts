@@ -13,7 +13,7 @@ import { configForWorkspace } from '../src/workspace.js';
 import { codexUsage } from '../src/codex-usage.js';
 import { approvalInstructions } from '../src/approval-instructions.js';
 import { codexModelOptions } from '../src/codex-models.js';
-import { OwnerDiagnosticError } from '../src/errors.js';
+import { CodexCyberPolicyError } from '../src/errors.js';
 import { hostErrorDetails } from '../src/host-diagnostics.js';
 
 function setup(t: { after(fn: () => void): void }, accountType = 'chatgpt') {
@@ -481,7 +481,7 @@ test('Codex reports structured cyber policy failures without exposing diagnostic
     await assert.rejects(f.backend('codex', prompt, 'conversation', signal(), '@owner:test'), error => {
       assert.match(String(error), /safety filter.*possible cybersecurity risk.*cyberPolicy/);
       assert.doesNotMatch(String(error), /private|retry/i);
-      assert.ok(error instanceof OwnerDiagnosticError);
+      assert.ok(error instanceof CodexCyberPolicyError);
       assert.equal(error.ownerDetails(), 'private diagnostic\n\nprivate details');
       return true;
     });

@@ -19,6 +19,8 @@ export class OwnerDiagnosticError extends PublicError {
   ownerDetails(): string { return this.#details; }
 }
 
+export class CodexCyberPolicyError extends OwnerDiagnosticError {}
+
 const codes = new Set([
   'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT',
   'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', 'EPERM', 'EACCES', 'ENOENT',

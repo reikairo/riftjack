@@ -13,7 +13,7 @@ import { roomMessageDelivery, type MessageRequest, type RoomMessageTool } from '
 import { attachmentDelivery, type SendAttachments } from './attachment-delivery.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
-import { compactErrorMessage, errorMessage } from './errors.js';
+import { CodexCyberPolicyError, compactErrorMessage, errorMessage } from './errors.js';
 import type { RestartTarget } from './restart-notice.js';
 import type { RestartScope } from './restart.js';
 import { MANAGER_HELP } from './manager-help.js';
@@ -32,6 +32,7 @@ import { splitToolConversation, type ToolConversation, type ToolContext } from '
 // timer or reaction feedback), so it is not presented as the human's words.
 export const AGENT_TRIGGER = 'riftjack.trigger', SERVICE = 'riftjack.service', REPLY = 'riftjack.reply', GRANT = 'riftjack.grant',
   NOTICE = 'riftjack.notice';
+export type BackgroundCompletion = (cancelled?: boolean, failure?: 'cyberPolicy') => void;
 export type Notice = 'background' | 'timer' | 'reaction' | 'restart' | 'shared-backlog';
 export const RESTART_PROMPT = 'Riftjack restarted. Check current work and background tasks; continue if there is work to do.';
 export type MatrixEvent = {
@@ -224,10 +225,10 @@ export class Bridge {
   }
 
   // `ready` is rechecked synchronously right before admission, after the privacy check.
-  async resumeBackground(room: string, event: MatrixEvent, session: string, admitted: () => void, ready?: () => boolean, completed?: (cancelled?: boolean) => void): Promise<boolean> {
+  async resumeBackground(room: string, event: MatrixEvent, session: string, admitted: () => void, ready?: () => boolean, completed?: BackgroundCompletion): Promise<boolean> {
     if (this.busy || this.stopped || this.options.isStopping?.()) return false;
     let finished = false;
-    await this.handleMessage(room, event, true, { session, ready, admitted, completed: cancelled => { completed?.(cancelled); finished = true; } });
+    await this.handleMessage(room, event, true, { session, ready, admitted, completed: (cancelled, failure) => { completed?.(cancelled, failure); finished = !failure; } });
     return finished;
   }
 
@@ -245,7 +246,7 @@ export class Bridge {
     } finally { this.draining = false; }
   }
 
-  private async handleMessage(room: string, event: MatrixEvent, feedback = false, background?: { session: string; admitted: () => void; ready?: () => boolean; completed?: (cancelled?: boolean) => void }, fromQueue = false, batch: MatrixEvent[] = []): Promise<void> {
+  private async handleMessage(room: string, event: MatrixEvent, feedback = false, background?: { session: string; admitted: () => void; ready?: () => boolean; completed?: BackgroundCompletion }, fromQueue = false, batch: MatrixEvent[] = []): Promise<void> {
     // A watch is lower priority than a human message arriving during its
     // privacy check. It must not reserve the human admission queue.
     if (background) return this.acceptMessage(room, event, feedback, background, fromQueue, batch, () => {});
@@ -257,7 +258,7 @@ export class Bridge {
     finally { admitted(); }
   }
 
-  private async acceptMessage(room: string, event: MatrixEvent, feedback: boolean, background: { session: string; admitted: () => void; ready?: () => boolean; completed?: (cancelled?: boolean) => void } | undefined,
+  private async acceptMessage(room: string, event: MatrixEvent, feedback: boolean, background: { session: string; admitted: () => void; ready?: () => boolean; completed?: BackgroundCompletion } | undefined,
     fromQueue: boolean, batch: MatrixEvent[], admitted: () => void): Promise<void> {
     const o = this.options;
     if (!event.sender || !o.isAuthorized(event.sender) || event.sender === o.botId) return;
@@ -674,6 +675,12 @@ export class Bridge {
         current.markReady();
         let result: string | BackendReply;
         try { result = await task; if (verb !== 'publish' && !next.prompt.startsWith('!')) o.promptDelivered?.(); }
+        catch (error) {
+          if (next.event === event && error instanceof CodexCyberPolicyError && !controller.signal.aborted && o.isAuthorized(current.sender)) {
+            background?.completed?.(false, 'cyberPolicy');
+          }
+          throw error;
+        }
         finally { turnLifetime.abort(); current.running = false; current.interactions.close(); }
         while (current.buffered) await current.steering;
         controller.signal.throwIfAborted();

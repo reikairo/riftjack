@@ -39,6 +39,7 @@ test('background MCP advertises and schedules delayed messages', async t => {
   const call = async (id: number, method: string, params?: object) => (await (await fetch(server.url, { method: 'POST',
     headers: { ...server.headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) })).json());
   const tools = await call(1, 'tools/list');
+  assert.ok(tools.result.tools[0].inputSchema.properties.action.enum.includes('astra_review'));
   assert.ok(tools.result.tools[0].inputSchema.properties.action.enum.includes('remind'));
   assert.equal(tools.result.tools[0].inputSchema.properties.pid.minimum, 1);
   assert.equal(tools.result.tools[0].inputSchema.properties.stale_after_minutes.maximum, 10080);

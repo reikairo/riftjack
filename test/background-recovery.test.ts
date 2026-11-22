@@ -6,12 +6,13 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { BackgroundTasks, type BackgroundTarget } from '../src/background-tasks.js';
 import { Bridge, sessionKey, type MatrixEvent } from '../src/bridge.js';
+import { CodexCyberPolicyError } from '../src/errors.js';
 import { State } from '../src/state.js';
 import { RunJournal } from '../src/run-journal.js';
 
 const event: MatrixEvent = { type: 'm.room.message', sender: '@alice:test', content: { msgtype: 'm.text', body: 'Check' } };
 const target: BackgroundTarget = { room: '!room:test', sender: '@alice:test', key: sessionKey('!room:test', event), session: 'session-1' };
-function setup(t: { after(fn: () => void): void }, kind: 'codex' | 'claude' = 'codex') {
+function setup(t: { after(fn: () => void): void }, kind: 'codex' | 'claude' = 'codex', failure = new Error('Backend stopped')) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'riftjack-recovery-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const file = join(root, 'tasks.json'), state = new State(join(root, 'state.json'));
@@ -21,7 +22,7 @@ function setup(t: { after(fn: () => void): void }, kind: 'codex' | 'claude' = 'c
   const bridge = new Bridge({ botId: '@bot:test', kind, since: 0, timeoutMs: 10_000, state,
     isAuthorized: () => true, isPrivateRoom: async () => true, report: () => {},
     reply: async (_r, _e, text) => { replies.push(text); },
-    run: async (_m, prompt) => { prompts.push(prompt); if (fail) throw new Error('Backend stopped'); return 'NO_REPLY'; },
+    run: async (_m, prompt) => { prompts.push(prompt); if (fail) throw failure; return 'NO_REPLY'; },
   });
   const options = { valid: () => true, report: () => {},
     deliver: (to: BackgroundTarget, message: MatrixEvent, admit: () => void, ready: () => boolean, completed: (cancelled?: boolean) => void) =>
@@ -239,4 +240,71 @@ test('executor progress coalesces while busy and completion supersedes pending u
   const recovered = new BackgroundTasks(f.file, f.root);
   await recovered.pump(f.options);
   assert.equal(f.prompts.length, 2); assert.match(f.prompts[1], /Completed/);
+});
+
+test('Astra skips only the stopped fragment and resumes the same pass across restart', async t => {
+  const f = setup(t, 'codex', new CodexCyberPolicyError('Stopped', 'provider private detail'));
+  const units = [{ file: 'src/read.ts', start_line: 1, end_line: 30 },
+    { file: 'src/read.ts', start_line: 31, end_line: 90 }, { file: 'src/write.ts' }];
+  const label = 'Review error handling', signal = new AbortController().signal;
+  const registered = JSON.parse(f.queue.action({ action: 'astra_review', label, units }, target, signal));
+  assert.equal(registered.schedule.interval_seconds, 1);
+  await f.queue.pump(f.options, Date.parse(registered.due));
+  assert.equal(f.saved().state, 'waiting');
+  assert.equal(f.saved().timer.lastRun.state, 'skipped');
+  assert.equal(f.saved().delivery, undefined);
+  assert.doesNotMatch(JSON.stringify(f.saved()), /provider private detail/);
+
+  const restored = new BackgroundTasks(f.file, f.root);
+  const [live] = JSON.parse(restored.action({ action: 'list' }, target, signal));
+  assert.deepEqual(live.review, { pass: label, processed: 1, total: 3, next: units[1],
+    notes: [{ ...units[0], reason: 'cyberPolicy', status: 'skipped' }] });
+  f.succeed();
+  await restored.pump(f.options, Date.parse(live.due));
+  const payload = (i: number) => JSON.parse(f.prompts[i]!.split('\n').at(-1)!);
+  assert.equal(payload(1).label, label);
+  assert.match(payload(1).message, /Заведи про это заметку и продолжи без глубокого анализа этой проблемы\./);
+  assert.ok(payload(1).message.endsWith(JSON.stringify(units[1])));
+  await restored.pump(f.options, f.saved().expires);
+  assert.ok(payload(2).message.endsWith(JSON.stringify(units[2])));
+  assert.doesNotMatch(payload(2).message, /Заведи/);
+  await new BackgroundTasks(f.file, f.root).pump(f.options, f.saved().expires + 10000);
+  assert.equal(f.prompts.length, 3);
+  const [done] = JSON.parse(restored.action({ action: 'history' }, target, signal)).items;
+  assert.equal(done.state, 'delivered');
+  assert.equal(done.due, null);
+  assert.equal(done.review.processed, 3);
+  assert.deepEqual(done.review.notes, live.review.notes);
+});
+
+test('Astra closes on a final policy stop and never advances on a lookalike error', async t => {
+  for (const policy of [true, false]) {
+    const f = setup(t, 'codex', policy ? new CodexCyberPolicyError('Stopped', '') : new Error('cyberPolicy'));
+    f.queue.action({ action: 'astra_review', label: 'Review timing', units: [{ file: 'clock.ts' }] }, target, new AbortController().signal);
+    await f.queue.pump(f.options, f.saved().expires);
+    assert.equal(f.saved().state, policy ? 'delivered' : 'interrupted');
+    assert.equal(f.saved().timer.review.cursor, policy ? 1 : 0);
+    assert.deepEqual(f.saved().timer.review.skipped, policy ? [0] : []);
+    await new BackgroundTasks(f.file, f.root).pump(f.options, f.saved().expires + 5000);
+    assert.equal(f.prompts.length, 1);
+  }
+});
+
+test('Astra rejects overlapping ranges, duplicate files and incomplete units', t => {
+  const f = setup(t);
+  for (const units of [[], [{ file: 'f' }, { file: 'f' }], [{ file: '../f' }], [{ file: 'f', end_line: 3 }],
+    [{ file: 'f', start_line: 1, end_line: 4 }, { file: 'f', start_line: 4, end_line: 7 }]]) {
+    assert.throws(() => f.queue.action({ action: 'astra_review', label: 'Review', units }, target, new AbortController().signal), /independent units/);
+  }
+});
+
+test('a regular reminder retains its interrupted state on a structured policy stop', async t => {
+  const f = setup(t, 'codex', new CodexCyberPolicyError('Stopped', ''));
+  f.queue.action({ action: 'remind', label: 'Check', message: 'Check the build.', deliver: 'agent',
+    schedule: { frequency: 'interval', interval_seconds: 1 } }, target, new AbortController().signal);
+  await f.queue.pump(f.options, f.saved().expires);
+  assert.equal(f.saved().state, 'interrupted');
+  assert.equal(f.saved().timer.lastRun.state, 'interrupted');
+  await f.queue.pump(f.options, f.saved().expires + 2000);
+  assert.equal(f.prompts.length, 1);
 });

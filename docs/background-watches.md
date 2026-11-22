@@ -100,3 +100,30 @@ every read. Use `timeout_hours` (1–168, default 24) to bound any watch. Expiry
 not evidence of process exit. `list`, `history`, `cancel`, session reset and
 access revocation apply to all watch modes. A restart notice includes a fresh
 observation without changing or relaunching the task.
+
+## Astra bug search
+
+Register one pass with a fixed queue of independent files or fragments. Give the
+pass a descriptive label. Inclusive line ranges in one file must be disjoint.
+
+```json
+{
+  "action": "astra_review",
+  "label": "Check error handling",
+  "units": [
+    { "file": "src/reader.ts", "start_line": 10, "end_line": 55 },
+    { "file": "src/reader.ts", "start_line": 56, "end_line": 118 },
+    { "file": "src/writer.ts" }
+  ]
+}
+```
+
+The timer uses the conversation's configured agent and a one-second interval.
+A busy agent keeps its place in the queue. A successful turn advances one unit.
+A structured Codex `cyberPolicy` stop closes that unit and records the pass,
+file, supplied lines and reason. The next tick delivers the next independent
+unit of the same pass with a reminder about the saved note. The final unit ends
+the series, including when it was skipped. Inspect notes with `list` during the
+pass or `history` while the finished registration is retained. A different
+failure or an uncertain in-flight outcome at restart leaves the series
+interrupted for inspection.

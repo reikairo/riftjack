@@ -3,7 +3,8 @@ import { constants, closeSync, fstatSync, mkdirSync, openSync, readFileSync, rea
 import { randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { PublicError, errorMessage } from './errors.js';
-import { NOTICE, type MatrixEvent } from './bridge.js';
+import { reviewMessage, reviewStatus, validReview, validUnits, type AstraReview } from './astra-review.js';
+import { NOTICE, type MatrixEvent, type BackgroundCompletion } from './bridge.js';
 import { nextReminder, validSchedule, validStart, intervalMilliseconds, occurrenceInWindow, remainingOccurrences, scheduleDescription, type ReminderSchedule } from './reminder-schedule.js';
 
 export type BackgroundAction = (input: unknown, signal: AbortSignal) => Promise<string>;
@@ -21,13 +22,13 @@ type Watch = BackgroundTarget & { id: string; label: string; file: string; field
   observation?: Observation;
   pid?: number;
   stale?: { minutes: number; updated: number };
-  timer?: { message: string; deliver: 'agent' | 'room'; schedule?: ReminderSchedule; exhausted?: boolean;
-    lastRun?: { due: number; state: 'dispatching' | 'delivered' | 'interrupted' | 'cancelled' } } };
+  timer?: { review?: AstraReview; message: string; deliver: 'agent' | 'room'; schedule?: ReminderSchedule; exhausted?: boolean;
+    lastRun?: { due: number; state: 'skipped' | 'dispatching' | 'delivered' | 'interrupted' | 'cancelled' } } };
 // Uncertain notifications remain visible even when there is no replayable delivery.
 const current = (w: Watch) => w.state === 'waiting' || w.state === 'dispatching' || w.state === 'interrupted' || !!w.delivery;
 const hasFuture = (w: Watch) => !!w.timer?.schedule && !w.timer.exhausted;
 const describe = (w: Watch) => w.timer
-  ? { id: w.id, label: w.label, kind: 'timer', deliver: w.timer.deliver, room: w.room, due: w.timer.exhausted ? null : new Date(w.expires).toISOString(), message: w.timer.message, state: w.state, last_error: w.last_error, last_error_at: w.last_error_at, last_error_stage: w.last_error_stage,
+  ? { id: w.id, label: w.label, kind: 'timer', deliver: w.timer.deliver, room: w.room, ...(w.timer.review && { review: reviewStatus(w.timer.review, w.label) }), due: w.timer.exhausted ? null : new Date(w.expires).toISOString(), message: w.timer.message, state: w.state, last_error: w.last_error, last_error_at: w.last_error_at, last_error_stage: w.last_error_stage,
     ...(w.timer.schedule && { schedule: w.timer.schedule, lastRun: w.timer.lastRun, exhausted: !!w.timer.exhausted,
       remaining: remainingOccurrences(w.timer.schedule, w.expires, w.timer.exhausted), result: w.result }) }
   : { id: w.id, label: w.label, kind: 'watch', ...(w.conditions ? { ...describeConditions(w.conditions), observation: w.observation } : { status_file: w.file }), state: w.state, result: w.result, last_error: w.last_error, last_error_at: w.last_error_at, last_error_stage: w.last_error_stage,
@@ -69,11 +70,14 @@ export class BackgroundTasks {
       !short(w.session, 1024) || !short(w.label) || !short(w.workspace, 4096) || !Number.isFinite(w.expires) ||
       (w.timer === undefined ? w.conditions !== undefined ? !validWatchConditions(w.conditions) : !short(w.file, 4096) || !short(w.field, 80) || !Array.isArray(w.terminal) || !w.terminal.length || !w.terminal.every(x => short(x, 80))
         : !record(w.timer) || !timerMessage(w.timer.message) || !['agent', 'room'].includes(w.timer.deliver as string) ||
+          (w.timer.review !== undefined && (!validReview(w.timer.review) || w.timer.deliver !== 'agent' ||
+            !record(w.timer.schedule) || w.timer.schedule.frequency !== 'interval' || w.timer.schedule.interval_seconds !== 1 ||
+            w.timer.schedule.count !== undefined || !!w.timer.exhausted !== (w.timer.review.cursor === w.timer.review.units.length))) ||
           (w.timer.schedule !== undefined && (!validSchedule(w.timer.schedule) ||
             (w.timer.schedule.frequency === 'interval' && !validStart(w.timer.schedule.start_at)))) ||
           (w.timer.exhausted !== undefined && (typeof w.timer.exhausted !== 'boolean' || !record(w.timer.schedule) ||
-            w.timer.schedule.frequency !== 'interval' || w.timer.schedule.count === undefined)) ||
-          (w.timer.lastRun !== undefined && (!record(w.timer.lastRun) || !Number.isFinite(w.timer.lastRun.due) || !['dispatching', 'delivered', 'interrupted', 'cancelled'].includes(w.timer.lastRun.state as string)))) ||
+            w.timer.schedule.frequency !== 'interval' || (w.timer.schedule.count === undefined && !w.timer.review))) ||
+          (w.timer.lastRun !== undefined && (!record(w.timer.lastRun) || !Number.isFinite(w.timer.lastRun.due) || !['dispatching', 'delivered', 'interrupted', 'cancelled', ...(w.timer.review ? ['skipped'] : [])].includes(w.timer.lastRun.state as string)))) ||
       (w.notification !== undefined && (!record(w.notification) || !short(w.notification.group, 4096) || typeof w.notification.progress !== 'boolean' || !record(w.timer) || w.timer.deliver !== 'agent')) ||
       (w.delivery !== undefined && (!record(w.delivery) || !short(w.delivery.id, 1024) ||
         typeof w.delivery.body !== 'string' || w.delivery.body.length > 16_384 || !['timer', 'background'].includes(w.delivery.notice as string) ||
@@ -91,7 +95,9 @@ export class BackgroundTasks {
     // original occurrence and result. Direct room posts retain uncertain status.
     for (const watch of this.watches) {
       if (watch.delivery && (watch.state === 'dispatching' || watch.state === 'interrupted')) {
-        watch.state = 'waiting';
+        // An admitted review unit with an unknown outcome might already have
+        // been stopped by policy before its completion checkpoint reached disk.
+        watch.state = watch.timer?.review ? 'interrupted' : 'waiting';
         if (watch.timer?.lastRun) watch.timer.lastRun.state = 'interrupted';
       } else if (watch.state === 'dispatching') {
         if (watch.timer?.lastRun) watch.timer.lastRun.state = 'interrupted';
@@ -216,10 +222,22 @@ export class BackgroundTasks {
       return JSON.stringify({ items: items.slice(offset as number, end).map(describe), total: items.length,
         next_offset: end < items.length ? end : null });
     }
+    if (input.action === 'astra_review') {
+      if (Object.keys(input).some(k => !['action', 'label', 'units'].includes(k)) || !short(input.label) || !validUnits(input.units)) {
+        throw new PublicError('Supply a review pass label and 1–256 independent units with workspace-relative file paths and optional inclusive start_line/end_line. Ranges in the same file must be disjoint.');
+      }
+      const due = Date.now() + 1000;
+      const watch: Watch = { ...target, id: randomUUID(), workspace: this.workspace, label: input.label, file: '', field: '', terminal: [],
+        expires: due, state: 'waiting', timer: { message: 'Astra bug search', deliver: 'agent',
+          schedule: { frequency: 'interval', interval_seconds: 1, start_at: new Date(due).toISOString() },
+          review: { units: structuredClone(input.units), cursor: 0, skipped: [] } } };
+      this.register(watch);
+      return JSON.stringify(describe(watch));
+    }
     if (input.action === 'remind' || input.action === 'update') {
       const updating = input.action === 'update';
       const existing = updating ? this.watches.find(w => w.id === input.id && visible(w)) : undefined;
-      if (updating && (!existing?.timer || existing.notification || existing.state !== 'waiting' || existing.delivery)) {
+      if (updating && (!existing?.timer || existing.timer.review || existing.notification || existing.state !== 'waiting' || existing.delivery)) {
         throw new PublicError('Only a waiting reminder without an unfinished delivery can be updated. Use its id and a complete reminder specification.');
       }
       const now = Date.now();
@@ -239,7 +257,6 @@ export class BackgroundTasks {
         due === null || !Number.isFinite(due) || due <= now || due > now + MAX_REMINDER_MINUTES * 60_000) {
         throw new PublicError('Use remind (or update with id) with label, message (up to 4000 characters), deliver (agent or room), and either delay_minutes (1–86400), at (ISO 8601 with offset, within 60 days), or a valid schedule. Interval schedules need exactly one of interval_minutes (1–86400) or interval_seconds (1–5184000), optional future start_at and count. Calendar schedules need time and timezone; an interval series needs count or end_time.');
       }
-      if (!updating && this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length >= 100) throw new PublicError('Too many active background watches. Cancel an unused watch first.');
       const timer: Watch = { ...(existing ?? target), id: existing?.id ?? randomUUID(), workspace: this.workspace, label: input.label, file: '', field: '', terminal: [],
         expires: due, state: 'waiting', timer: { message: input.message, deliver: input.deliver as 'agent' | 'room', ...(recurring && { schedule: schedule as ReminderSchedule }) } };
       delete timer.result;
@@ -264,7 +281,6 @@ export class BackgroundTasks {
       const duplicate = this.watches.find(w => visible(w) &&
         !w.timer && (w.state === 'waiting' || !!w.delivery) && w.conditions && conditionKey(w.conditions) === conditionKey(conditions));
       if (duplicate) return JSON.stringify({ ...describe(duplicate), alreadyWatching: true });
-      if (this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length >= 100) throw new PublicError('Too many active background watches. Cancel an unused watch first.');
       const watch: Watch = { ...target, id: randomUUID(), workspace: this.workspace, label: input.label,
         file: '', field: '', terminal: [], conditions, state: 'waiting',
         expires: Date.now() + ((input.timeout_hours as number | undefined) ?? 24) * 3600000 };
@@ -291,7 +307,6 @@ export class BackgroundTasks {
       }
       return JSON.stringify({ id: duplicate.id, state: duplicate.state, expires: new Date(duplicate.expires).toISOString(), alreadyWatching: true });
     }
-    if (this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length >= 100) throw new PublicError('Too many active background watches. Cancel an unused watch first.');
     const watch: Watch = { ...target, id: randomUUID(), workspace: this.workspace, label: input.label, file, field: input.field,
       terminal: input.terminal as string[], expires: Date.now() + ((input.timeout_hours as number | undefined) ?? 24) * 3_600_000, state: 'waiting',
       ...(input.pid !== undefined && { pid: input.pid as number }),
@@ -302,6 +317,9 @@ export class BackgroundTasks {
   // Keeps every active watch or timer and the latest finished ones, within the
   // 200 entries the loader accepts.
   private register(watch: Watch, existing?: Watch) {
+    if (!existing && this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).length >= 100) {
+      throw new PublicError('Too many active background watches. Cancel an unused watch first.');
+    }
     const retained = this.watches.filter(w => w.state === 'waiting' || w.state === 'dispatching' || !!w.delivery).concat(
       this.watches.filter(w => w.state !== 'waiting' && w.state !== 'dispatching' && !w.delivery).slice(-99));
     const watches = existing ? retained.map(w => w === existing ? watch : w) : [...retained, watch];
@@ -350,7 +368,7 @@ export class BackgroundTasks {
     const page = items.slice().reverse().slice(start, start + 20);
     if (!page.length) return 'No tasks on this page.';
     const lines = page.map(w => {
-      const kind = w.timer ? w.timer.schedule ? 'recurring reminder' : 'reminder' : 'watch';
+      const kind = w.timer?.review ? 'Astra bug search' : w.timer ? w.timer.schedule ? 'recurring reminder' : 'reminder' : 'watch';
       const timing = w.timer?.exhausted ? 'No future occurrences.' : `${w.timer ? 'Due' : 'Expires'}: ${new Date(w.expires).toISOString()}`;
       const last = w.timer?.lastRun;
       const schedule = w.timer?.schedule;
@@ -358,6 +376,7 @@ export class BackgroundTasks {
         (schedule ? `\nSchedule: ${scheduleDescription(schedule)}` +
           (remainingOccurrences(schedule, w.expires, w.timer?.exhausted) !== undefined
             ? `\nRemaining scheduled occurrences${schedule.frequency === 'interval' ? '' : ' in this series'}: ${remainingOccurrences(schedule, w.expires, w.timer?.exhausted)}` : '') : '') +
+        (w.timer?.review ? `\nReview progress: ${w.timer.review.cursor}/${w.timer.review.units.length}; skipped: ${w.timer.review.skipped.length}` : '') +
         (last ? `\nLast delivery: ${last.state} (${new Date(last.due).toISOString()})` : '') +
         (w.last_error ? `\nLast error: ${w.last_error}` : '') +
         (!w.timer && short(w.result, 80) ? `\nObserved status: ${w.result}` : '');
@@ -371,7 +390,7 @@ export class BackgroundTasks {
     valid: (target: BackgroundTarget) => boolean;
     // `ready` must be checked synchronously right before `admitted`: a watch may
     // be cancelled, reset or revoked while room access is being checked.
-    deliver: (target: BackgroundTarget, event: MatrixEvent, admitted: () => void, ready: () => boolean, completed: (cancelled?: boolean) => void) => Promise<boolean>;
+    deliver: (target: BackgroundTarget, event: MatrixEvent, admitted: () => void, ready: () => boolean, completed: BackgroundCompletion) => Promise<boolean>;
     // Sends a due room timer's message as the bot in its conversation.
     post?: (target: BackgroundTarget, text: string, admitted: () => void, ready: () => boolean) => Promise<boolean>;
     report: (error: unknown) => void;
@@ -481,11 +500,18 @@ export class BackgroundTasks {
       content: { msgtype: 'm.text', [NOTICE]: snapshot.notice,
         body: (previous && previous.attempts > 0 ? 'Connector recovery after restart: the previous notification turn did not finish successfully. It may have performed actions or sent replies already. Inspect existing results before continuing; do not blindly repeat external actions or reuse expired confirmations. Original notification follows:\n\n' : '') + snapshot.body,
         ...(watch.thread && { 'm.relates_to': { rel_type: 'm.thread', event_id: watch.thread } }) } };
-    const completed = (cancelled = false) => {
+    const completed: BackgroundCompletion = (cancelled = false, failure) => {
       if (watch.delivery?.id !== snapshot.id || watch.state === 'cancelled') return;
+      const review = watch.timer?.review;
+      if (failure && !review) return;
+      if (review && !cancelled) {
+        if (failure) review.skipped.push(review.cursor);
+        review.cursor++;
+        if (review.cursor === review.units.length) watch.timer!.exhausted = true;
+      }
       delete watch.delivery;
       if (watch.last_error_stage === 'delivery') { delete watch.last_error; delete watch.last_error_at; delete watch.last_error_stage; }
-      if (watch.timer?.lastRun) watch.timer.lastRun.state = cancelled ? 'cancelled' : 'delivered';
+      if (watch.timer?.lastRun) watch.timer.lastRun.state = cancelled ? 'cancelled' : failure ? 'skipped' : 'delivered';
       if (!cancelled) this.skipElapsed(watch, Date.now());
       watch.state = cancelled ? 'cancelled' : hasFuture(watch) ? 'waiting' : 'delivered';
       this.saveCompletion();
@@ -537,7 +563,7 @@ export class BackgroundTasks {
     const due = timer.expires;
     const eligible = () => !schedule || occurrenceInWindow(schedule, due, Math.max(now, Date.now()));
     const lateMinutes = Math.floor((now - due) / 60_000);
-    const message = timer.timer!.message + (lateMinutes >= 2
+    const message = (timer.timer!.review ? reviewMessage(timer.timer!.review) : timer.timer!.message) + (lateMinutes >= 2
       ? `\n\n(Scheduled for ${new Date(due).toISOString()}; delivered ${lateMinutes} minutes late.)` : '');
     const admitOccurrence = () => {
       timer.result = 'due';

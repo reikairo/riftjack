@@ -17,7 +17,7 @@ import type { Config } from './config.js';
 import type { Backend, Steer } from './bridge.js';
 import type { State } from './state.js';
 import { PublicError } from './accounts.js';
-import { OwnerDiagnosticError } from './errors.js';
+import { CodexCyberPolicyError, OwnerDiagnosticError } from './errors.js';
 import { mediaInstructions, outboxDirectory, parseMediaReply, type IncomingAttachment } from './media.js';
 import { AppServer, RpcError, type AgentMessage, type CodexInput, type Turn } from './app-server.js';
 import { codexNetworkConfig } from './codex-network.js';
@@ -248,13 +248,12 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       signal.throwIfAborted();
       if (completed.status !== 'completed') {
         // Classify only structured, known codes. Server messages/details may contain sensitive data.
-        const message = completed.status === 'interrupted' ? 'Codex task was interrupted.'
-          : completed.status === 'failed' && completed.error?.codexErrorInfo === 'cyberPolicy'
-            ? 'Codex stopped this task because its safety filter flagged a possible cybersecurity risk (cyberPolicy).'
-            : 'Codex task failed.';
         const details = [completed.error?.message, completed.error?.additionalDetails]
           .filter((value): value is string => typeof value === 'string').join('\n\n');
-        throw new OwnerDiagnosticError(message, details);
+        if (completed.status === 'failed' && completed.error?.codexErrorInfo === 'cyberPolicy') {
+          throw new CodexCyberPolicyError('Codex stopped this task because its safety filter flagged a possible cybersecurity risk (cyberPolicy).', details);
+        }
+        throw new OwnerDiagnosticError(completed.status === 'interrupted' ? 'Codex task was interrupted.' : 'Codex task failed.', details);
       }
       for (const item of completed.items || []) if (item.type === 'agentMessage') current.messages.set(item.id, item);
       const messages = [...current.messages.values()].filter(item => item.phase !== 'commentary');

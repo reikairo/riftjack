@@ -5,6 +5,12 @@ the running Git revision, so a later release cannot change an older notice.
 The revision comparison in an update notice shows the exact committed changes
 between the previous successful startup and the current one, including rollbacks.
 
+## Astra bug search timers
+
+- A one-second review timer can work through a pass one file or line range at
+  a time. If Codex reports a policy stop, Riftjack records the skipped location
+  and schedules the next independent fragment of the same pass. [Usage](background-watches.md#astra-bug-search)
+
 ## Typing indicator timeouts
 
 - A single typing update timeout is recorded in the host journal. The owner
