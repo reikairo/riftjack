@@ -109,6 +109,7 @@ account, model or organization restrictions may prevent auto mode from starting.
 | `DATA_DIR` | Local directory path for instance state | `./data` |
 | `TASK_TIMEOUT_SECONDS` | 1–86400 seconds, representable as whole milliseconds; includes confirmation waits | `86400` |
 | `TURN_COMPLETION_REACTIONS` | `true`, `false` | `true` |
+| `OWNER_DIAGNOSTIC_SUMMARIES` | `true`, `false` | `true`. Set `false` to keep aggregated background error reports in the host logs. Task reports, audio configuration warnings, and restart notices use their own delivery paths. |
 | `MAX_MEDIA_BYTES` | Integer 1–536870912 bytes | `536870912` (512 MiB) |
 | `MEDIA_UPLOAD_TIMEOUT_SECONDS` | 1–86400 seconds, representable as whole milliseconds | `1800` |
 | `WORKER_PORT` | Integer `0` (disabled), or listening port 1–65535, e.g. `8788`; loopback only | `0` |
