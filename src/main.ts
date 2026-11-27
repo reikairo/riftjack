@@ -189,7 +189,9 @@ async function main() {
   let creating = false;
   let starting = true;
   const diagnosticDelivery = new DiagnosticDelivery();
-  configureOwnerDiagnostics((error, context) => diagnosticDelivery.record(error, context));
+  if (config.ownerDiagnosticNotices) {
+    configureOwnerDiagnostics((error, context) => diagnosticDelivery.record(error, context));
+  }
   const diagnosticTimer = setInterval(() => {
     if (stopping || starting) return;
     void diagnosticDelivery.flush(async report => {
