@@ -189,7 +189,7 @@ async function main() {
   let creating = false;
   let starting = true;
   const diagnosticDelivery = new DiagnosticDelivery();
-  if (config.ownerDiagnosticNotices) {
+  if (config.ownerDiagnosticSummaries) {
     configureOwnerDiagnostics((error, context) => diagnosticDelivery.record(error, context));
   }
   const diagnosticTimer = setInterval(() => {

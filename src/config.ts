@@ -48,8 +48,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (claudeReasoningEffort && !['low', 'medium', 'high', 'xhigh', 'max'].includes(claudeReasoningEffort)) throw new Error('CLAUDE_REASONING_EFFORT must be low, medium, high, xhigh, max or blank.');
   const claudeServiceTier = env.CLAUDE_SERVICE_TIER?.trim() || undefined;
   if (claudeServiceTier && !['default', 'fast'].includes(claudeServiceTier)) throw new Error('CLAUDE_SERVICE_TIER must be default, fast or blank.');
-  const ownerDiagnosticNotices = env.OWNER_DIAGNOSTIC_NOTICES?.trim() || 'true';
-  if (!['true', 'false'].includes(ownerDiagnosticNotices)) throw new Error('OWNER_DIAGNOSTIC_NOTICES must be true or false.');
+  const ownerDiagnosticSummaries = env.OWNER_DIAGNOSTIC_SUMMARIES?.trim() || 'true';
+  if (!['true', 'false'].includes(ownerDiagnosticSummaries)) throw new Error('OWNER_DIAGNOSTIC_SUMMARIES must be true or false.');
   const turnCompletionReactions = env.TURN_COMPLETION_REACTIONS?.trim() || 'true';
   if (!['true', 'false'].includes(turnCompletionReactions)) throw new Error('TURN_COMPLETION_REACTIONS must be true or false.');
   const timeoutMs = Number(env.TASK_TIMEOUT_SECONDS || '86400') * 1000;
@@ -104,7 +104,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     dataDir: resolve(env.DATA_DIR || './data'),
     timeoutMs,
     turnCompletionReactions: turnCompletionReactions === 'true',
-    ownerDiagnosticNotices: ownerDiagnosticNotices === 'true',
+    ownerDiagnosticSummaries: ownerDiagnosticSummaries === 'true',
     maxMediaBytes,
     mediaUploadTimeoutMs,
     fetch: loadFetchConfig(env, workspace),

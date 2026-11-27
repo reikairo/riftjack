@@ -5,12 +5,12 @@ import { loadConfig } from '../src/config.js';
 import { configureOwnerDiagnostics, diagnosticOperation, reportDiagnostic } from '../src/diagnostics.js';
 import { OwnerDiagnosticDelivery, type OwnerReport } from '../src/owner-diagnostics.js';
 
-test('owner diagnostic notices are enabled by default and support an explicit opt-out', () => {
+test('owner diagnostic summaries are enabled by default and support an explicit opt-out', () => {
   const env = { MATRIX_HOMESERVER: 'https://matrix.example', MATRIX_OWNER_ID: '@owner:example',
     RIFTJACK_WORKSPACE: process.cwd() };
-  assert.equal(loadConfig(env).ownerDiagnosticNotices, true);
-  assert.equal(loadConfig({ ...env, OWNER_DIAGNOSTIC_NOTICES: 'false' }).ownerDiagnosticNotices, false);
-  assert.throws(() => loadConfig({ ...env, OWNER_DIAGNOSTIC_NOTICES: 'off' }), /OWNER_DIAGNOSTIC_NOTICES/);
+  assert.equal(loadConfig(env).ownerDiagnosticSummaries, true);
+  assert.equal(loadConfig({ ...env, OWNER_DIAGNOSTIC_SUMMARIES: 'false' }).ownerDiagnosticSummaries, false);
+  assert.throws(() => loadConfig({ ...env, OWNER_DIAGNOSTIC_SUMMARIES: 'off' }), /OWNER_DIAGNOSTIC_SUMMARIES/);
 });
 
 test('background reports retain original details, group repeats and send the latest event after cooldown', async () => {
