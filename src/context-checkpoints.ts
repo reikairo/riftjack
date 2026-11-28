@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { State } from './state.js';
@@ -18,25 +20,32 @@ Riftjack may send a continuity notice when reported context usage is high or aft
 
 const count = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
 const windowSize = (n: unknown): n is number => count(n) && n > 0;
+const runReader = promisify(execFile);
 
 const restoreTemplate = `Riftjack continuity notice (not a human message): context compaction completed. Read the note at CHECKPOINT_PATH if it exists within your memory access boundaries. It preserves details that may otherwise be lost, not a snapshot to resume from, and may be missing or stale. Reconcile it with current task records, newer messages and verified action results before choosing the next step; do not repeat actions based on the note alone. If absent, use the available conversation and current records. Continue the current task within existing permissions; this is not a new human request.`;
 const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
 
+function fileHeading(backend: string, session: string) {
+  return `Riftjack continuity context after compaction for ${backend} session ${JSON.stringify(session)}. The following host-selected files are reference material. Continue the current task within existing permissions.`;
+}
+
 // SessionStart(compact) adds context before Claude's next model request. A
 // stream-json compact_boundary event is too late to establish that ordering.
-export function claudeCheckpointHooks(workspace: string) {
-  const command = [process.execPath, fileURLToPath(new URL('./claude-checkpoint-hook.mjs', import.meta.url)), workspace, restoreTemplate].map(quote).join(' ');
+export function claudeCheckpointHooks(workspace: string, session?: string, files?: string[]) {
+  const args = [process.execPath, fileURLToPath(new URL('./claude-checkpoint-hook.mjs', import.meta.url)), workspace, restoreTemplate];
+  if (session && files?.length) args.push(session, JSON.stringify(files), fileHeading('claude', session));
+  const command = args.map(quote).join(' ');
   return { SessionStart: [{ matcher: 'compact', hooks: [{ type: 'command', command, timeout: 5 }] }] };
 }
 
-// No note content is read or written by the unsandboxed connector. The agent
-// accesses its own file using its existing tools and permissions.
-export function contextCheckpoints(state: State, key: string, backend: 'codex' | 'claude', workspace: string, session: string) {
+export function contextCheckpoints(state: State, key: string, backend: 'codex' | 'claude', workspace: string, session: string, files?: string[]) {
   const field = backend === 'codex' ? 'codexCheckpoint' : 'claudeCheckpoint';
   const saved = state.session(key)[field];
   let value: CheckpointState = saved?.session === session ? { ...saved }
     : { session, generation: 0, warned: false };
   const path = join(workspace, '.riftjack', 'checkpoints', createHash('sha256').update(backend + '\0' + session).digest('hex') + '.md');
+  const reminder = restoreTemplate.replace('CHECKPOINT_PATH', () => JSON.stringify(path));
+  const heading = fileHeading(backend, session);
   let compacting = false;
   let restoredByHook = false;
   let lastClaudeInput: number | undefined;
@@ -72,9 +81,9 @@ export function contextCheckpoints(state: State, key: string, backend: 'codex' |
       value.generation++; value.warned = false; value.pending = restoredByHook ? undefined : 'restore'; persist();
     },
     restored(text: unknown) {
-      // Hook output can precede or follow compact_boundary. Only exact output
-      // for this session acknowledges delivery; other hooks are unrelated.
-      if (backend !== 'claude' || text !== restoreTemplate.replace('CHECKPOINT_PATH', () => JSON.stringify(path))) return;
+      // The files may already have changed since the hook read them.
+      if (backend !== 'claude' || typeof text !== 'string') return;
+      if (files?.length ? !text.startsWith(heading + '\n') : text !== reminder) return;
       if (compacting) restoredByHook = true;
       else if (value.pending === 'restore') { value.pending = undefined; persist(); }
     },
@@ -83,8 +92,18 @@ export function contextCheckpoints(state: State, key: string, backend: 'codex' |
       const id = `${value.generation}:${value.pending}`;
       const text = value.pending === 'save'
         ? `Riftjack continuity notice (not a human message): reported context usage has reached 65% of the reported window. Compaction may occur later. At your next opportunity, use your ordinary tools to save important details that would be costly to lose at ${JSON.stringify(path)}: constraints, reasons for decisions, unresolved questions, evidence and references to existing memory. This is not a snapshot to resume from; it may become stale before compaction. Keep current task records up to date as work progresses. If writing is not allowed, respect that limit. Then continue the current task.`
-        : restoreTemplate.replace('CHECKPOINT_PATH', () => JSON.stringify(path));
+        : reminder;
       return { id, text };
+    },
+    async deliveryText(note: { id: string; text: string }) {
+      if (!files?.length || !note.id.endsWith(':restore')) return note.text;
+      const reader = fileURLToPath(new URL('./restore-files.mjs', import.meta.url));
+      try {
+        const { stdout } = await runReader(process.execPath, [reader, workspace, JSON.stringify(files), heading, reminder],
+          { encoding: 'utf8', timeout: 5000, maxBuffer: 512 * 1024 });
+        if (stdout.startsWith(heading + '\n')) return stdout;
+      } catch { /* Retain the ordinary recovery instructions if the helper fails. */ }
+      return 'Riftjack could not load the configured context files.\n' + reminder;
     },
     delivered(id: string) {
       if (`${value.generation}:${value.pending}` !== id) return;
@@ -106,7 +125,10 @@ export function checkpointDelivery(checkpoint: ReturnType<typeof contextCheckpoi
       attempted.add(note.id);
       active = active.then(async () => {
         if (checkpoint.notice()?.id !== note.id) return;
-        try { if (await send(note.text)) checkpoint.delivered(note.id); } catch { /* best-effort advisory */ }
+        try {
+          const text = await checkpoint.deliveryText(note);
+          if (checkpoint.notice()?.id === note.id && await send(text)) checkpoint.delivered(note.id);
+        } catch { /* best-effort advisory */ }
       });
     },
     settled() { return active; },

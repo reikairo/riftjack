@@ -212,7 +212,7 @@ export function createCodexBackend(configuration: Config | (() => Config), state
       if (saved && thread.thread.id !== saved) throw new PublicError('Codex resumed a different session. The saved history was not replaced.');
       current.threadId = thread.thread.id;
       state.update(key, { codex: current.threadId, codexReport: engineReport(thread) });
-      checkpoint = contextCheckpoints(state, key, 'codex', config.workspace, current.threadId);
+      checkpoint = contextCheckpoints(state, key, 'codex', config.workspace, current.threadId, config.compactionFiles?.['codex:' + current.threadId]);
       checkpointSender = checkpointDelivery(checkpoint, async text => {
         if (current.ended || signal.aborted || !current.turnId) return false;
         const result = await server.request<{ turnId: string }>('turn/steer', {
@@ -232,8 +232,9 @@ export function createCodexBackend(configuration: Config | (() => Config), state
         signal.throwIfAborted();
       }
       const initialCheckpoint = checkpoint.notice();
+      const restoreInput = initialCheckpoint ? '\n\n' + await checkpoint.deliveryText(initialCheckpoint) : '';
       const started = await server.request<{ turn: Turn }>('turn/start', {
-        threadId: current.threadId, input: input(prompt + (initialCheckpoint ? '\n\n' + initialCheckpoint.text : ''), attachments),
+        threadId: current.threadId, input: input(prompt + restoreInput, attachments),
         // Explicit settings also override values persisted in resumed threads.
         model: config.codexModel, effort: config.codexReasoningEffort, serviceTier: config.codexServiceTier,
         approvalsReviewer: reviewer,

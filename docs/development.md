@@ -127,10 +127,12 @@ messages and verified action results, and then choose the next step. A note
 alone is not a reason to repeat an action. If it is absent, the agent uses the
 available conversation and current records. Claude uses a synchronous
 `SessionStart` hook matching `compact`: its `additionalContext` reaches the
-first model request after compaction. The hook only constructs the note path;
-it does not read memory files or grant permissions. Memory references belong
-in the agent's note, not in connector code. The helper is included in code
-snapshots and runs with the same Node executable as the connector.
+first model request after compaction. By default the hook constructs the note
+path. With [host-selected files](configuration.md#files-in-the-context-after-compaction),
+the adapters deliver the complete configured set in place of this reminder.
+The file reader runs in a separate Node process (the hook itself for Claude)
+and reads fresh content on each delivery. Pending state stores the session
+and notice metadata only. The helper is included in code snapshots.
 
 An observed start/completion pair also records a pending restore reminder.
 On CLIs advertising `--include-hook-events`, Riftjack requests hook events;

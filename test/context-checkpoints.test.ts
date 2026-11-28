@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { linkSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { State } from '../src/state.js';
 import { contextCheckpoints, checkpointDelivery, claudeCheckpointHooks } from '../src/context-checkpoints.js';
+import { compactionFiles } from '../src/compaction-files.js';
 
 test('Claude compact hook emits the matching session note without reading files or interpreting paths as shell code', t => {
   const f = setup(t);
@@ -38,6 +39,73 @@ function setup(t: { after(fn: () => void): void }) {
   const state = new State(file);
   return { dir, file, state, checkpoint: contextCheckpoints(state, 'key', 'codex', dir, 'session') };
 }
+
+test('host file selections require a backend and an exact session with relative paths', () => {
+  assert.deepEqual(compactionFiles(''), {});
+  const rules = { 'codex:session': ['notes/identity.md'], 'claude:session': ['brief.md'] };
+  assert.deepEqual(compactionFiles(JSON.stringify(rules)), rules);
+  for (const setting of ['{', 'null', '[]', '{"codex:*":["notes"]}', '{"session":["notes"]}',
+    ...['', '/other', '../other', 'dir/../other', 'dir\\other', 'a\nb'].map(file => JSON.stringify({ 'codex:session': [file] }))]) {
+    assert.throws(() => compactionFiles(setting), /RIFTJACK_COMPACTION_FILES/);
+  }
+});
+
+test('active delivery and a resumed pending restore read whole current files in order', async t => {
+  const f = setup(t), workspace = realpathSync(f.dir), files = ['one.md', "two's notes.md"];
+  const first = '  first\r\nline\n', second = '日本語\n\nlast';
+  writeFileSync(join(workspace, files[0]), first);
+  writeFileSync(join(workspace, files[1]), second);
+  const c = contextCheckpoints(f.state, 'key', 'codex', workspace, 'session', files);
+  c.usage(65, 100); assert.doesNotMatch(await c.deliveryText(c.notice()!), /日本語/);
+  c.start(); c.complete();
+  let sent = '';
+  const live = checkpointDelivery(c, async text => { sent = text; return false; });
+  live.flush(); await live.settled();
+  assert.ok(sent.includes(first) && sent.endsWith(second) && sent.indexOf(first) < sent.indexOf(second));
+  assert.doesNotMatch(sent, /Read the note at/);
+  writeFileSync(join(workspace, files[0]), 'new contents');
+  const resumed = contextCheckpoints(new State(f.file), 'key', 'codex', workspace, 'session', files);
+  assert.match(await resumed.deliveryText(resumed.notice()!), /new contents/);
+});
+
+test('unreadable, linked, oversized or non-text files fall back without sending a partial set', async t => {
+  const f = setup(t), workspace = realpathSync(f.dir);
+  writeFileSync(join(workspace, 'first'), 'private first file');
+  writeFileSync(join(workspace, 'large'), Buffer.alloc(256 * 1024, 97));
+  writeFileSync(join(workspace, 'invalid'), Buffer.from([0xff]));
+  symlinkSync('first', join(workspace, 'link'));
+  writeFileSync(join(workspace, 'other'), 'other content');
+  linkSync(join(workspace, 'other'), join(workspace, 'hard-link'));
+  symlinkSync(workspace, join(workspace, 'linked-parent'));
+  for (const file of ['missing', 'link', 'hard-link', 'linked-parent/first', 'invalid', 'large']) {
+    const c = contextCheckpoints(f.state, 'key', 'codex', workspace, 'session', ['first', file]);
+    c.start(); c.complete();
+    const text = await c.deliveryText(c.notice()!);
+    assert.match(text, /Could not include the complete file set/);
+    assert.match(text, /Read the note at/);
+    assert.doesNotMatch(text, /private first file/);
+  }
+});
+
+test('Claude compact hook injects only for the selected session and acknowledges the delivered version', t => {
+  const f = setup(t), workspace = realpathSync(f.dir), files = ["notes ' $HOME.md"];
+  writeFileSync(join(workspace, files[0]), 'selected content');
+  const command = claudeCheckpointHooks(workspace, 'session', files).SessionStart[0].hooks[0].command;
+  const run = (session_id: string) => {
+    const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8',
+      input: JSON.stringify({ hook_event_name: 'SessionStart', source: 'compact', session_id }) });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
+  };
+  const other = run('other');
+  assert.doesNotMatch(other, /selected content/);
+  const injected = run('session');
+  assert.ok(injected.endsWith('selected content'));
+  writeFileSync(join(workspace, files[0]), 'new content');
+  const c = contextCheckpoints(f.state, 'hook', 'claude', workspace, 'session', files);
+  c.start(); c.complete(); c.restored(other); assert.ok(c.notice());
+  c.restored(injected); assert.equal(c.notice(), undefined);
+});
 
 test('warn once per window, preserve pending across restart and isolate session/backend', t => {
   const f = setup(t), c = f.checkpoint;

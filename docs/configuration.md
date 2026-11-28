@@ -11,6 +11,29 @@ instead apply on the next task, without restarting. Their precedence is: bot
 override, shared host value, then CLI configuration/default. Resetting an override
 restores inheritance; it does not reset conversation history.
 
+## Files in the context after compaction
+
+`RIFTJACK_COMPACTION_FILES` accepts a JSON object in the instance environment.
+For example, replace the placeholders with the actual engine session IDs:
+
+```dotenv
+RIFTJACK_COMPACTION_FILES='{"codex:THREAD_ID":["notes/profile.md","notes/current.md"],"claude:SESSION_ID":["project/brief.md"]}'
+```
+
+Each key selects one existing conversation by backend and session ID. A reset
+creates a new ID. Blank, omitted and unlisted sessions use the usual reminder.
+List 1–32 regular UTF-8 files relative to the bot workspace, in reading order.
+Use ordinary files without symlinks, hard links, absolute paths or parent traversal. The
+combined limit is 256 KiB per delivery. The connector reads the current files
+after compaction and sends their full text to the selected model. Choose files
+appropriate for everyone with access to that conversation and its history.
+If the complete set cannot be read, the model receives a failure notice and
+the ordinary checkpoint instructions. Earlier usage warnings still work.
+
+Claude supplies the text in its compact hook. Codex steers it into the active
+turn and may already have started its first continuation. See the
+[delivery details](development.md#continuity-notes).
+
 ## Models, reasoning effort and service tiers
 
 In the manager DM:

@@ -1,4 +1,5 @@
 import { loadDrawioConfig } from './drawio.js';
+import { compactionFiles } from './compaction-files.js';
 import { realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { loadTunnelConfig } from './ssh-tunnel.js';
@@ -71,6 +72,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   }
   return {
     workerPort,
+    compactionFiles: compactionFiles(env.RIFTJACK_COMPACTION_FILES),
     workerInitiativeIntervalMs,
     githubSubscriptionsFile: env.GITHUB_SUBSCRIPTIONS_CONFIG?.trim() || undefined,
     homeserver: homeserver.toString().replace(/\/$/, ''),

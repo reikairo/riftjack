@@ -203,7 +203,7 @@ export function claudeArguments(config: Config, session?: string, interactive = 
   const tools = readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
   const settings = {
     ...(config.claudeServiceTier !== undefined && { fastMode: config.claudeServiceTier === 'fast' }),
-    hooks: claudeCheckpointHooks(config.workspace),
+    hooks: claudeCheckpointHooks(config.workspace, session, config.compactionFiles?.['claude:' + session]),
     // Sandboxed Bash skips this blanket ask rule in auto-allow mode. Outside the
     // sandbox it takes precedence over saved allow rules, including exclusions.
     // In auto mode Claude's classifier reviews eligible calls. Keep user and
@@ -282,10 +282,12 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
     const outbox = await outboxDirectory(config.workspace, 'claude:' + key);
     const savedSession = state.session(key).claude;
     let currentReport: EngineReport | undefined;
-    let checkpoint = savedSession ? contextCheckpoints(state, key, 'claude', config.workspace, savedSession) : undefined;
+    const sessionCheckpoint = (id: string) => contextCheckpoints(state, key, 'claude', config.workspace, id, config.compactionFiles?.['claude:' + id]);
+    let checkpoint = savedSession ? sessionCheckpoint(savedSession) : undefined;
     let checkpointSender: ReturnType<typeof checkpointDelivery> | undefined;
     const initialCheckpoint = checkpoint?.notice();
-    const input = await claudeInput(prompt + (initialCheckpoint ? '\n\n' + initialCheckpoint.text : ''), attachments, config);
+    const restoreInput = checkpoint && initialCheckpoint ? '\n\n' + await checkpoint.deliveryText(initialCheckpoint) : '';
+    const input = await claudeInput(prompt + restoreInput, attachments, config);
     // An update is confirmed only when Claude echoes its UUID. Without the echo,
     // delivery is uncertain: it is never resent automatically.
     const updates = new Map<string, { resolve: (accepted: boolean) => void; reject: (error: unknown) => void }>();
@@ -368,7 +370,7 @@ export function createClaudeBackend(configuration: Config | (() => Config), stat
           sessionId = message.session_id;
           state.update(key, { claude: sessionId });
           if (!checkpoint) {
-            checkpoint = contextCheckpoints(state, key, 'claude', config.workspace, message.session_id);
+            checkpoint = sessionCheckpoint(message.session_id);
             checkpointSender = checkpointDelivery(checkpoint, text => steerHere(text, [], signal));
           }
         }
