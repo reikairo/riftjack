@@ -103,7 +103,13 @@ After identity verification and when context has been replaced:
    them with newer messages, task records and verified effects before acting.
 6. Save changed task state as work progresses. Completing a task removes it
    from focus/deferred lists and adds evidence or cancellation to history.
+7. Write notes for a reader without the prior conversation. Keep their meaning,
+   conditions and limits explicit. Retrieve sources for an ambiguous old note;
+   do not turn an interpretation you guessed into an established fact.
 ```
+
+Apply the [readability check](memory.md#write-for-a-reader-who-has-lost-the-conversation)
+when shortening any part of the memory, including the recovery contract itself.
 
 An instruction to read is not proof of reading. A compaction summary, retained
 messages and connector notice may arrive without the memory contents. Inspect

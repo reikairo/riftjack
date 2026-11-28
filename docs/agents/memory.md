@@ -15,6 +15,42 @@ long publication histories in details, with links that remain usable.
 If recovery reading itself noticeably brings the next compaction closer, move
 chronology into details rather than skipping required files or application limits.
 
+## Write for a reader who has lost the conversation
+
+Every note, rule, task entry and checkpoint must be understandable after the
+surrounding conversation has disappeared from context. Use plain language and
+complete statements. Do not turn memory into private shorthand: unexplained
+abbreviations, joined-up identifiers, cryptic status strings, or references such
+as “same as before” and “the other one.” Stable IDs and technical terms are useful
+when their meaning and the relevant record are clear.
+
+For an actionable entry, state the situation, the action, its scope and limits,
+and the evidence or detail link needed to interpret it. Name the actor and object
+when they would otherwise be ambiguous. Separate an observation, a proposed next
+step and permission to act. A short entry need not repeat its full history, but
+must tell the reader when and where to retrieve a missing detail.
+
+For example, `T001 CIok abc123 wait owner noauto` leaves the reader guessing.
+A usable entry says: “T001: checks passed for commit abc123 in the demo project.
+The pull request remains open. Wait for the owner's merge decision; passing
+checks do not authorize a merge. Evidence and review scope: tasks/T001.md.”
+
+Ambiguous compression can degrade the memory over successive recoveries: a
+reader guesses at a missing condition, saves that guess as a rule, and the next
+reader treats it as established fact. Original records and links help detect
+this drift, but a smaller file or preserved ID count does not prove that meaning
+survived. Shorten by removing repetition and moving chronology into details,
+not by deleting the words that explain the decision.
+
+Before saving a shortened entry, read it without relying on the conversation.
+Can a reader recover the same action, trigger, exceptions, permission boundary
+and uncertainty from the entry and its explicit links? Compare these meanings
+with the original. If understanding requires a guess, rewrite the entry. On
+recovery, retrieve the source or ask for clarification when a material ambiguity
+remains; do not silently promote a guess into a fact. An independent reading
+within the authorized privacy scope can help, but successful behavior after a
+real context loss still needs observation.
+
 ## Decisions and lessons
 
 A decision says what was chosen and why. A lesson says what to do or check in a
